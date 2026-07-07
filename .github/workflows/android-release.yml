@@ -1,0 +1,84 @@
+# Signed Android release — runs when you push a version tag:
+#
+#   git tag v1.0.0 && git push origin v1.0.0
+#
+# Builds a release-signed APK and attaches it to a GitHub Release for that
+# tag. Requires two repository secrets (Settings → Secrets and variables →
+# Actions → Secrets):
+#
+#   TOMSENSE_KEYSTORE_B64        base64 of the release keystore (.jks)
+#   TOMSENSE_KEYSTORE_PASSWORD   its store/key password
+#
+# The keystore is your app's signing identity — Android only allows updates
+# signed with the same key, so BACK IT UP. Generate one with:
+#   keytool -genkeypair -keystore tomsense-release.jks -alias tomsense \
+#     -keyalg RSA -keysize 4096 -validity 10950
+name: Android Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write   # create the GitHub Release + upload the APK asset
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require signing secrets
+        run: |
+          if [ -z "${{ secrets.TOMSENSE_KEYSTORE_B64 }}" ] || [ -z "${{ secrets.TOMSENSE_KEYSTORE_PASSWORD }}" ]; then
+            echo "::error::TOMSENSE_KEYSTORE_B64 / TOMSENSE_KEYSTORE_PASSWORD secrets are not set — refusing to publish an unsigned release."
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'   # kotlinOptions.jvmTarget = 21
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Build web assets
+        run: npm run build
+
+      # The instance URL is a runtime setting (first-run prompt / Settings →
+      # App); TOMSENSE_SERVER_URL only pre-bakes a default when set.
+      - name: Capacitor sync
+        env:
+          TOMSENSE_SERVER_URL: ${{ vars.TOMSENSE_SERVER_URL }}
+        run: npx cap sync android
+
+      - name: Decode keystore
+        run: echo "${{ secrets.TOMSENSE_KEYSTORE_B64 }}" | base64 -d > "$RUNNER_TEMP/release.jks"
+
+      - name: Build signed release APK
+        working-directory: frontend/android
+        env:
+          TOMSENSE_KEYSTORE_FILE: ${{ runner.temp }}/release.jks
+          TOMSENSE_KEYSTORE_PASSWORD: ${{ secrets.TOMSENSE_KEYSTORE_PASSWORD }}
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Name the artifact
+        working-directory: frontend/android
+        run: cp app/build/outputs/apk/release/app-release.apk "TomSense-${{ github.ref_name }}.apk"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: frontend/android/TomSense-${{ github.ref_name }}.apk
+          generate_release_notes: true

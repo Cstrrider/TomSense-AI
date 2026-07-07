@@ -1,6 +1,37 @@
 apply plugin: 'com.android.application'
 apply plugin: 'kotlin-android'
 
+// Release signing — resolved from (first match wins):
+//   1. env vars: TOMSENSE_KEYSTORE_FILE + TOMSENSE_KEYSTORE_PASSWORD
+//      (+ optional TOMSENSE_KEY_ALIAS / TOMSENSE_KEY_PASSWORD) — used by CI
+//   2. <repo>/signing/keystore.properties next to the .jks — local release
+//      builds (the signing/ dir is gitignored)
+// Neither present → assembleRelease produces an UNSIGNED apk.
+def signingProps = null
+def envKeystore = System.getenv("TOMSENSE_KEYSTORE_FILE")
+if (envKeystore != null) {
+    signingProps = [
+        storeFile:     file(envKeystore),
+        storePassword: System.getenv("TOMSENSE_KEYSTORE_PASSWORD"),
+        keyAlias:      System.getenv("TOMSENSE_KEY_ALIAS") ?: "tomsense",
+        keyPassword:   System.getenv("TOMSENSE_KEY_PASSWORD")
+                           ?: System.getenv("TOMSENSE_KEYSTORE_PASSWORD"),
+    ]
+} else {
+    // android/ is two levels below the repo root; signing/ sits at the root.
+    def propsFile = rootProject.file("../../signing/keystore.properties")
+    if (propsFile.exists()) {
+        def p = new Properties()
+        propsFile.withInputStream { p.load(it) }
+        signingProps = [
+            storeFile:     new File(propsFile.parentFile, p.getProperty("storeFile")),
+            storePassword: p.getProperty("storePassword"),
+            keyAlias:      p.getProperty("keyAlias", "tomsense"),
+            keyPassword:   p.getProperty("keyPassword", p.getProperty("storePassword")),
+        ]
+    }
+}
+
 android {
     namespace "com.tomsense.app"
     compileSdk rootProject.ext.compileSdkVersion
@@ -20,10 +51,23 @@ android {
             ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    if (signingProps != null) {
+        signingConfigs {
+            release {
+                storeFile signingProps.storeFile
+                storePassword signingProps.storePassword
+                keyAlias signingProps.keyAlias
+                keyPassword signingProps.keyPassword
+            }
+        }
+    }
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            if (signingProps != null) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 }
