@@ -1,5 +1,7 @@
 # TomSense AI
 
+Note: This is a personal project with a somewhat silly goal: Use claude code (mostly Opus audited by Fable 5) to produce its own repalcement entirely using Vibe Coding. I understand that is not for everyone. Even the rest of this description is written by Claude:
+
 Self-hosted AI assistant for a CPU-only homelab — chat, agentic coding,
 image generation, voice, RAG, and durable memory, with **all inference on
 Cloudflare Workers AI** (free tier: 10k neurons/day). No GPU required.
