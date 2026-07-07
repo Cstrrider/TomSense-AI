@@ -1,0 +1,319 @@
+# TomSense — self-hosted AI assistant.
+#
+# Quickstart (localhost):
+#   bash setup.sh          # writes .env (secrets, models, owner email)
+#   docker compose up -d --build
+#   → http://localhost:8002
+#
+# Optional capability profiles (add any combination):
+#   docker compose --profile voice --profile rag --profile jupyter up -d --build
+#     voice    → speech-to-text (whisper) + text-to-speech (piper)
+#     rag      → qdrant vector store: upload docs, search_docs tool
+#     jupyter  → code_interpreter tool for regular chats
+#     docker   → scoped docker-socket proxy: one-click sandbox mount apply
+#                + the deploy_project tool (see deploy-targets.json)
+#
+# Everything degrades gracefully when a profile is off — the related tools
+# report unavailable instead of breaking chat.
+#
+# For internet-facing deployments put the frontend behind Cloudflare Access
+# (or any proxy that injects an authenticated-email header) — see
+# CF_ACCESS_SETUP.md — and set REQUIRE_CF_ACCESS=1 in .env.
+
+name: tomsense
+
+services:
+
+  tomsense-postgres:
+    image: postgres:16-alpine
+    container_name: tomsense-postgres
+    restart: unless-stopped
+    networks: [tomsense]
+    environment:
+      - POSTGRES_DB=tomsense
+      - POSTGRES_USER=tomsense
+      - POSTGRES_PASSWORD=${TOMSENSE_DB_PASSWORD:?run setup.sh to generate .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tomsense -d tomsense"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  tomsense-backend:
+    build: ./backend
+    image: tomsense-backend:latest
+    container_name: tomsense-backend
+    restart: unless-stopped
+    networks: [tomsense]
+    ports:
+      - "${TOMSENSE_API_PORT:-8001}:8000"   # direct API access (MCP server, dev)
+    environment:
+      # ── Cloudflare Workers AI (required — powers the default models) ──
+      - CF_ACCOUNT_ID=${CF_ACCOUNT_ID:?run setup.sh to generate .env}
+      - CF_API_TOKEN=${CF_API_TOKEN:?run setup.sh to generate .env}
+      # AI Gateway token for partner/passthrough image models (Imagen, …).
+      # Optional — falls back to CF_API_TOKEN when it has both scopes.
+      - CF_AIG_TOKEN=${CF_AIG_TOKEN:-}
+      - CF_GATEWAY_ID=${CF_GATEWAY_ID:-default}
+      # Anthropic Messages API — enables the Claude entries in the code-mode
+      # picker. Optional.
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # Fernet master key for at-rest API-key encryption (setup.sh generates).
+      - TOMSENSE_ENCRYPTION_KEY=${TOMSENSE_ENCRYPTION_KEY:-}
+      # ── Identity / access ──
+      # Without CF Access every request is attributed to this owner email.
+      - LOCAL_DEV_EMAIL=${TOMSENSE_OWNER_EMAIL:-admin@localhost}
+      # 1 = refuse requests missing the CF Access header (set for internet-
+      # facing deployments behind Cloudflare Access; see CF_ACCESS_SETUP.md).
+      - REQUIRE_CF_ACCESS=${REQUIRE_CF_ACCESS:-0}
+      # CORS lockdown — set to your public URL in prod. Unset = open (dev).
+      - FRONTEND_ORIGIN=${FRONTEND_ORIGIN:-}
+      # ── Sidecars (bundled defaults; override to reuse external instances) ──
+      - SEARXNG_URL=${SEARXNG_URL:-http://tomsense-searxng:8080}
+      - JUPYTER_URL=${JUPYTER_URL:-http://tomsense-jupyter:8888}
+      - JUPYTER_TOKEN=${JUPYTER_TOKEN:-}
+      - WHISPER_URL=${WHISPER_URL:-http://tomsense-whisper:8000}
+      - PIPER_URL=${PIPER_URL:-http://tomsense-piper:8000}
+      - QDRANT_URL=${QDRANT_URL:-http://tomsense-qdrant:6333}
+      # ── Models (all overridable in .env) ──
+      - MODEL_CHAT=${MODEL_CHAT:-@cf/google/gemma-4-26b-a4b-it}
+      - MODEL_CODER=${MODEL_CODER:-@cf/google/gemma-4-26b-a4b-it}
+      - MODEL_WRITER=${MODEL_WRITER:-@cf/openai/gpt-oss-120b}
+      - MODEL_RESEARCH=${MODEL_RESEARCH:-@cf/openai/gpt-oss-120b}
+      - MODEL_TITLE=${MODEL_TITLE:-@cf/meta/llama-3.2-3b-instruct}
+      - MODEL_EMBED=${MODEL_EMBED:-@cf/baai/bge-base-en-v1.5}
+      - TTS_VOICE=${TTS_VOICE:-alloy}
+      - MAX_TOKENS_CODER=${MAX_TOKENS_CODER:-8192}
+      # ── Code mode ──
+      - SANDBOX_URL=http://tomsense-sandbox:8000
+      - SANDBOX_TOKEN=${SANDBOX_TOKEN:?run setup.sh to generate .env}
+      - CODE_REVIEW_GATE=${CODE_REVIEW_GATE:-1}
+      # Scoped Docker control (profile `docker`) — the backend recreates the
+      # sandbox when mounts change, via the socket proxy; never the host
+      # socket directly. Absent proxy = the UI shows the manual command.
+      - DOCKER_HOST=tcp://tomsense-docker-proxy:2375
+      - TOMSENSE_HOST_COMPOSE_DIR=${TOMSENSE_HOST_COMPOSE_DIR:-.}
+      # ── Push notifications via ntfy (optional) ──
+      - NTFY_URL=${NTFY_URL:-https://ntfy.sh}
+      - NTFY_TOPIC=${NTFY_TOPIC:-}
+      - NTFY_TOKEN=${NTFY_TOKEN:-}
+      # TomSense-as-MCP-server (/mcp) — key auth. Empty = endpoint disabled.
+      - MCP_SERVER_KEY=${MCP_SERVER_KEY:-}
+      - API_KEY=${TOMSENSE_API_KEY:-}
+      - DATABASE_URL=postgresql://tomsense:${TOMSENSE_DB_PASSWORD:?run setup.sh to generate .env}@tomsense-postgres:5432/tomsense
+    volumes:
+      - generated:/data/generated_images
+      - uploads:/data/uploads
+      # The compose dir, so the backend can read/write .mounts.json,
+      # docker-compose.override.yml (project mounts) and deploy-targets.json.
+      - ${TOMSENSE_HOST_COMPOSE_DIR:-.}:/host-compose:rw
+    depends_on:
+      tomsense-postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # SvelteKit static build served by nginx; proxies API routes to the backend.
+  tomsense-frontend:
+    build: ./frontend
+    image: tomsense-frontend:latest
+    container_name: tomsense-frontend
+    restart: unless-stopped
+    networks: [tomsense]
+    ports:
+      - "${TOMSENSE_PORT:-8002}:80"
+    depends_on:
+      - tomsense-backend
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+
+  # Coding-agent sandbox: file ops + bash for code-mode chats, isolated from
+  # the backend. Not host-published. Hardened: non-root, read-only rootfs,
+  # dropped capabilities, mem/cpu/pids caps. See sandbox/HARDENING.md.
+  tomsense-sandbox:
+    build: ./sandbox
+    image: tomsense-sandbox:latest
+    container_name: tomsense-sandbox
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:          # gosu drop-to-user + chown of mount dirs at start
+      - SETUID
+      - SETGID
+      - CHOWN
+      - FOWNER
+      - DAC_OVERRIDE
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+      - /var/tmp:size=128m,mode=1777
+      - /run:size=16m
+      - /home/coder:size=128m,uid=1000,gid=1000,mode=0755
+    networks: [tomsense]
+    environment:
+      - SANDBOX_TOKEN=${SANDBOX_TOKEN:?run setup.sh to generate .env}
+      - NPM_CONFIG_CACHE=/workspace/.cache/npm
+      - PIP_CACHE_DIR=/workspace/.cache/pip
+      - HOME=/home/coder
+      - PYTHONDONTWRITEBYTECODE=1
+    # `workspace` is the agent's scratch volume. Your real source trees are
+    # bind-mounted at /workspace/projects/<name> via the generated
+    # docker-compose.override.yml — manage them in Settings → Files → Mounts.
+    volumes:
+      - workspace:/workspace
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "2.0"
+          pids: 512
+
+  # Bundled meta-search engine — backs the web_search tool.
+  tomsense-searxng:
+    image: searxng/searxng:latest
+    container_name: tomsense-searxng
+    restart: unless-stopped
+    networks: [tomsense]
+    volumes:
+      # `z` = SELinux shared relabel; required on enforcing hosts (Fedora,
+      # RHEL, openSUSE) for the container to read the file. No-op elsewhere.
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro,z
+    environment:
+      - SEARXNG_BASE_URL=http://tomsense-searxng:8080/
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  # ── profile: voice ─────────────────────────────────────────────────────
+  # Speech-to-text (🎤 button) — faster-whisper, CPU int8.
+  tomsense-whisper:
+    profiles: [voice]
+    image: fedirz/faster-whisper-server:latest-cpu
+    container_name: tomsense-whisper
+    restart: unless-stopped
+    networks: [tomsense]
+    volumes:
+      - whisper_models:/root/.cache/huggingface
+    environment:
+      - WHISPER__COMPUTE_TYPE=int8
+      - WHISPER__MODEL=Systran/faster-distil-whisper-small.en
+      - WHISPER__INFERENCE_DEVICE=cpu
+      - UVICORN_HOST=0.0.0.0
+      - UVICORN_PORT=8000
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  # Text-to-speech (🔊 button) — OpenAI-compatible TTS API.
+  tomsense-piper:
+    profiles: [voice]
+    image: ghcr.io/matatonic/openedai-speech-min:latest
+    container_name: tomsense-piper
+    restart: unless-stopped
+    networks: [tomsense]
+    volumes:
+      - piper_voices:/app/voices
+      - piper_config:/app/config
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # ── profile: jupyter ───────────────────────────────────────────────────
+  # code_interpreter tool for regular (non-code-mode) chats.
+  tomsense-jupyter:
+    profiles: [jupyter]
+    image: quay.io/jupyter/scipy-notebook:latest
+    container_name: tomsense-jupyter
+    restart: unless-stopped
+    networks: [tomsense]
+    volumes:
+      - jupyter_data:/home/jovyan/work
+    command: >
+      start-notebook.py
+        --IdentityProvider.token=${JUPYTER_TOKEN:-}
+        --PasswordIdentityProvider.password_required=False
+        --ServerApp.disable_check_xsrf=True
+        --ServerApp.allow_origin=*
+        --ServerApp.root_dir=/home/jovyan/work
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  # ── profile: rag ───────────────────────────────────────────────────────
+  # Vector store: uploads → chunks → semantic search (search_docs tool).
+  tomsense-qdrant:
+    profiles: [rag]
+    image: qdrant/qdrant:v1.13.0
+    container_name: tomsense-qdrant
+    restart: unless-stopped
+    networks: [tomsense]
+    volumes:
+      - qdrant_data:/qdrant/storage
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  # ── profile: docker ────────────────────────────────────────────────────
+  # Scoped Docker API proxy: exposes ONLY what the backend needs to recreate
+  # the sandbox (mount changes) and restart whitelisted deploy targets.
+  # BUILD/EXEC/SWARM/etc. are rejected. Requires access to the host docker
+  # socket — enable only if you want one-click mount apply / deploy_project.
+  tomsense-docker-proxy:
+    profiles: [docker]
+    image: tecnativa/docker-socket-proxy:latest
+    container_name: tomsense-docker-proxy
+    restart: unless-stopped
+    networks: [tomsense]
+    # On SELinux-enforcing hosts the socket mount needs label=disable.
+    security_opt:
+      - label=disable
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - CONTAINERS=1
+      - IMAGES=1
+      - INFO=1
+      - NETWORKS=1
+      - VOLUMES=1
+      - SERVICES=1
+      - VERSION=1
+      - POST=1
+      - ALLOW_RESTARTS=1
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+
+networks:
+  tomsense:
+    # Fixed name (no project prefix) so other stacks — e.g. a cloudflared
+    # tunnel container — can join with `external: true` + `name: tomsense`.
+    name: tomsense
+
+volumes:
+  pgdata:
+  generated:
+  uploads:
+  workspace:
+  qdrant_data:
+  whisper_models:
+  piper_voices:
+  piper_config:
+  jupyter_data:

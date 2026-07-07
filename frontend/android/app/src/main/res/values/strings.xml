@@ -1,0 +1,9 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">TomSense</string>
+    <string name="title_activity_main">TomSense</string>
+    <string name="package_name">com.tomsense.app</string>
+    <string name="custom_url_scheme">com.tomsense.app</string>
+    <string name="assist_open_full">Open in TomSense</string>
+    <string name="assist_close_desc">Close assistant</string>
+</resources>

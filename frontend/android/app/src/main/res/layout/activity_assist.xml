@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The assistant overlay is a single full-screen, transparent WebView. The
+     /assist page itself draws the floating bubble + input pill; everything
+     around them is transparent so the homescreen shows through. -->
+<WebView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/assist_webview"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@android:color/transparent" />

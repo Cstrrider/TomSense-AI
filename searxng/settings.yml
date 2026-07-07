@@ -1,0 +1,37 @@
+# SearXNG config for the bundled tomsense-searxng service.
+#
+# Mounted read-only into the container at /etc/searxng/settings.yml.
+# Only reachable on the internal Docker network — never published to the
+# host — so the secret_key here exists for CSRF on the web UI and is not
+# the same kind of secret as TOMSENSE_DB_PASSWORD or SANDBOX_TOKEN.
+# Rotate it by editing this file + restarting tomsense-searxng.
+
+use_default_settings: true
+
+general:
+  debug: false
+  instance_name: "TomSense search"
+  privacypolicy_url: false
+  donation_url: false
+  contact_url: false
+
+server:
+  secret_key: "tomsense-bundled-searxng-internal-network-only"
+  # Disable per-IP rate-limit — the backend can burst on multi-search flows.
+  limiter: false
+  image_proxy: false
+  http_protocol_version: "1.0"
+  method: "GET"
+
+ui:
+  static_use_hash: true
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "en"
+  # JSON format is required — the backend's tool_web_search() calls
+  # /search?format=json. Without this the model gets HTML it can't parse.
+  formats:
+    - html
+    - json

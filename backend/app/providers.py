@@ -1,0 +1,469 @@
+"""Provider abstraction (Round A).
+
+Wraps any OpenAI-compatible chat-completions endpoint behind a uniform
+interface so the rest of the codebase doesn't care whether the model lives
+on Cloudflare, OpenAI, OpenRouter, Groq, or local Ollama.
+
+Model strings carry their provider as a prefix:
+
+    <provider_id>::<model_id>
+
+Examples:
+
+    cf::@cf/google/gemma-4-26b-a4b-it           (built-in Cloudflare)
+    08fab...d3::gpt-4o                          (user-defined OpenAI)
+    08fab...d3::anthropic/claude-3.5-sonnet     (user-defined OpenRouter)
+
+Backward compat: any string without `::` is treated as a Cloudflare model,
+so existing chat rows and persona model fields keep working untouched.
+"""
+
+import asyncio
+import json
+from typing import Any, AsyncIterator, Optional
+
+from .cf import get_client, strip_template_tokens
+from .config import settings
+from . import db
+
+
+SEP = "::"
+CF_BUILTIN_ID = "cf"
+ANTHROPIC_BUILTIN_ID = "anthropic"
+
+
+# ─── parsing ────────────────────────────────────────────────────────────────
+
+def parse_model_str(model_str: Optional[str]) -> tuple[str, str]:
+    """Split a `provider_id::model_id` string. Empty/None → (cf, default chat).
+    Strings without the separator → (cf, model_str)."""
+    if not model_str:
+        return CF_BUILTIN_ID, settings.model_chat
+    if SEP in model_str:
+        pid, mid = model_str.split(SEP, 1)
+        return (pid or CF_BUILTIN_ID), mid
+    return CF_BUILTIN_ID, model_str
+
+
+# ─── resolution ─────────────────────────────────────────────────────────────
+
+async def _builtin_row_key(user_id: Optional[str], builtin_id: str) -> str:
+    """User's stored API key for a builtin provider, "" if no row exists.
+    Reads from the unified providers table (post-I1) — the legacy
+    `prefs.credentials` JSON storage is migrated lazily on first read of
+    /me/credentials in main.py."""
+    if not user_id:
+        return ""
+    try:
+        row = await db.get_builtin_provider(user_id, builtin_id)
+        if row and row.get("api_key"):
+            return str(row["api_key"]).strip()
+    except Exception:
+        pass
+    return ""
+
+
+async def _cf_builtin_provider(user_id: Optional[str] = None) -> dict:
+    """Synthetic provider for built-in Cloudflare Workers AI. api_key resolves
+    via:  user's builtin row  →  CF_API_TOKEN env  →  empty.
+    The model list is populated client-side from the per-tool defaults."""
+    api_key = await _builtin_row_key(user_id, CF_BUILTIN_ID) or settings.cf_api_token
+    return {
+        "id": CF_BUILTIN_ID,
+        "name": "Cloudflare Workers AI",
+        "base_url": settings.cf_chat_url.rsplit("/chat/completions", 1)[0],
+        "api_key": api_key,
+        "kind": "openai-compat",
+        "models": [],
+        "builtin": True,
+    }
+
+
+async def _anthropic_builtin_provider(user_id: Optional[str] = None) -> Optional[dict]:
+    """Synthetic provider for the native Anthropic Messages API. None when
+    no key is configured anywhere — the UI then surfaces 'unknown provider'."""
+    api_key = (
+        await _builtin_row_key(user_id, ANTHROPIC_BUILTIN_ID)
+        or settings.anthropic_api_key
+    )
+    if not api_key:
+        return None
+    return {
+        "id": ANTHROPIC_BUILTIN_ID,
+        "name": "Anthropic Claude",
+        "base_url": "https://api.anthropic.com/v1",
+        "api_key": api_key,
+        "kind": "anthropic",
+        "models": [],
+        "builtin": True,
+    }
+
+
+async def resolve_provider(provider_id: str, user_id: Optional[str] = None) -> Optional[dict]:
+    """Look up a provider by id. `cf` → synthetic Cloudflare builtin;
+    `anthropic` → synthetic Anthropic builtin (when a key is configured —
+    either user pref or env); anything else hits the DB. Returns None when
+    not found / not owned by user_id."""
+    if not provider_id or provider_id == CF_BUILTIN_ID:
+        return await _cf_builtin_provider(user_id)
+    if provider_id == ANTHROPIC_BUILTIN_ID:
+        return await _anthropic_builtin_provider(user_id)
+    return await db.get_provider(provider_id, user_id=user_id)
+
+
+async def list_user_providers_with_builtin(user_id: str) -> list[dict]:
+    """All providers visible to a user — builtin CF first, then Anthropic
+    (when configured), then their own user-added providers."""
+    out: list[dict] = [await _cf_builtin_provider(user_id)]
+    anth = await _anthropic_builtin_provider(user_id)
+    if anth:
+        out.append(anth)
+    out.extend(await db.list_providers(user_id))
+    return out
+
+
+def mask_api_key(key: str) -> str:
+    if not key:
+        return ""
+    if len(key) <= 12:
+        return "•" * len(key)
+    return f"{key[:4]}…{key[-4:]}"
+
+
+def redact_provider(p: dict) -> dict:
+    """Return a copy of `p` with api_key masked. Use on every read that goes
+    out over the wire."""
+    out = dict(p)
+    out["api_key"] = mask_api_key(p.get("api_key") or "")
+    return out
+
+
+# ─── generic OpenAI-compatible client ───────────────────────────────────────
+
+def _chat_url(provider: dict) -> str:
+    base = (provider.get("base_url") or "").rstrip("/")
+    # Accept base_urls with or without trailing /chat/completions
+    if base.endswith("/chat/completions"):
+        return base
+    return f"{base}/chat/completions"
+
+
+def _headers(provider: dict) -> dict:
+    return {
+        "Authorization": f"Bearer {provider.get('api_key') or ''}",
+        "Content-Type": "application/json",
+    }
+
+
+def build_payload(
+    model: str, messages: list[dict], max_tokens: int,
+    tools: Optional[list[dict]] = None, stream: bool = True,
+    temperature: Optional[float] = None, reasoning_effort: Optional[str] = None,
+) -> dict:
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "stream": stream,
+    }
+    # Reasoning models burn the token budget unless effort is capped. Caller can
+    # override; default stays "low".
+    from .cf import _is_reasoning_model
+    if _is_reasoning_model(model):
+        payload["reasoning_effort"] = reasoning_effort or "low"
+    # Low temperature for deterministic work (code edits); unset = provider
+    # default otherwise.
+    if temperature is not None:
+        payload["temperature"] = temperature
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
+    return payload
+
+
+async def chat_complete(
+    provider: dict,
+    model: str,
+    messages: list[dict],
+    max_tokens: int,
+    tools: Optional[list[dict]] = None,
+) -> dict:
+    """Non-streaming chat call against any OpenAI-compatible provider."""
+    payload = build_payload(model, messages, max_tokens, tools, stream=False)
+    payload["stop"] = [
+        "<|end|>", "<|start|>", "<|endoftext|>", "<eot_id>",
+        "<|im_end|>", "<|assistant|>", "<|channel|>",
+    ]
+    r = await get_client().post(
+        _chat_url(provider),
+        headers=_headers(provider),
+        json=payload,
+        timeout=120.0,
+    )
+    if not r.is_success:
+        return {"content": "", "tool_calls": [], "usage": {},
+                "error": f"{provider.get('name', '?')} {r.status_code}: {r.text[:300]}"}
+    data = r.json()
+    choice = (data.get("choices") or [{}])[0]
+    msg = choice.get("message", {}) or {}
+    content = (msg.get("content") or "").strip()
+    raw_calls = msg.get("tool_calls") or []
+    tool_calls = []
+    for tc in raw_calls:
+        fn = tc.get("function", {}) or {}
+        args = fn.get("arguments", "{}")
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                args = {}
+        elif not isinstance(args, dict):
+            args = {"_raw": args}
+        tool_calls.append({
+            "id": str(tc.get("id") or f"call_{len(tool_calls)}"),
+            "name": str(fn.get("name") or ""),
+            "arguments": args,
+        })
+    return {
+        "content": content,
+        "tool_calls": tool_calls,
+        "usage": data.get("usage", {}) or {},
+    }
+
+
+async def stream_round(
+    provider: dict,
+    model: str,
+    messages: list[dict],
+    max_tokens: int,
+    tools: Optional[list[dict]] = None,
+    temperature: Optional[float] = None,
+    reasoning_effort: Optional[str] = None,
+) -> AsyncIterator[tuple[str, Any]]:
+    """Streamed chat round. Routes to the Anthropic Messages API when the
+    provider's `kind` is "anthropic"; otherwise hits the OpenAI-compatible
+    chat-completions endpoint."""
+    if provider.get("kind") == "anthropic":
+        # Imported lazily so the OpenAI-compat path doesn't pay for the
+        # additional module on every request. (temperature/reasoning_effort are
+        # OpenAI-compat tuning; the Anthropic path uses its own defaults.)
+        from . import anthropic as _anth
+        async for ev in _anth.stream_round(provider, model, messages, max_tokens, tools):
+            yield ev
+        return
+
+    payload = build_payload(model, messages, max_tokens, tools, stream=True,
+                            temperature=temperature, reasoning_effort=reasoning_effort)
+
+    accumulated_text = ""
+    accumulated_tools: dict[int, dict] = {}
+    usage: dict = {}
+    finish_reason: Optional[str] = None
+
+    try:
+        async with get_client().stream(
+            "POST",
+            _chat_url(provider),
+            headers=_headers(provider),
+            json=payload,
+        ) as r:
+            if not r.is_success:
+                body = (await r.aread()).decode(errors="replace")
+                # Some models (notably the smaller local Ollama ones — Gemma 3
+                # 1B, TinyLlama, etc.) advertise no tool support in their
+                # modelfile, so Ollama 400s when `tools` is sent. Recover by
+                # transparently retrying without tools, since for a regular
+                # chat the user just wants an answer — losing web_search /
+                # image_gen for that turn is acceptable.
+                if (
+                    r.status_code == 400
+                    and tools
+                    and "does not support tools" in body
+                ):
+                    print(f"[stream_round:{provider.get('name')}] {model} lacks tool support — retrying without tools")
+                    async for ev in stream_round(
+                        provider, model, messages, max_tokens, tools=None,
+                    ):
+                        yield ev
+                    return
+                print(f"[stream_round:{provider.get('name')}] {r.status_code}: {body[:400]}")
+                r.raise_for_status()
+            async for raw_line in r.aiter_lines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                data = line[5:].strip() if line.startswith("data:") else line
+                if data == "[DONE]":
+                    break
+                try:
+                    obj = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                for choice in obj.get("choices", []):
+                    if choice.get("finish_reason"):
+                        finish_reason = choice["finish_reason"]
+                    delta = choice.get("delta", {}) or {}
+                    # Reasoning models stream their thinking under
+                    # delta.reasoning / delta.reasoning_content before any
+                    # real content. Surface it as a separate event kind.
+                    reasoning = delta.get("reasoning") or delta.get("reasoning_content")
+                    if reasoning and isinstance(reasoning, str):
+                        yield ("reasoning", reasoning)
+                    for tc_chunk in (delta.get("tool_calls") or []):
+                        idx = tc_chunk.get("index", 0)
+                        slot = accumulated_tools.setdefault(
+                            idx, {"id": "", "name": "", "arguments": ""}
+                        )
+                        if tc_chunk.get("id") is not None:
+                            slot["id"] = str(tc_chunk["id"])
+                        fn = tc_chunk.get("function") or {}
+                        if fn.get("name") is not None:
+                            slot["name"] = str(fn["name"])
+                        args_frag = fn.get("arguments")
+                        if args_frag is None:
+                            pass
+                        elif isinstance(args_frag, str):
+                            slot["arguments"] += args_frag
+                        else:
+                            slot["arguments"] = json.dumps(args_frag)
+                    content = delta.get("content")
+                    if content is None or content == "":
+                        continue
+                    if not isinstance(content, str):
+                        content = str(content)
+                    accumulated_text += content
+                    cleaned = strip_template_tokens(content)
+                    if cleaned:
+                        yield ("text", cleaned)
+                if obj.get("usage"):
+                    usage = obj["usage"]
+    except Exception as e:
+        print(f"[stream_round:{provider.get('name')}] error: {e}")
+        yield ("text", f"\n\n[stream error: {e}]")
+
+    tool_calls_out = []
+    for idx in sorted(accumulated_tools.keys()):
+        tc = accumulated_tools[idx]
+        args_str = tc["arguments"]
+        truncated = False
+        try:
+            args = json.loads(args_str) if args_str else {}
+        except json.JSONDecodeError:
+            # The args JSON didn't parse — almost always because the model hit
+            # the response-token cap mid-call (finish_reason == "length") while
+            # writing a huge edit. Flag it so the loop can steer to smaller edits
+            # instead of dispatching a garbage/empty call.
+            args = {}
+            truncated = True
+        tool_calls_out.append({
+            "id": tc["id"] or f"call_{idx}",
+            "name": tc["name"],
+            "arguments": args,
+            "truncated": truncated,  # args JSON didn't parse → call was cut off
+        })
+
+    yield ("done", {
+        "tool_calls": tool_calls_out,
+        "content": strip_template_tokens(accumulated_text),
+        "usage": usage,
+        "finish_reason": finish_reason,
+    })
+
+
+# ─── dispatch helpers (parse + resolve + call in one shot) ──────────────────
+
+async def dispatch_chat_complete(
+    user_id: Optional[str], model_str: str, messages: list[dict],
+    max_tokens: int, tools: Optional[list[dict]] = None,
+) -> dict:
+    pid, mid = parse_model_str(model_str)
+    provider = await resolve_provider(pid, user_id=user_id)
+    if not provider:
+        return {"content": "", "tool_calls": [], "usage": {},
+                "error": f"unknown provider {pid!r}"}
+    return await chat_complete(provider, mid, messages, max_tokens, tools)
+
+
+def _model_short(mid: str) -> str:
+    """Human-ish model name for user-visible notices: last path segment."""
+    return mid.rsplit("/", 1)[-1]
+
+
+async def dispatch_stream_round(
+    user_id: Optional[str], model_str: str, messages: list[dict],
+    max_tokens: int, tools: Optional[list[dict]] = None,
+    temperature: Optional[float] = None, reasoning_effort: Optional[str] = None,
+) -> AsyncIterator[tuple[str, Any]]:
+    pid, mid = parse_model_str(model_str)
+    provider = await resolve_provider(pid, user_id=user_id)
+    if not provider:
+        yield ("text", f"\n\n[unknown provider {pid!r}]")
+        yield ("done", {"tool_calls": [], "content": "", "usage": {}})
+        return
+
+    # Stall guard: bound the wait for the FIRST streamed event. Reasoning
+    # models stream their thinking, so any healthy model shows bytes within
+    # seconds — a timeout here means the upstream is bricked (observed
+    # 2026-07-07: CF gemma-4 brownout, 180-295s rounds with zero bytes), and
+    # waiting out httpx's full read timeout just tortures the user. Abort and
+    # retry once on the fallback model with a visible notice.
+    gen = stream_round(provider, mid, messages, max_tokens, tools,
+                       temperature=temperature, reasoning_effort=reasoning_effort)
+    timeout = settings.first_token_timeout_s
+    fb_pid, fb_mid = parse_model_str(settings.stall_fallback_model)
+    if timeout > 0 and fb_mid and fb_mid != mid:
+        try:
+            first = await asyncio.wait_for(gen.__anext__(), timeout=timeout)
+        except asyncio.TimeoutError:
+            await gen.aclose()
+            print(f"[stall-guard] {mid} produced no output in {timeout:.0f}s "
+                  f"— falling back to {fb_mid}")
+            fb_provider = await resolve_provider(fb_pid, user_id=user_id)
+            if not fb_provider:
+                yield ("text", f"\n\n[{_model_short(mid)} stalled and fallback "
+                               f"provider {fb_pid!r} is unavailable]")
+                yield ("done", {"tool_calls": [], "content": "", "usage": {}})
+                return
+            yield ("text", f"*[{_model_short(mid)} stalled — answering with "
+                           f"{_model_short(fb_mid)}]*\n\n")
+            async for ev in stream_round(fb_provider, fb_mid, messages,
+                                         max_tokens, tools,
+                                         temperature=temperature,
+                                         reasoning_effort=reasoning_effort):
+                # Tag the round with the model that ACTUALLY answered, so the
+                # stats footer shows the fallback rather than the stalled model.
+                if ev[0] == "done":
+                    ev[1]["model"] = settings.stall_fallback_model
+                yield ev
+            return
+        except StopAsyncIteration:
+            return
+        if first[0] == "done":
+            first[1]["model"] = model_str
+        yield first
+    async for ev in gen:
+        if ev[0] == "done":
+            ev[1]["model"] = model_str
+        yield ev
+
+
+async def test_provider(provider: dict) -> dict:
+    """Ping the provider's /models endpoint as a connectivity check.
+    Returns {ok: bool, status: int?, error?: str, model_count?: int}."""
+    base = (provider.get("base_url") or "").rstrip("/")
+    if base.endswith("/chat/completions"):
+        base = base[: -len("/chat/completions")]
+    url = f"{base}/models"
+    try:
+        r = await get_client().get(url, headers=_headers(provider), timeout=15.0)
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200]}
+    if not r.is_success:
+        return {"ok": False, "status": r.status_code, "error": r.text[:200]}
+    try:
+        data = r.json()
+        models = data.get("data") if isinstance(data, dict) else data
+        n = len(models) if isinstance(models, list) else None
+        return {"ok": True, "status": r.status_code, "model_count": n}
+    except Exception:
+        return {"ok": True, "status": r.status_code, "model_count": None}

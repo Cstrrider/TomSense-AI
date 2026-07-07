@@ -1,0 +1,63 @@
+# Builds the TomSense Android APK in the cloud — no local Android toolchain
+# needed. Assumes the tomsense-ai repo root (with `frontend/` inside).
+#
+# Set a repository variable TOMSENSE_SERVER_URL (Settings → Secrets and
+# variables → Actions → Variables) to your instance URL — it's baked into
+# the APK at `cap sync` time. Unset, the APK points at http://localhost:8002.
+#
+# Because the app runs in `server.url` mode (the WebView loads the live site),
+# plain web/UI changes ship instantly and do NOT need an APK rebuild. This
+# workflow only auto-runs when the native shell or Capacitor config changes;
+# use the "Run workflow" button for an on-demand build.
+name: Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'frontend/android/**'
+      - 'frontend/capacitor.config.ts'
+      - '.github/workflows/android-build.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Build web assets
+        run: npm run build
+
+      - name: Capacitor sync
+        env:
+          TOMSENSE_SERVER_URL: ${{ vars.TOMSENSE_SERVER_URL }}
+        run: npx cap sync android
+
+      - name: Build debug APK
+        working-directory: frontend/android
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: tomsense-debug-apk
+          path: frontend/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

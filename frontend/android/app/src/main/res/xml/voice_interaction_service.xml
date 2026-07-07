@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Registers TomSense as a digital-assistant provider. Referenced by the
+     android.voice_interaction meta-data on TomSenseVoiceInteractionService. -->
+<voice-interaction-service
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:sessionService="com.tomsense.app.TomSenseVoiceSessionService"
+    android:recognitionService="com.tomsense.app.TomSenseRecognitionService"
+    android:supportsAssist="true"
+    android:supportsLaunchVoiceAssistFromKeyguard="false" />
