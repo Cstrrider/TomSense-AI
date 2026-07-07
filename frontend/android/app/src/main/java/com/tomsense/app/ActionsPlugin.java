@@ -42,6 +42,32 @@ import java.util.Map;
 @CapacitorPlugin(name = "Actions")
 public class ActionsPlugin extends Plugin {
 
+    /** Current instance URL + whether it was user-set (vs the baked default).
+     *  Backs the "Server" field in the web app's Settings. */
+    @PluginMethod
+    public void getServerUrl(PluginCall call) {
+        JSObject o = new JSObject();
+        o.put("url", ServerConfig.effective(getContext()));
+        o.put("isSet", ServerConfig.stored(getContext()) != null);
+        call.resolve(o);
+    }
+
+    /** Save a new instance URL and relaunch the WebView against it. */
+    @PluginMethod
+    public void setServerUrl(PluginCall call) {
+        String url = ServerConfig.normalize(call.getString("url"));
+        if (url == null) {
+            call.reject("invalid url");
+            return;
+        }
+        ServerConfig.save(getContext(), url);
+        JSObject o = new JSObject();
+        o.put("url", url);
+        call.resolve(o);
+        // Recreate AFTER resolving so the web side gets its answer first.
+        getActivity().runOnUiThread(() -> getActivity().recreate());
+    }
+
     /** Open the calendar's new-event editor, pre-filled. The user saves it. */
     @PluginMethod
     public void createCalendarEvent(PluginCall call) {

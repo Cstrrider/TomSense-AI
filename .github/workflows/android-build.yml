@@ -1,9 +1,10 @@
 # Builds the TomSense Android APK in the cloud — no local Android toolchain
 # needed. Assumes the tomsense-ai repo root (with `frontend/` inside).
 #
-# Set a repository variable TOMSENSE_SERVER_URL (Settings → Secrets and
-# variables → Actions → Variables) to your instance URL — it's baked into
-# the APK at `cap sync` time. Unset, the APK points at http://localhost:8002.
+# The instance URL is a RUNTIME setting: first launch prompts for it, and
+# it's changeable in Settings → App. Optionally set a repository variable
+# TOMSENSE_SERVER_URL (Settings → Secrets and variables → Actions →
+# Variables) to pre-bake a default and skip the first-run prompt.
 #
 # Because the app runs in `server.url` mode (the WebView loads the live site),
 # plain web/UI changes ship instantly and do NOT need an APK rebuild. This

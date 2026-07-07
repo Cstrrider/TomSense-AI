@@ -41,9 +41,15 @@ import java.util.Locale;
  */
 public class AssistActivity extends Activity {
 
-    /** Live /assist route — see frontend/src/routes/assist/+page.svelte. */
-    private static final String ASSIST_URL = "https://tomsense.example.com/assist";
-    private static final String ASSIST_HOST = "tomsense.example.com";
+    /** Live /assist route — see frontend/src/routes/assist/+page.svelte.
+     *  Base URL comes from ServerConfig (user-set, else baked default). */
+    private String assistUrl() {
+        return ServerConfig.effective(this) + "/assist";
+    }
+
+    private String assistHost() {
+        return ServerConfig.effectiveHost(this);
+    }
     private static final int REQ_RECORD_AUDIO = 7001;
 
     private WebView webView;
@@ -111,7 +117,7 @@ public class AssistActivity extends Activity {
         webView.setWebChromeClient(new AssistChromeClient());
 
         if (savedInstanceState == null) {
-            webView.loadUrl(ASSIST_URL);
+            webView.loadUrl(assistUrl());
         } else {
             webView.restoreState(savedInstanceState);
         }
@@ -303,8 +309,10 @@ public class AssistActivity extends Activity {
         public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
             Uri url = request.getUrl();
             String host = url != null ? url.getHost() : null;
-            if (host != null && host.equals(ASSIST_HOST)) {
-                return false; // same site — load inside the overlay
+            if (host != null && (host.equals(assistHost())
+                    || host.endsWith(".cloudflareaccess.com")
+                    || host.equals("accounts.google.com"))) {
+                return false; // same site or auth redirect — stay in the overlay
             }
             try {
                 startActivity(new Intent(Intent.ACTION_VIEW, url));

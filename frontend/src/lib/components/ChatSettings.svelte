@@ -38,6 +38,7 @@
   } from '$lib/api';
   import { app } from '$lib/stores.svelte';
   import { getCodeModeModels } from '$lib/codeModels';
+  import { getInstanceUrl, setInstanceUrl } from '$lib/clienttools';
   import { toast } from '$lib/toast.svelte';
   import {
     IconBrain,
@@ -49,6 +50,7 @@
     IconImage,
     IconKey,
     IconLink,
+    IconMonitor,
     IconRefresh,
     IconShare,
     IconTrash,
@@ -75,8 +77,34 @@
   let { chatId, open = $bindable(), onclose }: Props = $props();
   const PENDING_KEY = 'pending-persona';
 
-  type Tab = 'persona' | 'memory' | 'providers' | 'voice' | 'share' | 'coder' | 'secrets';
+  type Tab = 'persona' | 'memory' | 'providers' | 'voice' | 'share' | 'coder' | 'secrets' | 'app';
   let tab = $state<Tab>('providers');
+
+  // Instance URL (Android APK only) — null means "not running in the app",
+  // which hides the App tab entirely. See ServerConfig.java / ActionsPlugin.
+  let instanceUrl = $state<{ url: string; isSet: boolean } | null>(null);
+  let instanceUrlDraft = $state('');
+  let instanceUrlSaving = $state(false);
+
+  async function loadInstanceUrl() {
+    instanceUrl = await getInstanceUrl();
+    if (instanceUrl) instanceUrlDraft = instanceUrl.url;
+  }
+
+  async function saveInstanceUrl() {
+    const url = instanceUrlDraft.trim();
+    if (!url) return;
+    instanceUrlSaving = true;
+    try {
+      // Resolves just before the native side relaunches the WebView against
+      // the new URL — anything after this line may not get to run.
+      await setInstanceUrl(url);
+      toast.success('Reconnecting…');
+    } catch {
+      toast.error('That does not look like a valid URL');
+      instanceUrlSaving = false;
+    }
+  }
 
   const CF_BUILTIN_ID = 'cf';
   // Tool-model slots — sourced from /info's tool_models_catalog (the
@@ -582,6 +610,7 @@
   $effect(() => {
     if (open) {
       void load();
+      void loadInstanceUrl(); // no-op outside the Android app
     }
   });
 
@@ -1174,6 +1203,11 @@
       <button class:active={tab === 'voice'} onclick={() => (tab = 'voice')}>
         <IconVolume size={14} /> Voice
       </button>
+      {#if instanceUrl}
+        <button class:active={tab === 'app'} onclick={() => (tab = 'app')}>
+          <IconMonitor size={14} /> App
+        </button>
+      {/if}
       {#if chatId}
         <button class:active={tab === 'share'} onclick={() => (tab = 'share')}>
           <IconShare size={14} /> Share
@@ -1986,6 +2020,32 @@
               {/each}
             </select>
           </label>
+        {/if}
+
+        {#if tab === 'app' && instanceUrl}
+          <p class="muted">
+            This Android app is a shell around a TomSense server. Point it at
+            a different instance here — the app reconnects immediately.
+            {#if !instanceUrl.isSet}
+              Currently using the URL baked into the APK.
+            {/if}
+          </p>
+          <label class="field">
+            <span class="field-label">Server URL</span>
+            <input
+              type="url"
+              placeholder="https://tomsense.your-domain.com"
+              bind:value={instanceUrlDraft}
+              disabled={instanceUrlSaving}
+            />
+          </label>
+          <button
+            class="primary"
+            onclick={saveInstanceUrl}
+            disabled={instanceUrlSaving || instanceUrlDraft.trim() === instanceUrl.url}
+          >
+            <IconRefresh size={14} /> {instanceUrlSaving ? 'Reconnecting…' : 'Save & reconnect'}
+          </button>
         {/if}
 
         {#if tab === 'share' && chatId}

@@ -108,6 +108,8 @@ const Actions = registerPlugin<{
   getDeviceStatus(): Promise<{ ok: boolean; detail?: string }>;
   playMusic(o: { query: string; kind?: string; app?: string }): Promise<{ ok: boolean; detail?: string }>;
   saveImage(o: { base64: string; mime: string; filename: string }): Promise<{ ok: boolean; detail?: string }>;
+  getServerUrl(): Promise<{ url: string; isSet: boolean }>;
+  setServerUrl(o: { url: string }): Promise<{ url: string }>;
 }>('Actions');
 
 // Contacts — custom local Capacitor plugin (android/.../ContactsPlugin.java).
@@ -761,6 +763,25 @@ export async function saveImageToDevice(src: string): Promise<string> {
     setTimeout(() => URL.revokeObjectURL(url), 10_000);
     return 'Downloaded.';
   }
+}
+
+// ── instance URL (Android app setting) ───────────────────────────────────────
+
+/** The APK's configured instance URL, or null when not running in the native
+ *  app (browser/PWA — the concept doesn't apply there). */
+export async function getInstanceUrl(): Promise<{ url: string; isSet: boolean } | null> {
+  try {
+    return await Actions.getServerUrl();
+  } catch {
+    return null; // no native bridge
+  }
+}
+
+/** Save a new instance URL. The native side validates, persists, and then
+ *  RELAUNCHES the WebView against the new URL — callers won't run much code
+ *  after this resolves. Throws on invalid input or when not in the app. */
+export async function setInstanceUrl(url: string): Promise<void> {
+  await Actions.setServerUrl({ url });
 }
 
 // ── tool-status labels (streaming confirmations) ─────────────────────────────

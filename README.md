@@ -60,12 +60,15 @@ header also works). Steps in [CF_ACCESS_SETUP.md](CF_ACCESS_SETUP.md);
 
 The APK is a thin WebView shell over your instance plus native device
 plugins (calendar, reminders, alarms, health, location, media control,
-save-to-gallery). Build it with your instance URL baked in:
+save-to-gallery). **The server URL is a runtime setting**: on first launch
+the app asks for your instance URL, and you can change it any time in
+Settings → App — so one APK works for any instance.
 
-- **GitHub Actions**: set the repo variable `TOMSENSE_SERVER_URL`, run the
-  *Android APK* workflow, download the artifact, sideload it.
-- **Locally**: `cd frontend && TOMSENSE_SERVER_URL=https://your-instance npx
-  cap sync android && cd android && ./gradlew assembleDebug`.
+Build it with the *Android APK* GitHub Actions workflow (download the
+artifact, sideload it), or locally:
+`cd frontend && npx cap sync android && cd android && ./gradlew assembleDebug`.
+Optionally set `TOMSENSE_SERVER_URL` (env var locally, repo variable for
+the workflow) to pre-bake a default URL and skip the first-run prompt.
 
 Because the app loads the live site, web UI changes ship instantly — the
 APK only needs rebuilding when the native shell changes.

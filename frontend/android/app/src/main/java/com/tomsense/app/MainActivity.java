@@ -28,8 +28,6 @@ import java.io.InputStream;
  */
 public class MainActivity extends BridgeActivity {
 
-    private static final String BASE_URL = "https://tomsense.example.com";
-
     // Shared-content stash — set by an ACTION_SEND intent, drained once after
     // the web app loads. Guarded by MainActivity.class (intent handling is on
     // the main thread, plugin calls on a worker thread).
@@ -64,6 +62,14 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(HealthPlugin.class);
         registerPlugin(ActionsPlugin.class);
         registerPlugin(ContactsPlugin.class);
+        // Runtime instance URL: a user-saved URL (first-run dialog / in-app
+        // setting) overrides the one baked into capacitor.config.json.
+        // Must be assigned before super.onCreate — BridgeActivity.load()
+        // consumes `this.config` when it builds the bridge.
+        String storedUrl = ServerConfig.stored(this);
+        if (storedUrl != null) {
+            this.config = ServerConfig.capConfig(this, storedUrl);
+        }
         super.onCreate(savedInstanceState);
 
         // targetSdk 35 enforces edge-to-edge on Android 15+, which silently
@@ -84,7 +90,42 @@ public class MainActivity extends BridgeActivity {
             return insets;
         });
 
+        // Stock APK, nothing configured yet → ask where the instance lives.
+        if (ServerConfig.needsSetup(this)) {
+            promptForInstanceUrl();
+        }
+
         routeIntent(getIntent());
+    }
+
+    /**
+     * First-run dialog: ask for the TomSense instance URL, save it, and
+     * recreate the activity so the bridge reloads against it. Re-prompts on
+     * invalid input; "Later" leaves the bundled offline build showing (the
+     * setting is also reachable from the in-app Settings once connected).
+     */
+    private void promptForInstanceUrl() {
+        final android.widget.EditText input = new android.widget.EditText(this);
+        input.setHint("https://tomsense.your-domain.com");
+        input.setInputType(android.text.InputType.TYPE_CLASS_TEXT
+                | android.text.InputType.TYPE_TEXT_VARIATION_URI);
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Connect to TomSense")
+                .setMessage("Enter the URL of your TomSense server. "
+                        + "You can change it later in Settings.")
+                .setView(input)
+                .setCancelable(false)
+                .setPositiveButton("Connect", (d, w) -> {
+                    String url = ServerConfig.normalize(input.getText().toString());
+                    if (url != null) {
+                        ServerConfig.save(this, url);
+                        recreate();
+                    } else {
+                        promptForInstanceUrl();
+                    }
+                })
+                .setNegativeButton("Later", null)
+                .show();
     }
 
     @Override
@@ -161,7 +202,7 @@ public class MainActivity extends BridgeActivity {
     }
 
     private void navigateTo(String path) {
-        final String url = BASE_URL + path;
+        final String url = ServerConfig.effective(this) + path;
         if (bridge != null && bridge.getWebView() != null) {
             // Post so it runs after Capacitor's own initial load of server.url.
             bridge.getWebView().post(() -> bridge.getWebView().loadUrl(url));
