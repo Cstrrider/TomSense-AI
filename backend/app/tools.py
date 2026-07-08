@@ -1233,7 +1233,16 @@ async def _call_openai_compat_image(
     except Exception as e:
         return None, f"request failed: {e}"
     if not r.is_success:
-        return None, f"{provider.get('name', 'provider')} {r.status_code}: {r.text[:300]}"
+        pname = provider.get("name", "provider")
+        if r.status_code == 404 or "no such model" in r.text.lower() or "not a valid model" in r.text.lower():
+            return None, (
+                f"{pname} has no model '{mid}' (404). That model id isn't hosted "
+                f"there — e.g. OpenRouter carries Google (Gemini/'nano banana') "
+                f"and OpenAI image models, but NOT Flux/Stable Diffusion (those "
+                f"are Cloudflare-only). Pick a model {pname} actually offers, or "
+                f"use the Cloudflare provider for Flux. Tell the user this plainly."
+            )
+        return None, f"{pname} {r.status_code}: {r.text[:300]}"
     try:
         data = r.json()
     except Exception:
