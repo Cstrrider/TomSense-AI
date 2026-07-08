@@ -404,39 +404,28 @@ def sanitize_messages(messages: list[dict]) -> list[dict]:
 # Stats footer rendered after the response
 # ─────────────────────────────────────────────────────────────────────────────
 
-MODEL_SHORT = {
-    "gemma-4-26b-a4b-it":               "Gemma 4",
-    "gpt-oss-20b":                      "GPT-OSS 20B",
-    "gpt-oss-120b":                     "GPT-OSS 120B",
-    "llama-3.2-3b-instruct":            "Llama 3.2 3B",
-    "llama-3.1-8b-instruct":            "Llama 3.1 8B",
-    "llama-3.3-70b-instruct-fp8-fast":  "Llama 3.3 70B",
-    "llama-4-scout-17b-16e-instruct":   "Llama 4 Scout",
-}
-
-
-def short_name(model: str, provider_names: dict | None = None) -> str:
-    # Split a `provider_id::model_id` prefix. Otherwise a model id with no "/"
-    # (e.g. an OpenRouter "gpt-4o") would render as the raw
-    # "provider-uuid::gpt-4o" string in the stats footer.
-    prov = None
+def short_name(model: str, labels: dict | None = None) -> str:
+    """Render a model id for the stats footer using the LABEL the user gave it
+    in Settings → Models (via `labels`, an id→label map built by the caller).
+    Falls back to the bare model name (last path segment) when the model has no
+    configured label — no hardcoded 'friendly' remapping."""
+    labels = labels or {}
     if "::" in model:
-        pid, model = model.split("::", 1)
-        # Disambiguate custom-provider models: the same model name can exist on
-        # CF and OpenRouter (e.g. Gemma 4), so tag the provider when it isn't
-        # the CF builtin. Needs the id→name map resolved by the caller.
-        if pid and pid != "cf" and provider_names:
-            prov = provider_names.get(pid)
-    key = model.split("/")[-1]
-    name = MODEL_SHORT.get(key, key)
-    return f"{name} ({prov})" if prov else name
+        pid, mid = model.split("::", 1)
+        # CF builtin models are keyed by their bare `@cf/...` id (that's how
+        # prefs.cf_models stores them); custom providers by `provider_id::mid`.
+        lbl = labels.get(mid) if pid == "cf" else labels.get(f"{pid}::{mid}")
+    else:
+        mid = model
+        lbl = labels.get(mid)
+    return lbl or mid.split("/")[-1]
 
 
 def stats_footer(models_used: set, usage: dict, elapsed: float, summarized: int = 0,
-                 provider_names: dict | None = None) -> str:
+                 labels: dict | None = None) -> str:
     if not models_used:
         return ""
-    names = ", ".join(short_name(m, provider_names) for m in sorted(models_used))
+    names = ", ".join(short_name(m, labels) for m in sorted(models_used))
     ptok = usage.get("prompt_tokens", 0)
     ctok = usage.get("completion_tokens", 0)
     tps = round(ctok / elapsed, 0) if elapsed > 0 and ctok > 0 else 0
@@ -690,18 +679,27 @@ async def run_chat(
         settings.max_tokens_coder if code_mode else settings.max_tokens_chat
     )
 
-    # id→name map for the stats footer, so a custom-provider model (OpenRouter
-    # Gemma 4) is distinguished from the same-named CF builtin. Best-effort.
-    provider_names: dict = {}
+    # id→label map for the stats footer: show the label the user set in
+    # Settings → Models. CF models (prefs.cf_models) are keyed by their bare
+    # `@cf/...` id; custom-provider models by `provider_id::model_id`. This
+    # also distinguishes same-named models across providers (the user's labels
+    # already carry an "OR" suffix for OpenRouter). Best-effort.
+    model_labels: dict = {}
     _uid = (tool_context or {}).get("user_id")
     if _uid and not subagent:
+        for m in (tool_context or {}).get("cf_models") or []:
+            if m.get("id") and m.get("label"):
+                model_labels[m["id"]] = m["label"]
         try:
             from .providers import list_user_providers_with_builtin
-            provider_names = {
-                p["id"]: p["name"] for p in await list_user_providers_with_builtin(_uid)
-            }
+            for p in await list_user_providers_with_builtin(_uid):
+                if p.get("builtin"):
+                    continue
+                for m in (p.get("models") or []):
+                    if m.get("id") and m.get("label"):
+                        model_labels[f'{p["id"]}::{m["id"]}'] = m["label"]
         except Exception:
-            provider_names = {}
+            pass
 
     # Pluck the most recent generated-image path off the conversation so
     # edit_image can fall back to it when the user references "the image"
@@ -986,7 +984,7 @@ async def run_chat(
                 f"↑{total_usage['prompt_tokens']} ↓{total_usage['completion_tokens']} "
                 f"| tools_dispatched={tools_dispatched}"
             )
-            footer = "" if subagent else stats_footer(models_used, total_usage, time.monotonic() - start, summarized=summarized, provider_names=provider_names)
+            footer = "" if subagent else stats_footer(models_used, total_usage, time.monotonic() - start, summarized=summarized, labels=model_labels)
             if footer:
                 yield f"\n\n---\n{footer}"
             if stats_out is not None:
@@ -1019,7 +1017,7 @@ async def run_chat(
             yield ("\n\n> ⚠️ **Stopping** — the model repeated the same action "
                    "without making progress.")
             print(f"[chat] run aborted: identical tool call repeated x{repeat_count + 1}")
-            footer = "" if subagent else stats_footer(models_used, total_usage, time.monotonic() - start, summarized=summarized, provider_names=provider_names)
+            footer = "" if subagent else stats_footer(models_used, total_usage, time.monotonic() - start, summarized=summarized, labels=model_labels)
             if footer:
                 yield f"\n\n---\n{footer}"
             if stats_out is not None:
@@ -1055,7 +1053,7 @@ async def run_chat(
                 yield _fcf
             print(f"[chat] ask_user — turn paused for user input after "
                   f"{round_num+1} round(s)")
-            footer = "" if subagent else stats_footer(models_used, total_usage, time.monotonic() - start, summarized=summarized, provider_names=provider_names)
+            footer = "" if subagent else stats_footer(models_used, total_usage, time.monotonic() - start, summarized=summarized, labels=model_labels)
             if footer:
                 yield f"\n\n---\n{footer}"
             if stats_out is not None:
@@ -1400,7 +1398,7 @@ async def run_chat(
         f"{time.monotonic() - start:.1f}s | ↑{total_usage['prompt_tokens']} "
         f"↓{total_usage['completion_tokens']}"
     )
-    footer = "" if subagent else stats_footer(models_used, total_usage, time.monotonic() - start, summarized=summarized, provider_names=provider_names)
+    footer = "" if subagent else stats_footer(models_used, total_usage, time.monotonic() - start, summarized=summarized, labels=model_labels)
     if footer:
         yield f"\n\n---\n{footer}"
     if stats_out is not None:
