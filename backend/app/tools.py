@@ -1193,24 +1193,26 @@ def _model_family(model: str) -> str:
     return "unknown"
 
 
-async def _call_openai_compat_image(
-    model_str: str, prompt: str, edit_srcs: Optional[list[dict]], context: dict,
+def _extract_data_url_image(s) -> Optional[bytes]:
+    if isinstance(s, str):
+        m = re.search(r"data:image/[^;]+;base64,([A-Za-z0-9+/=]+)", s)
+        if m:
+            try:
+                return base64.b64decode(m.group(1))
+            except Exception:
+                return None
+    return None
+
+
+async def _image_via_chat_completions(
+    provider: dict, mid: str, prompt: str, edit_srcs: Optional[list[dict]],
 ) -> tuple[Optional[bytes], Optional[str]]:
-    """Image gen/edit via a custom OpenAI-compatible provider (e.g. OpenRouter's
-    Gemini image models / 'Nano Banana'). These don't use CF's image API — they
-    use the CHAT-COMPLETIONS endpoint with modalities:["image","text"], and the
-    generated image comes back as a base64 data URL in message.images[]. For an
-    edit, the source images ride along as image_url parts in the user turn."""
-    from .providers import parse_model_str, resolve_provider
-    pid, mid = parse_model_str(model_str)
-    provider = await resolve_provider(pid, user_id=(context or {}).get("user_id"))
-    if not provider:
-        return None, f"No such provider for image model {model_str!r}."
-    if provider.get("kind") == "anthropic":
-        return None, "This model can't generate images — pick an image-capable model."
+    """Multimodal-LLM image path (OpenRouter Gemini / OpenAI GPT-image): the
+    chat-completions endpoint with modalities:["image","text"]; the image comes
+    back as a base64 data URL in message.images[]. Edits attach the source as an
+    image_url part."""
     base = (provider.get("base_url") or "").rstrip("/")
     url = base if base.endswith("/chat/completions") else base + "/chat/completions"
-
     content: list[dict] = [{"type": "text", "text": prompt}]
     for s in (edit_srcs or []):
         raw = _read_src(s)
@@ -1218,56 +1220,120 @@ async def _call_openai_compat_image(
             b64 = base64.b64encode(raw).decode()
             content.append({"type": "image_url",
                             "image_url": {"url": f"data:image/png;base64,{b64}"}})
-    payload = {
-        "model": mid,
-        "messages": [{"role": "user", "content": content}],
-        "modalities": ["image", "text"],
-    }
+    payload = {"model": mid, "messages": [{"role": "user", "content": content}],
+               "modalities": ["image", "text"]}
     try:
         r = await get_client().post(
-            url,
-            headers={"Authorization": f"Bearer {provider.get('api_key') or ''}",
-                     "Content-Type": "application/json"},
-            json=payload, timeout=240.0,
-        )
+            url, headers={"Authorization": f"Bearer {provider.get('api_key') or ''}",
+                          "Content-Type": "application/json"},
+            json=payload, timeout=240.0)
     except Exception as e:
         return None, f"request failed: {e}"
     if not r.is_success:
-        pname = provider.get("name", "provider")
-        if r.status_code == 404 or "no such model" in r.text.lower() or "not a valid model" in r.text.lower():
-            return None, (
-                f"{pname} has no model '{mid}' (404). That model id isn't hosted "
-                f"there — e.g. OpenRouter carries Google (Gemini/'nano banana') "
-                f"and OpenAI image models, but NOT Flux/Stable Diffusion (those "
-                f"are Cloudflare-only). Pick a model {pname} actually offers, or "
-                f"use the Cloudflare provider for Flux. Tell the user this plainly."
-            )
-        return None, f"{pname} {r.status_code}: {r.text[:300]}"
+        return None, f"{r.status_code}: {r.text[:300]}"
+    try:
+        msg = ((r.json().get("choices") or [{}])[0].get("message") or {})
+    except Exception:
+        return None, "provider returned non-JSON"
+    for im in (msg.get("images") or []):
+        iu = im.get("image_url") if isinstance(im, dict) else None
+        u = iu.get("url") if isinstance(iu, dict) else (im if isinstance(im, str) else None)
+        b = _extract_data_url_image(u)
+        if b:
+            return b, None
+    b = _extract_data_url_image(msg.get("content"))
+    if b:
+        return b, None
+    return None, "no image in chat-completions response"
+
+
+async def _image_via_images_api(
+    provider: dict, mid: str, prompt: str, edit_srcs: Optional[list[dict]],
+) -> tuple[Optional[bytes], Optional[str]]:
+    """Pure-diffusion image path (OpenRouter Flux / Stable Diffusion, output
+    modality image-only): the OpenAI-style /images/generations endpoint. Source
+    images for edits ride in `input_references` as base64 data URLs; the result
+    comes back as data[].b64_json (or a url)."""
+    base = (provider.get("base_url") or "").rstrip("/")
+    if base.endswith("/chat/completions"):
+        base = base[: -len("/chat/completions")]
+    url = base + "/images/generations"
+    payload: dict = {"model": mid, "prompt": prompt}
+    refs = []
+    for s in (edit_srcs or []):
+        raw = _read_src(s)
+        if raw:
+            refs.append(f"data:image/png;base64,{base64.b64encode(raw).decode()}")
+    if refs:
+        payload["input_references"] = refs
+    try:
+        r = await get_client().post(
+            url, headers={"Authorization": f"Bearer {provider.get('api_key') or ''}",
+                          "Content-Type": "application/json"},
+            json=payload, timeout=240.0)
+    except Exception as e:
+        return None, f"request failed: {e}"
+    if not r.is_success:
+        return None, f"{r.status_code}: {r.text[:300]}"
     try:
         data = r.json()
     except Exception:
         return None, "provider returned non-JSON"
-    msg = ((data.get("choices") or [{}])[0].get("message") or {})
-    # OpenRouter/OpenAI-compat return generated images in message.images[].
-    for im in (msg.get("images") or []):
-        iu = im.get("image_url") if isinstance(im, dict) else None
-        u = iu.get("url") if isinstance(iu, dict) else (im if isinstance(im, str) else None)
-        if isinstance(u, str) and u.startswith("data:"):
+    for item in (data.get("data") or []):
+        if not isinstance(item, dict):
+            continue
+        if item.get("b64_json"):
             try:
-                return base64.b64decode(u.split(",", 1)[1]), None
+                return base64.b64decode(item["b64_json"]), None
             except Exception:
                 pass
-    # Some providers inline a data URL in the text content instead.
-    cont = msg.get("content")
-    if isinstance(cont, str):
-        m = re.search(r"data:image/[^;]+;base64,([A-Za-z0-9+/=]+)", cont)
-        if m:
-            try:
-                return base64.b64decode(m.group(1)), None
-            except Exception:
-                pass
-    return None, (f"{provider.get('name', 'provider')} returned no image — the "
-                  "model may not support image output, or the request was refused.")
+        u = item.get("url")
+        if isinstance(u, str):
+            b = _extract_data_url_image(u)
+            if b:
+                return b, None
+            if u.startswith("http"):
+                try:
+                    ir = await get_client().get(u, timeout=60.0)
+                    if ir.is_success:
+                        return ir.content, None
+                except Exception:
+                    pass
+    return None, "no image in images-API response"
+
+
+async def _call_openai_compat_image(
+    model_str: str, prompt: str, edit_srcs: Optional[list[dict]], context: dict,
+) -> tuple[Optional[bytes], Optional[str]]:
+    """Image gen/edit via a custom OpenAI-compatible provider (e.g. OpenRouter).
+    OpenRouter serves image models two different ways — multimodal LLMs (Gemini
+    'nano banana', GPT-image) via chat-completions, and pure diffusion models
+    (Flux, Stable Diffusion) via the OpenAI images API. We try chat-completions
+    first and fall back to the images API when the model isn't a chat model
+    (404 / no-image), so both kinds work without the user knowing which is which."""
+    from .providers import parse_model_str, resolve_provider
+    pid, mid = parse_model_str(model_str)
+    provider = await resolve_provider(pid, user_id=(context or {}).get("user_id"))
+    if not provider:
+        return None, f"No such provider for image model {model_str!r}."
+    if provider.get("kind") == "anthropic":
+        return None, "This model can't generate images — pick an image-capable model."
+
+    png, err = await _image_via_chat_completions(provider, mid, prompt, edit_srcs)
+    if png is not None:
+        return png, None
+    # Flux/SD reject chat-completions (404 "no such model") or return no image —
+    # retry on the images-generations endpoint.
+    png2, err2 = await _image_via_images_api(provider, mid, prompt, edit_srcs)
+    if png2 is not None:
+        return png2, None
+
+    pname = provider.get("name", "provider")
+    both = f"chat-completions: {err}; images-api: {err2}"
+    if "404" in (err or "") and "404" in (err2 or ""):
+        return None, (f"{pname} has no model '{mid}' (404 on both image "
+                      f"endpoints). Check the model id exists on {pname}.")
+    return None, f"{pname} image request failed — {both}"
 
 
 async def _execute_image_model(
