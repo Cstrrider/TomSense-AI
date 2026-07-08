@@ -792,16 +792,16 @@
       prefs = await getPrefs();
       // Normalize legacy bare model strings to provider::model so the
       // dropdowns find a matching option.
-      const raw = prefs.tool_models ?? {};
-      toolModels = {
-        chat: raw.chat ? normalizeModelId(raw.chat) : null,
-        code: raw.code ? normalizeModelId(raw.code) : null,
-        research: raw.research ? normalizeModelId(raw.research) : null,
-        image: raw.image ? normalizeModelId(raw.image) : null,
-        image_hd: raw.image_hd ? normalizeModelId(raw.image_hd) : null,
-        image_edit: raw.image_edit ? normalizeModelId(raw.image_edit) : null,
-        image_edit_hd: raw.image_edit_hd ? normalizeModelId(raw.image_edit_hd) : null
-      };
+      // Load EVERY saved tool-model key (not a hardcoded subset) — otherwise a
+      // key we forget here (vision, code_mode) is dropped from local state, so
+      // its Settings row shows the default AND the next savePersistentTool
+      // omits it, wiping it server-side.
+      const raw = (prefs.tool_models ?? {}) as Record<string, string | null>;
+      const tm: Record<string, string | null> = {};
+      for (const k of Object.keys(raw)) {
+        tm[k] = raw[k] ? normalizeModelId(raw[k] as string) : null;
+      }
+      toolModels = tm as ToolModels;
       cfModels = Array.isArray(prefs.cf_models) ? [...prefs.cf_models] : [];
       const defaultChat = `${CF_BUILTIN_ID}::${CHAT_MODELS[0].id}`;
       if (!chatId && (!chatModel || chatModel === defaultChat)) {

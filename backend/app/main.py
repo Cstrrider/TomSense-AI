@@ -617,9 +617,19 @@ async def me_prefs_update(request: Request, user: dict = Depends(current_user)):
         tm = patch["tool_models"]
         if not isinstance(tm, dict):
             raise HTTPException(status_code=400, detail="tool_models must be an object")
-        patch["tool_models"] = {
+        incoming = {
             k: (str(v).strip() if v else None) for k, v in tm.items() if k in TOOL_MODELS_KEYS
         }
+        # DEEP-merge over the existing slots: the top-level prefs merge is
+        # shallow (prefs || patch), so a partial tool_models patch would
+        # otherwise REPLACE the whole object and wipe unlisted slots (vision,
+        # code_mode). Merging here makes a partial update do what it says.
+        existing = (await db.get_user_prefs(user["id"]) or {}).get("tool_models") or {}
+        if isinstance(existing, dict):
+            merged = {**existing, **incoming}
+        else:
+            merged = incoming
+        patch["tool_models"] = merged
     if "export_format" in patch and patch["export_format"] not in ("md", "json"):
         raise HTTPException(status_code=400, detail="export_format must be 'md' or 'json'")
     # cf_models: when set, REPLACES the frontend's hardcoded CF model list.
@@ -2711,12 +2721,15 @@ async def chat_stream(
     #            → user's prefs.tool_models.{code_mode|chat} → env default.
     requested_model = req.model or chat_model_override or user_pref_default
 
-    # "Think" toggle: reasoning model + high effort. Overrides the saved
-    # default/pref (the button means "use the reasoning model NOW"); only an
-    # explicit per-request model pick keeps its model (effort still bumps).
+    # "Think" toggle: high reasoning effort on the user's chosen Research model
+    # (a deliberate, heavier model) — falling back to MODEL_THINK only when no
+    # Research model is configured. Previously this always forced CF gpt-oss
+    # 120B, ignoring the user's picks. Only an explicit per-request model pick
+    # keeps its model (effort still bumps).
     reasoning_effort: Optional[str] = "high" if req.think else None
     if req.think and not req.model:
-        requested_model = f"{providers.CF_BUILTIN_ID}::{settings.model_think}"
+        _think_model = (tool_models.get("research") or "").strip()
+        requested_model = _think_model or f"{providers.CF_BUILTIN_ID}::{settings.model_think}"
 
     # Vision routing: image turns MUST run on a vision-capable model — a
     # text-only model 400s on multimodal content. So when the conversation
