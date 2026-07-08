@@ -2781,6 +2781,11 @@ async def chat_stream(
                 "uploads": upload_metas,
                 "user_id": user["id"],
                 "chat_id": chat_id,
+                # This turn's user text — image tools derive the HD decision
+                # from it (an explicit /HD, "4K", "best quality", …) rather
+                # than trusting the model's hd flag, which small models set
+                # spuriously and silently upgrade to the pricier HD model.
+                "user_text": _last_user_text(msgs),
                 "memories": memories,
                 "project_upload_ids": [u["id"] for u in project_knowledge] or None,
                 "mcp_specs": mcp_specs or None,

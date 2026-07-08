@@ -1357,11 +1357,33 @@ def _flag_fail_message(verb: str) -> str:
     )
 
 
+# The user-facing HD triggers (mirrors the system-prompt list). Small chat
+# models (e.g. GPT-OSS 20B) set hd=true on their own even when the user never
+# asked — silently upgrading to the pricier HD model. So the HD decision is
+# made HERE from the user's actual words, not the model's flag.
+_HD_TRIGGER_RE = re.compile(
+    r"(?:^|\s|/)(?:hd|4k|8k|uhd|high[\s-]?def(?:inition)?|highest[\s-]?quality|"
+    r"best[\s-]?quality|ultra[\s-]?hd|high[\s-]?res(?:olution)?)\b",
+    re.I,
+)
+
+
+def _effective_hd(args: dict, context: dict) -> bool:
+    """Authoritative HD decision. When we know the user's request text
+    (context['user_text']), HD is true ONLY if it contains an explicit trigger
+    — the model's hd flag is ignored, so it can't over-eagerly upgrade (or
+    forget). Falls back to the model's flag when the text isn't available."""
+    text = (context or {}).get("user_text")
+    if isinstance(text, str):
+        return bool(_HD_TRIGGER_RE.search(text))
+    return bool(args.get("hd", False))
+
+
 async def tool_generate_image(args: dict, context: dict) -> str:
     prompt = (args.get("prompt") or "").strip()
     if not prompt:
         return "Error: empty prompt"
-    hd = bool(args.get("hd", False))
+    hd = _effective_hd(args, context)
     model = resolve_image_model(context, "image", hd)
     steps_override = _cf_model_steps_override(context, model)
     print(f"[tool:gen_image] {'HD' if hd else 'SD'} model={model} steps_override={steps_override} | {prompt[:80]}")
@@ -1391,7 +1413,7 @@ async def tool_edit_image(args: dict, context: dict) -> str:
     prompt = (args.get("prompt") or "").strip()
     if not prompt:
         return "Error: empty prompt"
-    hd = bool(args.get("hd", False))
+    hd = _effective_hd(args, context)
     srcs = _all_image_uploads(context)[:FLUX_MAX_INPUT_IMAGES]
     used_prior = False
     if not srcs:
