@@ -2085,6 +2085,19 @@ async def _autotitle_if_needed(chat_id: str, user_id: str) -> None:
         await db.rename_chat(chat_id, user_id, title)
 
 
+def _has_image_input(msgs: list[dict]) -> bool:
+    """True when any message carries multimodal image parts — this turn's
+    attachment or an earlier one still in context (follow-up questions about
+    a photo need the vision model too)."""
+    for m in msgs:
+        c = m.get("content")
+        if isinstance(c, list) and any(
+            isinstance(p, dict) and p.get("type") == "image_url" for p in c
+        ):
+            return True
+    return False
+
+
 def _augment_last_user_with_uploads(msgs: list[dict], upload_metas: list[dict]) -> str:
     if not msgs or not upload_metas:
         return msgs[-1].get("content", "") if msgs else ""
@@ -2695,6 +2708,21 @@ async def chat_stream(
     reasoning_effort: Optional[str] = "high" if req.think else None
     if req.think and not req.model:
         requested_model = f"{providers.CF_BUILTIN_ID}::{settings.model_think}"
+
+    # Vision override: when the conversation carries image input and the user
+    # configured tool_models.vision, route the turn there — so a known
+    # vision-capable model (e.g. Llama 4 Scout) answers image turns even when
+    # the chat default is degraded or text-only. Wins over the per-chat model
+    # and the Think swap (a text-only reasoning model can't see the image);
+    # loses only to an explicit per-request pick.
+    _vision_model = (tool_models.get("vision") or "").strip() or None
+    if (
+        not code_mode
+        and _vision_model
+        and not req.model
+        and (req.vision or _has_image_input(msgs))
+    ):
+        requested_model = _vision_model
 
     # Smart routing: only when the turn would run the env-default chat model
     # (no explicit pick anywhere) — HARD turns escalate to the heavy model.

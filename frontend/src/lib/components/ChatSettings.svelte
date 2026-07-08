@@ -164,6 +164,13 @@
     { id: '@cf/meta/llama-3.3-70b-instruct-fp8-fast', label: 'Llama 3.3 70B' },
     { id: '@cf/google/gemma-4-26b-a4b-it', label: 'Gemma 4 (26B)' }
   ];
+  // Vision-capable models only — this row answers turns with image input.
+  // Unset = the Chat model handles them (fine while it's vision-capable).
+  const VISION_MODELS: ModelOption[] = [
+    { id: '@cf/meta/llama-4-scout-17b-16e-instruct', label: 'Llama 4 Scout 17B', note: 'fast multimodal MoE' },
+    { id: '@cf/google/gemma-4-26b-a4b-it', label: 'Gemma 4 (26B)', note: 'same as chat default' },
+    { id: '@cf/moonshotai/kimi-k2.7-code', label: 'Kimi K2.7 (1T)', note: 'frontier · neuron-hungry' }
+  ];
   const RESEARCH_MODELS: ModelOption[] = [
     { id: '@cf/openai/gpt-oss-120b', label: 'GPT-OSS 120B', note: 'default' },
     { id: '@cf/openai/gpt-oss-20b', label: 'GPT-OSS 20B' },
@@ -207,6 +214,7 @@
   // catalog. The other rows are static frontend constants.
   let CF_DEFAULTS = $derived<Record<ToolKey, ModelOption[]>>({
     chat: CHAT_MODELS,
+    vision: VISION_MODELS,
     code: CODE_MODELS,
     code_mode: CODE_MODE_MODEL_OPTIONS,
     research: RESEARCH_MODELS,

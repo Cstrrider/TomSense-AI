@@ -22,6 +22,13 @@ TOOL_MODELS_CATALOG: list[dict] = [
         "hint": "Main model for conversation and tool dispatch.",
     },
     {
+        "key": "vision",
+        "label": "Vision",
+        "chip": "vision",
+        "hint": "Handles turns with image attachments. Unset = the Chat model "
+                "answers them (it must be vision-capable).",
+    },
+    {
         "key": "code",
         "label": "Code Writer",
         "chip": "writer",

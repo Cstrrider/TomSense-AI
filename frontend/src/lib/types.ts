@@ -178,6 +178,7 @@ export interface InfoResponse {
 
 export type ToolKey =
   | 'chat'
+  | 'vision'
   | 'code'
   | 'code_mode'
   | 'research'
@@ -188,6 +189,7 @@ export type ToolKey =
 
 export interface ToolModels {
   chat?: string | null;
+  vision?: string | null;
   code?: string | null;
   code_mode?: string | null;
   research?: string | null;
