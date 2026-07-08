@@ -1257,6 +1257,31 @@ def resolve_image_model(context: dict, tool_key: str, hd: bool) -> str:
     return settings.model_image_hd if hd else settings.model_image_sd
 
 
+def _is_flagged_error(err: Optional[str]) -> bool:
+    """CF's image safety filter rejected the OUTPUT (code 3030, 'Your output
+    has been flagged'). It's non-deterministic and a frequent FALSE positive,
+    especially on the larger Flux model — the smaller one often passes the
+    identical request."""
+    e = (err or "").lower()
+    return "has been flagged" in e or '"code":3030' in e or "code': 3030" in e
+
+
+def _flag_fail_message(verb: str) -> str:
+    """Tool result fed to the chat model when a safety flag survives the
+    fallback retry. Steers it to tell the truth instead of fabricating a
+    content policy (observed: model said 'I can't create images of cats
+    wearing hats' for a benign false-positive flag)."""
+    return (
+        f"Image {verb} failed: the image provider's automated safety filter "
+        "flagged the result (code 3030). This filter is known for FALSE "
+        "POSITIVES and is NOT a statement that the requested subject is "
+        "disallowed. Tell the user their image was blocked by an overzealous "
+        "safety filter this time, and offer to try again or reword slightly. "
+        "Do NOT claim the subject they asked for is against policy or that you "
+        "cannot make it — that would be false."
+    )
+
+
 async def tool_generate_image(args: dict, context: dict) -> str:
     prompt = (args.get("prompt") or "").strip()
     if not prompt:
@@ -1268,7 +1293,18 @@ async def tool_generate_image(args: dict, context: dict) -> str:
     png, err = await _execute_image_model(
         model, prompt, hd=hd, edit_srcs=None, steps_override=steps_override,
     )
+    # Safety-flag false positive → retry once on the SD-tier model (a different
+    # size/classifier that commonly passes the same request).
+    if (err or png is None) and _is_flagged_error(err) and model != settings.model_image_sd:
+        fb = settings.model_image_sd
+        print(f"[tool:gen_image] output flagged on {model} — retrying on {fb}")
+        png, err = await _execute_image_model(
+            fb, prompt, hd=False, edit_srcs=None,
+            steps_override=_cf_model_steps_override(context, fb),
+        )
     if err or png is None:
+        if _is_flagged_error(err):
+            return _flag_fail_message("generation")
         return f"Image generation failed: {err or 'no data'}"
     url = _save_image_bytes(png)
     # No inline model label — the stats footer already names the model.
@@ -1304,7 +1340,18 @@ async def tool_edit_image(args: dict, context: dict) -> str:
     png, err = await _execute_image_model(
         model, prompt, hd=hd, edit_srcs=srcs, steps_override=steps_override,
     )
+    # Safety-flag false positive → retry once on the SD-tier model (proven to
+    # pass edits the HD model flags — the exact cat-in-a-hat case).
+    if (err or png is None) and _is_flagged_error(err) and model != settings.model_image_sd:
+        fb = settings.model_image_sd
+        print(f"[tool:edit_image] output flagged on {model} — retrying on {fb}")
+        png, err = await _execute_image_model(
+            fb, prompt, hd=False, edit_srcs=srcs,
+            steps_override=_cf_model_steps_override(context, fb),
+        )
     if err or png is None:
+        if _is_flagged_error(err):
+            return _flag_fail_message("edit")
         return f"Image edit failed: {err or 'no data'}"
     url = _save_image_bytes(png)
     # No inline model label — the stats footer already names the model.
