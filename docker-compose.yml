@@ -88,8 +88,18 @@ services:
       - MODEL_RESEARCH=${MODEL_RESEARCH:-@cf/openai/gpt-oss-120b}
       - MODEL_TITLE=${MODEL_TITLE:-@cf/meta/llama-3.2-3b-instruct}
       - MODEL_EMBED=${MODEL_EMBED:-@cf/baai/bge-base-en-v1.5}
+      - MODEL_IMAGE_SD=${MODEL_IMAGE_SD:-@cf/black-forest-labs/flux-2-klein-4b}
+      - MODEL_IMAGE_HD=${MODEL_IMAGE_HD:-@cf/black-forest-labs/flux-2-klein-9b}
       - TTS_VOICE=${TTS_VOICE:-alloy}
       - MAX_TOKENS_CODER=${MAX_TOKENS_CODER:-8192}
+      # Stall guard: a round with zero bytes for this long aborts and retries
+      # once on the fallback model (0 disables). See .env.example / config.py.
+      - FIRST_TOKEN_TIMEOUT_S=${FIRST_TOKEN_TIMEOUT_S:-45}
+      - STALL_FALLBACK_MODEL=${STALL_FALLBACK_MODEL:-@cf/openai/gpt-oss-120b}
+      # Neuron budget + scheduled-prompt timezone (see config.py for more).
+      - CF_DAILY_NEURON_LIMIT=${CF_DAILY_NEURON_LIMIT:-10000}
+      - NEURON_SOFT_CAP_PCT=${NEURON_SOFT_CAP_PCT:-80}
+      - SCHEDULE_TZ=${SCHEDULE_TZ:-UTC}
       # ── Code mode ──
       - SANDBOX_URL=http://tomsense-sandbox:8000
       - SANDBOX_TOKEN=${SANDBOX_TOKEN:?run setup.sh to generate .env}
