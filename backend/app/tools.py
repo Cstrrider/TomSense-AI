@@ -487,12 +487,14 @@ TOOL_SPECS: list[dict[str, Any]] = [
         "function": {
             "name": "open_url",
             "description": (
-                "Open a web URL or app deep link on the device. Use for "
-                "websites (https://...) AND for app-specific URI schemes: "
-                "'spotify:search:queen' opens Spotify searching for Queen, "
-                "'spotify:search:bohemian+rhapsody' searches for that song. "
-                "Always prefer the Spotify URI over launching the app separately "
-                "when the user asks to play or find music."
+                "Open a web URL or app deep link ON THE USER'S DEVICE (a browser "
+                "tab or app opens on their phone). This is a USER-FACING ACTION, "
+                "not a way to read a page: it returns NO page content to you and "
+                "is only appropriate when the user explicitly asks to open/launch "
+                "something. To READ or research a web page, use fetch_page (or "
+                "web_search) instead — NEVER open_url. Also handles app URI "
+                "schemes, e.g. 'spotify:search:queen'; prefer the Spotify URI "
+                "over launching the app separately when the user wants music."
             ),
             "parameters": {
                 "type": "object",
