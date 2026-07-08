@@ -142,6 +142,9 @@ def _clip(s: str) -> tuple[str, bool]:
 class ExecBody(BaseModel):
     command: str
     timeout: int = 120
+    # Working directory (workspace-relative or /workspace-rooted absolute).
+    # Default: the workspace root.
+    cwd: str = "."
     # Extra env vars merged over the process environment. Used by the backend to
     # inject the user's decrypted secret-vault values (keyed by name) so a
     # command can reference $NAME without the plaintext ever touching the model.
@@ -224,6 +227,9 @@ async def healthz():
 async def exec_cmd(body: ExecBody, x_sandbox_token: str = Header(default="")):
     _check(x_sandbox_token)
     timeout = max(1, min(body.timeout, 600))
+    cwd = _resolve(body.cwd or ".")
+    if not os.path.isdir(cwd):
+        raise HTTPException(status_code=400, detail=f"cwd is not a directory: {body.cwd}")
     # Backend-injected secret-vault values are merged over the base environment
     # (str values only). The command references them as $NAME; the plaintext is
     # never sent by the model and is redacted from output on the backend side.
@@ -235,7 +241,7 @@ async def exec_cmd(body: ExecBody, x_sandbox_token: str = Header(default="")):
     # actually work instead of silently misbehaving.
     proc = await asyncio.create_subprocess_exec(
         "/bin/bash", "-c", body.command,
-        cwd=WORKSPACE,
+        cwd=cwd,
         env=proc_env,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -283,6 +289,135 @@ async def exec_cmd(body: ExecBody, x_sandbox_token: str = Header(default="")):
         "timed_out": timed_out,
         "truncated": t1 or t2,
     }
+
+
+# ── managed background processes ────────────────────────────────────────────
+# Dev servers, watchers, long builds. Unlike `/exec` (foreground, killed at
+# timeout), these keep running between tool calls: the agent starts one,
+# curls it from /exec (same container, so localhost works), reads its logs,
+# and stops it. Guardrails: bounded count, ring-buffer logs, TTL watchdog so
+# an abandoned server can't live forever; everything dies with the container.
+
+MAX_PROCS = 4
+PROC_TTL_S = 45 * 60
+PROC_LOG_CAP = 65_536  # bytes of most-recent output kept per process
+
+_PROCS: dict[str, dict] = {}
+_PROC_SEQ = 0
+
+
+class ProcStartBody(BaseModel):
+    command: str
+    name: str = ""
+    cwd: str = "."
+
+
+class ProcRefBody(BaseModel):
+    id: str = ""
+    tail_chars: int = 4000
+
+
+def _proc_summary(p: dict) -> dict:
+    running = p["proc"].returncode is None
+    return {
+        "id": p["id"],
+        "name": p["name"],
+        "command": p["command"][:120],
+        "running": running,
+        "exit_code": p["proc"].returncode,
+        "uptime_s": int(asyncio.get_event_loop().time() - p["started"]),
+    }
+
+
+def _proc_kill(p: dict) -> None:
+    try:
+        os.killpg(os.getpgid(p["proc"].pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+@app.post("/proc/start")
+async def proc_start(body: ProcStartBody, x_sandbox_token: str = Header(default="")):
+    _check(x_sandbox_token)
+    global _PROC_SEQ
+    # Drop finished entries beyond a small history so the registry stays tidy.
+    for pid in [k for k, v in _PROCS.items() if v["proc"].returncode is not None][:-3]:
+        _PROCS.pop(pid, None)
+    if sum(1 for v in _PROCS.values() if v["proc"].returncode is None) >= MAX_PROCS:
+        raise HTTPException(status_code=429,
+                            detail=f"already {MAX_PROCS} background processes running — stop one first")
+    cwd = _resolve(body.cwd or ".")
+    if not os.path.isdir(cwd):
+        raise HTTPException(status_code=400, detail=f"cwd is not a directory: {body.cwd}")
+    proc = await asyncio.create_subprocess_exec(
+        "/bin/bash", "-c", body.command,
+        cwd=cwd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,  # one interleaved log stream
+        start_new_session=True,
+    )
+    _PROC_SEQ += 1
+    pid = f"bg{_PROC_SEQ}"
+    entry = {
+        "id": pid,
+        "name": body.name or f"bg{_PROC_SEQ}",
+        "command": body.command,
+        "proc": proc,
+        "buf": bytearray(),
+        "started": asyncio.get_event_loop().time(),
+    }
+    _PROCS[pid] = entry
+
+    async def _drain():
+        try:
+            while True:
+                chunk = await proc.stdout.read(8192)
+                if not chunk:
+                    break
+                entry["buf"].extend(chunk)
+                if len(entry["buf"]) > PROC_LOG_CAP:
+                    del entry["buf"][: len(entry["buf"]) - PROC_LOG_CAP]
+        except Exception:
+            pass
+
+    async def _watchdog():
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=PROC_TTL_S)
+        except asyncio.TimeoutError:
+            _proc_kill(entry)
+            entry["buf"].extend(b"\n[watchdog: TTL reached - process killed]\n")
+
+    asyncio.ensure_future(_drain())
+    asyncio.ensure_future(_watchdog())
+    # Give fast-failing commands a beat so the caller sees the crash directly.
+    await asyncio.sleep(0.6)
+    out = {"ok": True, **_proc_summary(entry),
+           "log_tail": bytes(entry["buf"])[-2000:].decode("utf-8", "replace")}
+    return out
+
+
+@app.post("/proc/logs")
+async def proc_logs(body: ProcRefBody, x_sandbox_token: str = Header(default="")):
+    _check(x_sandbox_token)
+    if not body.id:
+        return {"processes": [_proc_summary(p) for p in _PROCS.values()]}
+    p = _PROCS.get(body.id)
+    if p is None:
+        raise HTTPException(status_code=404, detail=f"no such process: {body.id}")
+    tail = max(200, min(body.tail_chars, 20_000))
+    return {**_proc_summary(p),
+            "log_tail": bytes(p["buf"])[-tail:].decode("utf-8", "replace")}
+
+
+@app.post("/proc/stop")
+async def proc_stop(body: ProcRefBody, x_sandbox_token: str = Header(default="")):
+    _check(x_sandbox_token)
+    p = _PROCS.get(body.id)
+    if p is None:
+        raise HTTPException(status_code=404, detail=f"no such process: {body.id}")
+    _proc_kill(p)
+    await asyncio.sleep(0.2)
+    return {"ok": True, **_proc_summary(p)}
 
 
 @app.post("/fs/list")

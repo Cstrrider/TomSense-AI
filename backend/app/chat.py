@@ -29,7 +29,9 @@ from .tools_code import set_secret_env
 from .verify import run_verification
 
 # Valid tool names for reasoning-channel recovery (#9).
-_CODE_TOOL_NAMES = set(CODE_DISPATCH) | {"search_docs", "ask_user", "spawn_subagent"}
+_CODE_TOOL_NAMES = set(CODE_DISPATCH) | {
+    "search_docs", "web_search", "fetch_page", "ask_user", "spawn_subagent",
+}
 # Tools a subagent must NOT have: it can't ask the user (it runs autonomously)
 # and can't spawn further subagents (one level of nesting only).
 _SUBAGENT_EXCLUDED_TOOLS = {"spawn_subagent", "ask_user", "deploy_project"}
@@ -128,7 +130,14 @@ def code_system_prompt() -> str:
         "docker CLI (for `docker compose config` validation only — no daemon "
         "access) are preinstalled. If a task wants a URL fetched or a "
         "package installed, just do it via run_bash — do NOT decline "
-        "preemptively or assume the sandbox is offline.\n\n"
+        "preemptively or assume the sandbox is offline. For current docs, "
+        "error messages, or library versions, use web_search + fetch_page "
+        "instead of guessing URLs.\n\n"
+        "Long-running processes: run_bash KILLS its process when the call "
+        "returns — use run_background for dev servers, watchers, or long "
+        "builds. It keeps running between your calls: reach it from run_bash "
+        "at localhost:<port> (same container), watch it with background_logs, "
+        "and background_stop it when you're done verifying.\n\n"
         "User's projects are live-mounted under `/workspace/projects/` — "
         "these are NOT throwaway scratch dirs, they are the user's real "
         "source code from the host filesystem"
@@ -158,6 +167,10 @@ def code_system_prompt() -> str:
         "In all cases: get the file:line, then read_file with offset/limit to "
         "pull just that region. Only read a file end-to-end when you genuinely "
         "need the whole thing (e.g. about to rewrite it).\n"
+        "  - read_file output prefixes every line with a `NNN→` line number. "
+        "That prefix is DISPLAY ONLY — it is not in the file. NEVER include "
+        "it in edit_file old_string/new_string, write_file content, or "
+        "apply_patch hunks; copy the text after the arrow.\n"
         "  - Prefer edit_file over write_file for changes to an existing file — "
         "write_file replaces the whole file.\n"
         "  - edit_file's old_string must match the file exactly and uniquely; "
@@ -464,6 +477,12 @@ def tool_chip(tc: dict, result: str) -> str:
         summary = f"grep: {(args.get('pattern') or '')[:60]}"
     elif name == "run_bash":
         summary = f"$ {(args.get('command') or '')[:70]}"
+    elif name == "run_background":
+        summary = f"▶ bg: {(args.get('command') or '')[:60]}"
+    elif name == "background_logs":
+        summary = f"bg logs: {args.get('id') or 'all'}"
+    elif name == "background_stop":
+        summary = f"■ bg stop: {args.get('id') or ''}"
     else:
         summary = f"Called {name}"
 

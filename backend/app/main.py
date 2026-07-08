@@ -2638,6 +2638,15 @@ async def chat_stream(
     if code_mode and chat_id:
         try:
             ws_paths = await db.get_code_working_set(chat_id)
+            # First turn has an empty working set, so convention docs would
+            # only load from turn 2 — also derive project roots from mount
+            # names mentioned in the user's message ("fix X in kitchensync").
+            _text = _last_user_text(msgs).lower()
+            for m in _mounts.load_config():
+                if m["name"].lower() in _text:
+                    _hint_path = f"projects/{m['name']}/."
+                    if _hint_path not in ws_paths:
+                        ws_paths = list(ws_paths) + [_hint_path]
             # Project conventions first (foundational), then the file working set.
             blocks = [
                 await _build_project_context_block(ws_paths),

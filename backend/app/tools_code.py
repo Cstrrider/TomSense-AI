@@ -127,7 +127,16 @@ async def tool_read_file(args: dict) -> str:
     if data.get("truncated"):
         header += f" (showing lines {offset + 1}-{offset + returned}; " \
                   "pass offset/limit to read more)"
-    return header + "\n" + (data.get("content") or "")
+    content = data.get("content") or ""
+    # cat -n-style line numbers: anchors edits/patches and lets the model cite
+    # file:line (pairs with find_symbol/diagnostics output). The `NNN→` prefix
+    # is PRESENTATION ONLY — the system prompt tells the model to never copy
+    # it into edit_file old_string/new_string or apply_patch hunks.
+    numbered = "".join(
+        f"{offset + i + 1:>5}→{line}"
+        for i, line in enumerate(content.splitlines(keepends=True))
+    )
+    return header + "\n" + numbered
 
 
 async def tool_write_file(args: dict) -> str:
@@ -210,6 +219,9 @@ async def tool_run_bash(args: dict) -> str:
     if not command:
         return "Error: command is required"
     payload: dict = {"command": command}
+    cwd = (args.get("cwd") or "").strip()
+    if cwd:
+        payload["cwd"] = cwd
     timeout = args.get("timeout")
     if isinstance(timeout, int) and timeout > 0:
         payload["timeout"] = min(timeout, 600)
@@ -230,6 +242,65 @@ async def tool_run_bash(args: dict) -> str:
     if data.get("truncated"):
         body += "\n… (output truncated)"
     return f"{status}\n{body}"
+
+
+def _bg_line(d: dict) -> str:
+    state = "running" if d.get("running") else f"exited {d.get('exit_code')}"
+    return (f"{d.get('id')} ({d.get('name')}) — {state}, "
+            f"up {d.get('uptime_s', 0)}s: {d.get('command', '')}")
+
+
+async def tool_run_background(args: dict) -> str:
+    command = (args.get("command") or "").strip()
+    if not command:
+        return "Error: command is required"
+    payload: dict = {"command": command}
+    if (args.get("name") or "").strip():
+        payload["name"] = str(args["name"]).strip()
+    if (args.get("cwd") or "").strip():
+        payload["cwd"] = str(args["cwd"]).strip()
+    try:
+        d = await _call("/proc/start", payload)
+    except Exception as e:
+        return f"Error starting background process: {e}"
+    tail = (d.get("log_tail") or "").strip()
+    out = f"Started: {_bg_line(d)}"
+    if not d.get("running"):
+        out = f"⚠ Process exited immediately: {_bg_line(d)}"
+    if tail:
+        out += f"\n[output so far]\n{tail}"
+    return out + ("\nIt keeps running between your tool calls — reach it at "
+                  "localhost from run_bash, watch it with background_logs, and "
+                  "background_stop it when done (auto-killed after 45 min).")
+
+
+async def tool_background_logs(args: dict) -> str:
+    payload: dict = {}
+    if (args.get("id") or "").strip():
+        payload["id"] = str(args["id"]).strip()
+    if isinstance(args.get("tail_chars"), int):
+        payload["tail_chars"] = args["tail_chars"]
+    try:
+        d = await _call("/proc/logs", payload)
+    except Exception as e:
+        return f"Error: {e}"
+    if "processes" in d:
+        procs = d["processes"]
+        if not procs:
+            return "No background processes."
+        return "Background processes:\n" + "\n".join(_bg_line(p) for p in procs)
+    return _bg_line(d) + "\n[log tail]\n" + (d.get("log_tail") or "(no output yet)")
+
+
+async def tool_background_stop(args: dict) -> str:
+    proc_id = (args.get("id") or "").strip()
+    if not proc_id:
+        return "Error: id is required (see background_logs for the list)"
+    try:
+        d = await _call("/proc/stop", {"id": proc_id})
+    except Exception as e:
+        return f"Error: {e}"
+    return f"Stopped: {_bg_line(d)}"
 
 
 async def tool_glob(args: dict) -> str:
@@ -719,15 +790,71 @@ CODE_TOOL_SPECS: list[dict] = [
                 "Run a shell command in the workspace (bash). Use for git, "
                 "installing dependencies, running builds and tests, etc. Returns "
                 "stdout, stderr, and the exit code. Long output is truncated; "
-                "default timeout is 120s."
+                "default timeout is 120s. For dev servers / watchers use "
+                "run_background instead — `&` here orphans the process."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "command": {"type": "string", "description": "Shell command to run."},
+                    "cwd": {"type": "string", "description": "Working directory, e.g. 'projects/kitchensync'. Default: workspace root."},
                     "timeout": {"type": "integer", "description": "Timeout in seconds (max 600)."},
                 },
                 "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_background",
+            "description": (
+                "Start a LONG-RUNNING process (dev server, watcher, long build) "
+                "that keeps running between your tool calls — unlike run_bash, "
+                "which kills its process when the call returns. The server is "
+                "reachable from run_bash at localhost:<port> (same container). "
+                "Watch output with background_logs; stop with background_stop. "
+                "Max 4 running; auto-killed after 45 minutes."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Command to run, e.g. 'npm run dev'."},
+                    "name": {"type": "string", "description": "Short label, e.g. 'dev-server'."},
+                    "cwd": {"type": "string", "description": "Working directory, e.g. 'projects/kitchensync/frontend'."},
+                },
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "background_logs",
+            "description": (
+                "Recent output + status of a background process started with "
+                "run_background. Without an id, lists all background processes."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Process id from run_background (e.g. 'bg1'). Omit to list all."},
+                    "tail_chars": {"type": "integer", "description": "How much recent output to return (default 4000)."},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "background_stop",
+            "description": "Stop a background process started with run_background.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Process id (e.g. 'bg1')."},
+                },
+                "required": ["id"],
             },
         },
     },
@@ -1067,6 +1194,44 @@ CODE_TOOL_SPECS: list[dict] = [
             },
         },
     },
+    # web_search / fetch_page — same re-exposure pattern as search_docs (they
+    # dispatch through tools.py). Real docs lookup beats guessing URLs with
+    # curl: search for the upstream doc, then fetch the winning page.
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": (
+                "Web search (SearXNG). Use to find current docs, error messages, "
+                "library versions, or upstream READMEs — instead of guessing "
+                "URLs for curl. Follow up with fetch_page on the best result."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "3-8 word query."},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_page",
+            "description": (
+                "Fetch a web page and return its readable text. Use after "
+                "web_search, or on a known docs URL."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "Full URL."},
+                },
+                "required": ["url"],
+            },
+        },
+    },
 ]
 
 # deploy_project is only offered when the user configured targets in
@@ -1105,4 +1270,7 @@ CODE_DISPATCH = {
     "find_symbol": tool_find_symbol,
     "outline":     tool_outline,
     "diagnostics": tool_diagnostics,
+    "run_background":  tool_run_background,
+    "background_logs": tool_background_logs,
+    "background_stop": tool_background_stop,
 }
