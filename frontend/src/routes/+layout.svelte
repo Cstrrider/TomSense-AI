@@ -7,6 +7,7 @@
   import Toaster from '$lib/components/Toaster.svelte';
   import { app } from '$lib/stores.svelte';
   import { initNotifications } from '$lib/notifications';
+  import { initTheme } from '$lib/theme';
 
   let { children } = $props();
 
@@ -39,6 +40,9 @@
   });
 
   onMount(() => {
+    // Bind live OS light/dark switching (System mode); the initial theme is
+    // already applied by the inline script in app.html.
+    initTheme();
     if (isBare) {
       app.refreshInfo();
       return;

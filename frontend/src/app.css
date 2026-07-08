@@ -99,6 +99,52 @@
   --t: 0.2s var(--ease);
 }
 
+/* ─── Light theme ──────────────────────────────────────────────────────────
+ * Applied when <html data-theme="light">. The theme controller (lib/theme.ts)
+ * resolves the user's choice (System / Dark / Light) — for System it reads the
+ * OS preference and sets data-theme to the concrete value, so this palette
+ * only ever needs the two concrete states. Dark stays the :root default.
+ * Only the color/shadow tokens change; spacing/shape/type are shared.
+ */
+[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #faf9f7;
+  --bg-elevated: #ffffff;
+  --panel: #f2f0ec;
+  --panel-2: #e9e6e1;
+  --panel-3: #e0dcd5;
+  --border: #dbd6ce;
+  --border-strong: #b6afa4;
+
+  --text: #1c1b19;
+  --text-strong: #0e0d0b;
+  --muted: #6a635b;
+  --muted-strong: #48433c;
+
+  /* deeper orange so it stays legible as text/icon on a light surface,
+     while still reading as the brand on primary buttons (white on orange) */
+  --accent: #d95f28;
+  --accent-hover: #c2521f;
+  --accent-pressed: #a8471b;
+  --accent-fg: #ffffff;
+  --accent-container: #ffe0cc;
+  --on-accent-container: #6a2d0e;
+
+  --link: #1d63d8;
+  --danger: #d13a3a;
+  --warn: #b45309;
+  --success: #158a45;
+  --user-bubble: #e7eaf1;
+  --row-hover: #efece7;
+  --row-active: #e3ded6;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.08);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.10);
+  --shadow-lg: 0 12px 28px rgba(0, 0, 0, 0.14);
+  --shadow-drawer: -8px 0 32px rgba(0, 0, 0, 0.18);
+}
+
 * {
   box-sizing: border-box;
 }

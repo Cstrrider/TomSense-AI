@@ -40,6 +40,7 @@
   import { getCodeModeModels } from '$lib/codeModels';
   import { buildToolOptions } from '$lib/modelOptions';
   import { getInstanceUrl, setInstanceUrl } from '$lib/clienttools';
+  import { getThemeChoice, setThemeChoice, type ThemeChoice } from '$lib/theme';
   import { toast } from '$lib/toast.svelte';
   import {
     IconBrain,
@@ -80,6 +81,9 @@
 
   type Tab = 'persona' | 'memory' | 'providers' | 'voice' | 'share' | 'coder' | 'secrets' | 'app';
   let tab = $state<Tab>('providers');
+
+  // Theme choice (System / Dark / Light) — device-local via lib/theme.ts.
+  let themeChoice = $state<ThemeChoice>(getThemeChoice());
 
   // Instance URL (Android APK only) — null means "not running in the app",
   // which hides the App tab entirely. See ServerConfig.java / ActionsPlugin.
@@ -1507,6 +1511,27 @@
               </select>
             </div>
           {/snippet}
+
+          <div class="tool-row" style="margin-bottom: var(--sp-2);">
+            <div class="tool-meta">
+              <div class="tool-label">Theme</div>
+              <div class="tool-hint">
+                System follows your device's light/dark setting.
+              </div>
+            </div>
+            <select
+              class="model-select compact"
+              value={themeChoice}
+              onchange={(e) => {
+                themeChoice = (e.currentTarget as HTMLSelectElement).value as ThemeChoice;
+                setThemeChoice(themeChoice);
+              }}
+            >
+              <option value="system">System</option>
+              <option value="dark">Dark</option>
+              <option value="light">Light</option>
+            </select>
+          </div>
 
           <div class="tool-row" style="margin-bottom: var(--sp-2);">
             <div class="tool-meta">
