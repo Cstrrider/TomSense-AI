@@ -1193,14 +1193,89 @@ def _model_family(model: str) -> str:
     return "unknown"
 
 
+async def _call_openai_compat_image(
+    model_str: str, prompt: str, edit_srcs: Optional[list[dict]], context: dict,
+) -> tuple[Optional[bytes], Optional[str]]:
+    """Image gen/edit via a custom OpenAI-compatible provider (e.g. OpenRouter's
+    Gemini image models / 'Nano Banana'). These don't use CF's image API — they
+    use the CHAT-COMPLETIONS endpoint with modalities:["image","text"], and the
+    generated image comes back as a base64 data URL in message.images[]. For an
+    edit, the source images ride along as image_url parts in the user turn."""
+    from .providers import parse_model_str, resolve_provider
+    pid, mid = parse_model_str(model_str)
+    provider = await resolve_provider(pid, user_id=(context or {}).get("user_id"))
+    if not provider:
+        return None, f"No such provider for image model {model_str!r}."
+    if provider.get("kind") == "anthropic":
+        return None, "This model can't generate images — pick an image-capable model."
+    base = (provider.get("base_url") or "").rstrip("/")
+    url = base if base.endswith("/chat/completions") else base + "/chat/completions"
+
+    content: list[dict] = [{"type": "text", "text": prompt}]
+    for s in (edit_srcs or []):
+        raw = _read_src(s)
+        if raw:
+            b64 = base64.b64encode(raw).decode()
+            content.append({"type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{b64}"}})
+    payload = {
+        "model": mid,
+        "messages": [{"role": "user", "content": content}],
+        "modalities": ["image", "text"],
+    }
+    try:
+        r = await get_client().post(
+            url,
+            headers={"Authorization": f"Bearer {provider.get('api_key') or ''}",
+                     "Content-Type": "application/json"},
+            json=payload, timeout=240.0,
+        )
+    except Exception as e:
+        return None, f"request failed: {e}"
+    if not r.is_success:
+        return None, f"{provider.get('name', 'provider')} {r.status_code}: {r.text[:300]}"
+    try:
+        data = r.json()
+    except Exception:
+        return None, "provider returned non-JSON"
+    msg = ((data.get("choices") or [{}])[0].get("message") or {})
+    # OpenRouter/OpenAI-compat return generated images in message.images[].
+    for im in (msg.get("images") or []):
+        iu = im.get("image_url") if isinstance(im, dict) else None
+        u = iu.get("url") if isinstance(iu, dict) else (im if isinstance(im, str) else None)
+        if isinstance(u, str) and u.startswith("data:"):
+            try:
+                return base64.b64decode(u.split(",", 1)[1]), None
+            except Exception:
+                pass
+    # Some providers inline a data URL in the text content instead.
+    cont = msg.get("content")
+    if isinstance(cont, str):
+        m = re.search(r"data:image/[^;]+;base64,([A-Za-z0-9+/=]+)", cont)
+        if m:
+            try:
+                return base64.b64decode(m.group(1)), None
+            except Exception:
+                pass
+    return None, (f"{provider.get('name', 'provider')} returned no image — the "
+                  "model may not support image output, or the request was refused.")
+
+
 async def _execute_image_model(
     model: str, prompt: str, *, hd: bool, edit_srcs: Optional[list[dict]],
-    steps_override: Optional[int] = None,
+    steps_override: Optional[int] = None, context: Optional[dict] = None,
 ) -> tuple[Optional[bytes], Optional[str]]:
     """Single entry point for "generate one image with this model". Picks the
     right adapter by family; returns (bytes, error). edit_srcs=None means
     text-to-image; non-empty means img2img. `steps_override` only matters
     for Flux family — other adapters ignore it."""
+    # A provider-qualified id (`<provider>::<model>`) that survived
+    # resolve_image_model is a CUSTOM provider's image model (CF ids get the
+    # cf:: prefix stripped there) — route it to that provider's API, not CF.
+    # Fixes: an OpenRouter image model was pattern-matched to a CF family and
+    # sent to Cloudflare, which 400'd with "No such model <uuid>::google/...".
+    if "::" in model:
+        return await _call_openai_compat_image(model, prompt, edit_srcs, context or {})
     family = _model_family(model)
     if family == "flux_klein":
         return await _call_flux(
@@ -1292,6 +1367,7 @@ async def tool_generate_image(args: dict, context: dict) -> str:
     print(f"[tool:gen_image] {'HD' if hd else 'SD'} model={model} steps_override={steps_override} | {prompt[:80]}")
     png, err = await _execute_image_model(
         model, prompt, hd=hd, edit_srcs=None, steps_override=steps_override,
+        context=context,
     )
     # Safety-flag false positive → retry once on the SD-tier model (a different
     # size/classifier that commonly passes the same request).
@@ -1300,7 +1376,7 @@ async def tool_generate_image(args: dict, context: dict) -> str:
         print(f"[tool:gen_image] output flagged on {model} — retrying on {fb}")
         png, err = await _execute_image_model(
             fb, prompt, hd=False, edit_srcs=None,
-            steps_override=_cf_model_steps_override(context, fb),
+            steps_override=_cf_model_steps_override(context, fb), context=context,
         )
     if err or png is None:
         if _is_flagged_error(err):
@@ -1339,6 +1415,7 @@ async def tool_edit_image(args: dict, context: dict) -> str:
     print(f"[tool:edit_image] {'HD' if hd else 'SD'} model={model} steps_override={steps_override} src={src_tag} refs={n} | {prompt[:80]}")
     png, err = await _execute_image_model(
         model, prompt, hd=hd, edit_srcs=srcs, steps_override=steps_override,
+        context=context,
     )
     # Safety-flag false positive → retry once on the SD-tier model (proven to
     # pass edits the HD model flags — the exact cat-in-a-hat case).
@@ -1347,7 +1424,7 @@ async def tool_edit_image(args: dict, context: dict) -> str:
         print(f"[tool:edit_image] output flagged on {model} — retrying on {fb}")
         png, err = await _execute_image_model(
             fb, prompt, hd=False, edit_srcs=srcs,
-            steps_override=_cf_model_steps_override(context, fb),
+            steps_override=_cf_model_steps_override(context, fb), context=context,
         )
     if err or png is None:
         if _is_flagged_error(err):
