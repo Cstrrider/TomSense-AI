@@ -266,6 +266,10 @@ export interface UserPrefs {
   max_rounds_code?: number | null;
   /** Code mode: per-user response-length cap override (null/unset = default). */
   max_tokens_coder?: number | null;
+  /** Sidebar usage counter: 'auto' follows the active provider (CF→neurons,
+   *  others→tokens/cost), 'neurons' always CF, 'tokens' always tokens+cost.
+   *  Unset = auto. */
+  usage_display?: 'auto' | 'neurons' | 'tokens';
 }
 
 export interface MeResponse {
@@ -286,6 +290,22 @@ export interface NeuronUsage {
   /** Estimated $ spend today: neurons = Workers AI overage (0 until past the
    *  free daily allocation), gateway = unified-billing external providers. */
   dollars?: { neurons: number; gateway: number; total: number };
+}
+
+export interface UsageProvider {
+  provider_id: string;
+  provider_name: string | null;
+  tokens_in: number;
+  tokens_out: number;
+  cost: number;
+  requests: number;
+}
+
+/** Today's per-provider token/cost usage (sidebar counter, tokens mode). */
+export interface UsageToday {
+  providers: UsageProvider[];
+  active_provider: string;
+  totals: { tokens_in: number; tokens_out: number; tokens: number; cost: number };
 }
 
 export interface Memory {

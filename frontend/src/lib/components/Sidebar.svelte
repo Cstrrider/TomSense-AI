@@ -169,6 +169,36 @@
   let usageWarn = $derived(usagePct >= 70 && !usageDanger);
   let avatarLetter = $derived((app.me?.email ?? '?')[0].toUpperCase());
 
+  // Sidebar usage counter mode. 'auto' follows the active provider — CF shows
+  // neurons, any other provider shows tokens + $ cost; the toggle in Settings
+  // can force one or the other.
+  let usageMode = $derived.by(() => {
+    const pref = app.prefs.usage_display ?? 'auto';
+    if (pref === 'neurons' || pref === 'tokens') return pref;
+    return (app.usage?.active_provider ?? 'cf') === 'cf' ? 'neurons' : 'tokens';
+  });
+  // Tokens-mode figures: the active provider's row when it has usage today,
+  // else the all-provider total. Cost is only shown when the provider reports
+  // it (OpenRouter does; CF/Anthropic don't).
+  let usageTokens = $derived.by(() => {
+    const u = app.usage;
+    if (!u) return null;
+    const row = u.providers.find((p) => p.provider_id === u.active_provider);
+    if (row) return { name: row.provider_name ?? 'Provider', tokens: row.tokens_in + row.tokens_out, cost: row.cost };
+    return { name: 'today', tokens: u.totals.tokens, cost: u.totals.cost };
+  });
+  let usageBreakdown = $derived.by(() => {
+    const ps = app.usage?.providers ?? [];
+    if (!ps.length) return 'No token usage recorded today.';
+    return 'Token usage today (per provider):\n' + ps.map((p) =>
+      `${p.provider_name ?? p.provider_id}: ${shortNum(p.tokens_in + p.tokens_out)} tok`
+      + (p.cost > 0 ? ` · $${p.cost.toFixed(p.cost < 0.01 ? 4 : 2)}` : '')
+    ).join('\n');
+  });
+  function fmtCost(c: number): string {
+    return c < 0.01 ? `$${c.toFixed(4)}` : `$${c.toFixed(2)}`;
+  }
+
   // ─── chat row menu ────────────────────────────────────────────────────
   let menuFor = $state<string | null>(null);
 
@@ -458,7 +488,16 @@
           <IconLogOut size={14} />
         </a>
       </div>
-      {#if app.neurons}
+      {#if usageMode === 'tokens'}
+        <div class="usage" title={usageBreakdown}>
+          <div class="usage-text">
+            {shortNum(usageTokens?.tokens ?? 0)} tokens today
+            {#if (usageTokens?.cost ?? 0) > 0}
+              <span class="usage-dollars nonzero">· {fmtCost(usageTokens?.cost ?? 0)}</span>
+            {/if}
+          </div>
+        </div>
+      {:else if app.neurons}
         {@const d = app.neurons.dollars}
         <div
           class="usage"

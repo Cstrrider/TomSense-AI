@@ -98,6 +98,22 @@ CREATE UNIQUE INDEX IF NOT EXISTS uniq_user_builtin
     ON providers(user_id, builtin_id) WHERE is_builtin = true;
 CREATE INDEX IF NOT EXISTS idx_providers_user ON providers(user_id, name);
 
+-- Per-provider daily usage: tokens (always) + cost (when the provider
+-- reports it, e.g. OpenRouter). Powers the sidebar counter's tokens/cost
+-- mode. Keyed per user+day+provider so "auto" can show the active
+-- provider's row. Day is UTC to line up with the CF neuron window.
+CREATE TABLE IF NOT EXISTS usage_daily (
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    day DATE NOT NULL,
+    provider_id TEXT NOT NULL,
+    provider_name TEXT,
+    tokens_in BIGINT NOT NULL DEFAULT 0,
+    tokens_out BIGINT NOT NULL DEFAULT 0,
+    cost DOUBLE PRECISION NOT NULL DEFAULT 0,
+    requests INT NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id, day, provider_id)
+);
+
 -- Projects: replace the old free-text `folder` grouping. A project groups
 -- chats and carries a shared system prompt prepended on every chat in it.
 CREATE TABLE IF NOT EXISTS projects (
@@ -1165,6 +1181,56 @@ async def add_tokens(user_id: str, prompt_tokens: int, completion_tokens: int) -
             "UPDATE users SET tokens_used = tokens_used + $1 WHERE id = $2",
             delta, uid,
         )
+
+
+async def record_usage(user_id: str, provider_id: str, provider_name: str,
+                       tokens_in: int, tokens_out: int, cost: float) -> None:
+    """Increment today's per-provider usage row (UTC day). Best-effort."""
+    try:
+        uid = uuid.UUID(user_id)
+    except (ValueError, TypeError):
+        return
+    tin, tout = int(tokens_in or 0), int(tokens_out or 0)
+    cost = float(cost or 0.0)
+    if tin <= 0 and tout <= 0 and cost <= 0:
+        return
+    async with _pool_or_raise().acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO usage_daily (user_id, day, provider_id, provider_name,
+                                     tokens_in, tokens_out, cost, requests)
+            VALUES ($1, (now() at time zone 'utc')::date, $2, $3, $4, $5, $6, 1)
+            ON CONFLICT (user_id, day, provider_id) DO UPDATE SET
+                tokens_in = usage_daily.tokens_in + EXCLUDED.tokens_in,
+                tokens_out = usage_daily.tokens_out + EXCLUDED.tokens_out,
+                cost = usage_daily.cost + EXCLUDED.cost,
+                requests = usage_daily.requests + 1,
+                provider_name = EXCLUDED.provider_name
+            """,
+            uid, str(provider_id or "?"), provider_name or None, tin, tout, cost,
+        )
+
+
+async def usage_today(user_id: str) -> list[dict]:
+    """Today's per-provider usage rows (UTC). [] on any error."""
+    try:
+        uid = uuid.UUID(user_id)
+    except (ValueError, TypeError):
+        return []
+    try:
+        async with _pool_or_raise().acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT provider_id, provider_name, tokens_in, tokens_out, cost, requests
+                FROM usage_daily
+                WHERE user_id = $1 AND day = (now() at time zone 'utc')::date
+                ORDER BY (tokens_in + tokens_out) DESC
+                """,
+                uid,
+            )
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
 
 
 async def get_user_prefs(user_id: str) -> dict:

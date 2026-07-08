@@ -48,6 +48,7 @@
     app.refreshProjects();
     app.refreshMe();
     app.refreshNeurons();
+    app.refreshUsage();
     app.refreshPrefs();
     // Integrated push: drain the server notification queue (now + on every
     // resume) and mirror scheduled prompts into OS-level notifications.

@@ -775,7 +775,7 @@ async def run_chat(
 
     start = start_time if start_time is not None else time.monotonic()
     models_used: set = set()
-    total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cost": 0.0}
 
     # Code mode: a longer agentic loop, only the coding tools, and a roomier
     # cap on tool output fed back to the model (file reads / build logs).

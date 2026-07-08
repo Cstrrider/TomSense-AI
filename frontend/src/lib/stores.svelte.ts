@@ -1,5 +1,5 @@
-import { getInfo, getMe, getNeurons, getPrefs, listChats, listProjects, updatePrefs } from './api';
-import type { Chat, InfoResponse, MeResponse, NeuronUsage, Project, UserPrefs } from './types';
+import { getInfo, getMe, getNeurons, getUsageToday, getPrefs, listChats, listProjects, updatePrefs } from './api';
+import type { Chat, InfoResponse, MeResponse, NeuronUsage, Project, UsageToday, UserPrefs } from './types';
 
 class AppState {
   chats = $state<Chat[]>([]);
@@ -9,6 +9,7 @@ class AppState {
   infoError = $state<string | null>(null);
   me = $state<MeResponse | null>(null);
   neurons = $state<NeuronUsage | null>(null);
+  usage = $state<UsageToday | null>(null);
   prefs = $state<UserPrefs>({});
   prefsLoaded = $state(false);
   sidebarOpen = $state(false);
@@ -68,6 +69,14 @@ class AppState {
       this.neurons = await getNeurons();
     } catch (e) {
       console.error('getNeurons failed', e);
+    }
+  }
+
+  async refreshUsage() {
+    try {
+      this.usage = await getUsageToday();
+    } catch (e) {
+      console.error('getUsageToday failed', e);
     }
   }
 

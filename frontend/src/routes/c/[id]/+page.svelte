@@ -359,7 +359,9 @@
       setTimeout(() => loadFollowups(), 900);
       app.refreshMe();
       app.refreshNeurons();
+      app.refreshUsage();
       setTimeout(() => app.refreshNeurons(), 4000);
+      setTimeout(() => app.refreshUsage(), 4000);
       setTimeout(() => {
         app.refreshChats().then(() => {
           const c = app.chats.find((c) => c.id === chatId);

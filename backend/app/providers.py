@@ -274,6 +274,12 @@ async def stream_round(
     usage: dict = {}
     finish_reason: Optional[str] = None
 
+    # OpenRouter reports real $ cost in the final usage chunk when asked. Only
+    # for openrouter base_urls — an unknown `usage` param could upset stricter
+    # OpenAI-compat servers. Harmless elsewhere; we just won't get a cost.
+    if "openrouter.ai" in (provider.get("base_url") or ""):
+        payload["usage"] = {"include": True}
+
     try:
         async with get_client().stream(
             "POST",

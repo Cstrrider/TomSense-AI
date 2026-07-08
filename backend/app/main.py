@@ -412,6 +412,31 @@ async def me_neurons(user: dict = Depends(current_user)):
     return neurons
 
 
+@app.get("/me/usage/today")
+async def me_usage_today(user: dict = Depends(current_user)):
+    """Per-provider token (and, where reported, $ cost) usage for today —
+    powers the sidebar counter's tokens/cost mode. `active_provider` is the
+    provider of the user's default chat model, so the UI's 'auto' mode knows
+    which row to surface."""
+    rows = await db.usage_today(user["id"])
+    prefs = await db.get_user_prefs(user["id"]) or {}
+    chat_pref = ((prefs.get("tool_models") or {}).get("chat") or "").strip()
+    active_pid, _ = providers.parse_model_str(chat_pref) if chat_pref else ("cf", "")
+    tot_in = sum(int(r["tokens_in"]) for r in rows)
+    tot_out = sum(int(r["tokens_out"]) for r in rows)
+    tot_cost = sum(float(r["cost"]) for r in rows)
+    return {
+        "providers": rows,
+        "active_provider": active_pid,
+        "totals": {
+            "tokens_in": tot_in,
+            "tokens_out": tot_out,
+            "tokens": tot_in + tot_out,
+            "cost": round(tot_cost, 4),
+        },
+    }
+
+
 def _mask_key(key: str) -> str:
     if not key:
         return ""
@@ -585,10 +610,13 @@ async def me_prefs_update(request: Request, user: dict = Depends(current_user)):
         "max_tokens_coder", # code mode: per-user response length cap override
         "auto_route",       # chat: difficulty-route default turns to the heavy model
         "auto_memory",      # chat: auto-extract durable facts into memory
+        "usage_display",    # sidebar counter: 'auto' | 'neurons' | 'tokens'
     }
     patch = {k: v for k, v in body.items() if k in allowed}
     if not patch:
         raise HTTPException(status_code=400, detail="no valid prefs keys")
+    if "usage_display" in patch and patch["usage_display"] not in ("auto", "neurons", "tokens"):
+        raise HTTPException(status_code=400, detail="usage_display must be auto|neurons|tokens")
     if "review_edits" in patch:
         patch["review_edits"] = bool(patch["review_edits"])
     if "verify_edits" in patch:
@@ -2398,6 +2426,21 @@ async def _run_generation(
             )
         except Exception as e:
             log.warning("token accounting failed: %s", e)
+
+        # Per-provider daily usage (tokens always; cost when the provider
+        # reports it — OpenRouter does). Powers the sidebar tokens/cost mode.
+        try:
+            _pid, _ = providers.parse_model_str(model)
+            _prov = await providers.resolve_provider(_pid, user_id=user["id"])
+            _pname = (_prov or {}).get("name") or _pid
+            await db.record_usage(
+                user["id"], _pid, _pname,
+                int(stats.get("prompt_tokens") or 0),
+                int(stats.get("completion_tokens") or 0),
+                float(stats.get("cost") or 0.0),
+            )
+        except Exception as e:
+            log.warning("usage recording failed: %s", e)
 
         # Persist BEFORE marking the run done — so the moment `done` is
         # observable, a client falling back to GET /chats/{id} sees the reply.

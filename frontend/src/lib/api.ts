@@ -348,6 +348,10 @@ export async function getMe(): Promise<MeResponse> {
   return http<MeResponse>('/me');
 }
 
+export async function getUsageToday(): Promise<import('./types').UsageToday> {
+  return http<import('./types').UsageToday>('/me/usage/today');
+}
+
 export async function getNeurons(): Promise<NeuronUsage> {
   return http<NeuronUsage>('/me/neurons');
 }

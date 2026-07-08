@@ -943,6 +943,7 @@
   async function savePrefsPatch(patch: UserPrefs) {
     try {
       prefs = await updatePrefs(patch);
+      app.prefs = prefs;  // keep the store in sync so the sidebar reacts live
       toast.success('Saved');
     } catch (e) {
       toast.error((e as Error).message);
@@ -1506,6 +1507,26 @@
               </select>
             </div>
           {/snippet}
+
+          <div class="tool-row" style="margin-bottom: var(--sp-2);">
+            <div class="tool-meta">
+              <div class="tool-label">Usage counter</div>
+              <div class="tool-hint">
+                What the sidebar shows. Auto follows the active provider —
+                Cloudflare neurons, or tokens + $ cost for OpenRouter etc.
+              </div>
+            </div>
+            <select
+              class="model-select compact"
+              value={prefs?.usage_display ?? 'auto'}
+              onchange={(e) =>
+                savePrefsPatch({ usage_display: (e.currentTarget as HTMLSelectElement).value as any })}
+            >
+              <option value="auto">Auto (per provider)</option>
+              <option value="neurons">Neurons (Cloudflare)</option>
+              <option value="tokens">Tokens &amp; cost</option>
+            </select>
+          </div>
 
           {@render secHead('Models', secModels, () => (secModels = !secModels))}
           {#if secModels}
