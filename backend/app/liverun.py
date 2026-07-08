@@ -47,8 +47,9 @@ class LiveRun:
 
     async def stream(self, from_index: int = 0):
         """Yield run chunks from `from_index` on, then tail live ones until the
-        run finishes. Yields KEEPALIVE on a 15s idle so the caller can keep the
-        SSE connection warm."""
+        run finishes. Yields KEEPALIVE on a 10s idle so the caller can keep the
+        SSE connection warm — short enough that mobile/VPN NATs don't idle-drop
+        the socket during a long silent tool call (e.g. image generation)."""
         q: asyncio.Queue = asyncio.Queue()
         # Snapshot the backlog and register the live queue with NO await in
         # between: the single-threaded event loop can't interleave an
@@ -63,7 +64,7 @@ class LiveRun:
                 return
             while True:
                 try:
-                    c = await asyncio.wait_for(q.get(), timeout=15.0)
+                    c = await asyncio.wait_for(q.get(), timeout=10.0)
                 except asyncio.TimeoutError:
                     yield KEEPALIVE
                     continue

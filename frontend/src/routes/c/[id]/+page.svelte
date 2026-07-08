@@ -279,6 +279,29 @@
     }
   }
 
+  /** Recover from a dropped SSE connection. The generation runs detached and
+   *  PERSISTS when it finishes, so a lost socket (mobile/VPN blip) isn't a lost
+   *  reply — poll until the run completes, then reload the persisted messages.
+   *  Returns true if it recovered (caller then skips the error text). */
+  async function recoverDroppedStream(): Promise<boolean> {
+    if (!chatId) return false;
+    for (let i = 0; i < 12; i++) {
+      let runId: string | null;
+      try {
+        runId = await getLiveRun(chatId);
+      } catch {
+        return false; // still offline — leave the error for the user
+      }
+      if (!runId) {
+        await refreshFromServer(); // run finished → persisted reply is authoritative
+        return true;
+      }
+      await new Promise((r) => setTimeout(r, 2000)); // still generating — wait
+    }
+    await refreshFromServer();
+    return true;
+  }
+
   /** Core streaming pass. Assumes the local messages array already contains
    *  the new user message at index N and an empty assistant placeholder at
    *  index N+1. Streams into the placeholder. */
@@ -317,8 +340,13 @@
       }
     } catch (e) {
       if ((e as Error).name !== 'AbortError') {
-        acc += `\n\n*[stream error: ${(e as Error).message}]*`;
-        messages[assistantIdx] = { role: 'assistant', content: acc };
+        // A dropped connection isn't a lost reply — try to recover the
+        // detached run's persisted result before surfacing an error.
+        const recovered = await recoverDroppedStream();
+        if (!recovered) {
+          acc += `\n\n*[stream error: ${(e as Error).message}]*`;
+          messages[assistantIdx] = { role: 'assistant', content: acc };
+        }
       }
     } finally {
       // A turn that ended/errored while an approval card was open: drop it.
@@ -371,8 +399,13 @@
       }
     } catch (e) {
       if ((e as Error).name !== 'AbortError') {
-        acc += `\n\n*[stream error: ${(e as Error).message}]*`;
-        messages[assistantIdx] = { role: 'assistant', content: acc };
+        // A dropped connection isn't a lost reply — try to recover the
+        // detached run's persisted result before surfacing an error.
+        const recovered = await recoverDroppedStream();
+        if (!recovered) {
+          acc += `\n\n*[stream error: ${(e as Error).message}]*`;
+          messages[assistantIdx] = { role: 'assistant', content: acc };
+        }
       }
     } finally {
       pendingApproval?.resolve('reject');
