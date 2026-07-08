@@ -38,6 +38,7 @@
   } from '$lib/api';
   import { app } from '$lib/stores.svelte';
   import { getCodeModeModels } from '$lib/codeModels';
+  import { buildToolOptions } from '$lib/modelOptions';
   import { getInstanceUrl, setInstanceUrl } from '$lib/clienttools';
   import { toast } from '$lib/toast.svelte';
   import {
@@ -112,6 +113,7 @@
   // fallback values below are used only if /info hasn't loaded yet.
   const FALLBACK_CATALOG = [
     { key: 'chat', label: 'Chat', chip: 'chat', hint: 'Main model for conversation and tool dispatch.' },
+    { key: 'vision', label: 'Vision', chip: 'vision', hint: 'Handles turns with image attachments. Unset = the Chat model.' },
     { key: 'code', label: 'Code Writer', chip: 'writer', hint: '🪄 Single-shot — used by /code → consult_coder.' },
     { key: 'code_mode', label: 'Code Mode', chip: 'agent', hint: '🤖 Agentic — used by code chats.' },
     { key: 'research', label: 'Research', chip: 'research', hint: 'Used by /research → deep_research synthesis.' },
@@ -447,50 +449,9 @@
    *     <select> wedges the Android WebView's native picker.
    *  3. Models registered on each non-builtin user provider for this tool. */
   function optionsForTool(toolKey: ToolKey): ModelOption[] {
-    const out: ModelOption[] = [];
-    // Split CF_DEFAULTS into "really CF" (raw model ids — get the cf:: prefix
-    // when surfaced) vs "bundled non-CF" (already qualified like
-    // `anthropic::claude-sonnet-4-6` — route to another builtin). The user's
-    // cf_models override only filters the CF set; non-CF entries always show.
-    const defaults = CF_DEFAULTS[toolKey] ?? [];
-    const nonCfBundled = defaults.filter((m) => typeof m.id === 'string' && m.id.includes('::'));
-    const cfDefaults = defaults.filter((m) => !nonCfBundled.includes(m));
-
-    let cfSource: ModelOption[] = [];
-    if (cfModels.length > 0) {
-      cfSource = cfModels.filter((m) => Array.isArray(m.tools) && m.tools.includes(toolKey));
-    }
-    if (cfSource.length === 0) {
-      cfSource = cfDefaults;
-    }
-    for (const m of cfSource) {
-      out.push({
-        id: `${CF_BUILTIN_ID}::${m.id}`,
-        label: m.label,
-        note: m.note ? `Cloudflare · ${m.note}` : 'Cloudflare'
-      });
-    }
-    // Bundled non-CF entries (e.g. anthropic::claude-sonnet-4-6) —
-    // independent of any cf_models override the user has saved.
-    for (const m of nonCfBundled) {
-      out.push({
-        id: m.id,
-        label: m.label,
-        note: m.note ?? ''
-      });
-    }
-    for (const p of providersList) {
-      if (p.builtin) continue;
-      for (const pm of p.models || []) {
-        if (!Array.isArray(pm.tools) || !pm.tools.includes(toolKey)) continue;
-        out.push({
-          id: `${p.id}::${pm.id}`,
-          label: pm.label || pm.id,
-          note: pm.note ? `${p.name} · ${pm.note}` : p.name
-        });
-      }
-    }
-    return out;
+    // Shared with the new-code-chat picker (+page.svelte) so custom CF
+    // models / provider models are added & removed identically everywhere.
+    return buildToolOptions(toolKey, CF_DEFAULTS[toolKey] ?? [], cfModels, providersList);
   }
 
   /** Combined list of every CF model the dropdowns currently surface — used

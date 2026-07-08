@@ -4,13 +4,14 @@
   import AppHeader from '$lib/components/AppHeader.svelte';
   import ChatSettings from '$lib/components/ChatSettings.svelte';
   import Composer from '$lib/components/Composer.svelte';
-  import { createChat, setSystemPrompt } from '$lib/api';
+  import { createChat, listProviders, setSystemPrompt } from '$lib/api';
   import { consumeSharedContent } from '$lib/clienttools';
   import { app } from '$lib/stores.svelte';
   import { toast } from '$lib/toast.svelte';
   import { IconSparkles, IconImage, IconFileText, IconBrain, IconGitBranch } from '$lib/icons';
-  import { getCodeModeModels, getDefaultCodeModeModelId } from '$lib/codeModels';
-  import type { UploadResponse } from '$lib/types';
+  import { getCodeModeModels } from '$lib/codeModels';
+  import { buildToolOptions, sameModelId } from '$lib/modelOptions';
+  import type { Provider, UploadResponse } from '$lib/types';
 
   let busy = $state(false);
   let settingsOpen = $state(false);
@@ -18,24 +19,39 @@
   // Code mode: ?code=1 (from the sidebar's "Code chat" button) creates the
   // next chat as a coding-agent chat.
   let codeMode = $state(false);
-  // Selected code-mode model (gpt-oss vs GLM vs Kimi). Driven by
-  // `prefs.tool_models.code_mode` — same source of truth as the
-  // Settings → Code Mode row, so picking here updates the setting and vice
-  // versa. $derived re-reads when prefs change.
-  // Catalog is sourced from /info (backend's tool_registry.py) so adding
-  // a model is a backend deploy, not a frontend rebuild. Falls back to a
-  // static list when /info hasn't loaded yet.
-  let codeModelOptions = $derived(getCodeModeModels(app.info));
+  // Selected code-mode model. Driven by `prefs.tool_models.code_mode` — same
+  // source of truth as the Settings → Code Mode row, so picking here updates
+  // the setting and vice versa. Options flow through buildToolOptions — the
+  // SAME precedence as every Settings → Models row: the user's custom CF
+  // model list (tagged `code_mode`) replaces the bundled catalog, and custom
+  // providers' code_mode-tagged models are appended. The catalog itself comes
+  // from /info (backend's tool_registry.py).
+  let pickerProviders = $state<Provider[]>([]);
+  let providersFetched = false;
+  $effect(() => {
+    if (codeMode && !providersFetched) {
+      providersFetched = true;
+      listProviders().then((p) => (pickerProviders = p)).catch(() => {});
+    }
+  });
+  let codeModelOptions = $derived(
+    buildToolOptions(
+      'code_mode',
+      getCodeModeModels(app.info).map((m) => ({ id: m.id, label: m.label, note: m.hint })),
+      app.prefs.cf_models,
+      pickerProviders
+    ).map((o) => ({ id: o.id, label: o.label, hint: o.note ?? '' }))
+  );
   let codeModel = $derived(
-    app.prefs.tool_models?.code_mode ?? getDefaultCodeModeModelId(app.info),
+    app.prefs.tool_models?.code_mode ?? codeModelOptions[0]?.id ?? '',
   );
   let currentCodeModel = $derived(
-    codeModelOptions.find((m) => m.id === codeModel) ?? codeModelOptions[0],
+    codeModelOptions.find((m) => sameModelId(m.id, codeModel)) ?? codeModelOptions[0],
   );
   let savingCodeModel = $state(false);
 
   async function pickCodeModel(id: string) {
-    if (id === codeModel || savingCodeModel) return;
+    if (sameModelId(id, codeModel) || savingCodeModel) return;
     savingCodeModel = true;
     // Merge into the existing tool_models dict — the server does a shallow
     // JSONB merge, so we must send the full nested object to avoid wiping
@@ -171,9 +187,9 @@
           <button
             type="button"
             class="model-chip"
-            class:active={m.id === codeModel}
+            class:active={sameModelId(m.id, codeModel)}
             role="radio"
-            aria-checked={m.id === codeModel}
+            aria-checked={sameModelId(m.id, codeModel)}
             onclick={() => pickCodeModel(m.id)}
             disabled={busy || savingCodeModel}
           >
