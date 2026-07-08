@@ -252,6 +252,7 @@ async def stream_round(
     tools: Optional[list[dict]] = None,
     temperature: Optional[float] = None,
     reasoning_effort: Optional[str] = None,
+    _attempt: int = 0,
 ) -> AsyncIterator[tuple[str, Any]]:
     """Streamed chat round. Routes to the Anthropic Messages API when the
     provider's `kind` is "anthropic"; otherwise hits the OpenAI-compatible
@@ -296,6 +297,27 @@ async def stream_round(
                     print(f"[stream_round:{provider.get('name')}] {model} lacks tool support — retrying without tools")
                     async for ev in stream_round(
                         provider, model, messages, max_tokens, tools=None,
+                    ):
+                        yield ev
+                    return
+                # Transient capacity/overload — retriable. CF returns 429 code
+                # 3040 "Capacity temporarily exceeded, please try again" when a
+                # model's GPU pool is momentarily saturated (the Gemma-4 pool
+                # does this under load); 5xx are server-side hiccups. The error
+                # arrives BEFORE any bytes stream, so a short-backoff retry on
+                # the same model is safe (no double output) and usually clears
+                # within a second or two. After MAX_RETRIES we fall through to
+                # raise — the caller's stall-guard fallback then takes over.
+                MAX_RETRIES = 2
+                if (r.status_code == 429 or 500 <= r.status_code < 600) and _attempt < MAX_RETRIES:
+                    delay = 0.8 * (2 ** _attempt)
+                    print(f"[stream_round:{provider.get('name')}] {model} {r.status_code} "
+                          f"transient — retry {_attempt + 1}/{MAX_RETRIES} after {delay:.1f}s")
+                    await asyncio.sleep(delay)
+                    async for ev in stream_round(
+                        provider, model, messages, max_tokens, tools,
+                        temperature=temperature, reasoning_effort=reasoning_effort,
+                        _attempt=_attempt + 1,
                     ):
                         yield ev
                     return
