@@ -463,9 +463,12 @@
     }
     // Stitch the hardcoded defaults together by id (some models appear in
     // multiple tool lists — collapse to one row with merged `tools`).
+    // `provider::`-qualified defaults (e.g. anthropic::claude-*) are NOT CF
+    // models — seeding them here would corrupt the CF list.
     const map = new Map<string, ProviderModel>();
     for (const t of TOOL_KEYS) {
       for (const m of CF_DEFAULTS[t]) {
+        if (typeof m.id === 'string' && m.id.includes('::')) continue;
         const existing = map.get(m.id);
         if (existing) {
           if (!existing.tools.includes(t)) existing.tools.push(t);

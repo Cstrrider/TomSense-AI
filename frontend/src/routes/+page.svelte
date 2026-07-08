@@ -4,14 +4,14 @@
   import AppHeader from '$lib/components/AppHeader.svelte';
   import ChatSettings from '$lib/components/ChatSettings.svelte';
   import Composer from '$lib/components/Composer.svelte';
-  import { createChat, listProviders, setSystemPrompt } from '$lib/api';
+  import { createChat, setSystemPrompt } from '$lib/api';
   import { consumeSharedContent } from '$lib/clienttools';
   import { app } from '$lib/stores.svelte';
   import { toast } from '$lib/toast.svelte';
   import { IconSparkles, IconImage, IconFileText, IconBrain, IconGitBranch } from '$lib/icons';
   import { getCodeModeModels } from '$lib/codeModels';
-  import { buildToolOptions, sameModelId } from '$lib/modelOptions';
-  import type { Provider, UploadResponse } from '$lib/types';
+  import { sameModelId } from '$lib/modelOptions';
+  import type { UploadResponse } from '$lib/types';
 
   let busy = $state(false);
   let settingsOpen = $state(false);
@@ -19,52 +19,19 @@
   // Code mode: ?code=1 (from the sidebar's "Code chat" button) creates the
   // next chat as a coding-agent chat.
   let codeMode = $state(false);
-  // Selected code-mode model. Driven by `prefs.tool_models.code_mode` — same
-  // source of truth as the Settings → Code Mode row, so picking here updates
-  // the setting and vice versa. Options flow through buildToolOptions — the
-  // SAME precedence as every Settings → Models row: the user's custom CF
-  // model list (tagged `code_mode`) replaces the bundled catalog, and custom
-  // providers' code_mode-tagged models are appended. The catalog itself comes
-  // from /info (backend's tool_registry.py).
-  let pickerProviders = $state<Provider[]>([]);
-  let providersFetched = false;
-  $effect(() => {
-    if (codeMode && !providersFetched) {
-      providersFetched = true;
-      listProviders().then((p) => (pickerProviders = p)).catch(() => {});
-    }
+  // Which model code chats will use — the Settings → Models → Code Mode row
+  // (prefs.tool_models.code_mode) is the single source of truth; chats are
+  // created UNPINNED so they keep following that setting. Shown here as a
+  // hint only (the start-page picker was removed — models are managed in
+  // Settings like every other tool model).
+  let codeModelLabel = $derived.by(() => {
+    const id = app.prefs.tool_models?.code_mode;
+    if (!id) return getCodeModeModels(app.info)[0]?.label ?? 'server default';
+    const cataloged =
+      getCodeModeModels(app.info).find((m) => sameModelId(m.id, id))
+      ?? (app.prefs.cf_models ?? []).find((m) => sameModelId(`cf::${m.id}`, id));
+    return cataloged?.label ?? id.split('::').pop() ?? id;
   });
-  let codeModelOptions = $derived(
-    buildToolOptions(
-      'code_mode',
-      getCodeModeModels(app.info).map((m) => ({ id: m.id, label: m.label, note: m.hint })),
-      app.prefs.cf_models,
-      pickerProviders
-    ).map((o) => ({ id: o.id, label: o.label, hint: o.note ?? '' }))
-  );
-  let codeModel = $derived(
-    app.prefs.tool_models?.code_mode ?? codeModelOptions[0]?.id ?? '',
-  );
-  let currentCodeModel = $derived(
-    codeModelOptions.find((m) => sameModelId(m.id, codeModel)) ?? codeModelOptions[0],
-  );
-  let savingCodeModel = $state(false);
-
-  async function pickCodeModel(id: string) {
-    if (sameModelId(id, codeModel) || savingCodeModel) return;
-    savingCodeModel = true;
-    // Merge into the existing tool_models dict — the server does a shallow
-    // JSONB merge, so we must send the full nested object to avoid wiping
-    // sibling keys (chat, code, image, ...).
-    const merged = { ...(app.prefs.tool_models ?? {}), code_mode: id };
-    try {
-      await app.savePrefs({ tool_models: merged });
-    } catch (e) {
-      toast.error(`Could not save: ${(e as Error).message}`);
-    } finally {
-      savingCodeModel = false;
-    }
-  }
 
   // codeMode tracks ?code=1 on *every* navigation, not just the first mount —
   // so the sidebar's "Code chat" button switches this page into code mode even
@@ -114,7 +81,7 @@
   async function send(text: string, uploads: UploadResponse[] = []) {
     busy = true;
     try {
-      const chat = await createChat(codeMode, codeMode ? codeModel : undefined);
+      const chat = await createChat(codeMode);
       await app.refreshChats();
       const pendingPersona = sessionStorage.getItem('pending-persona');
       if (pendingPersona) {
@@ -182,22 +149,9 @@
         An autonomous coding agent in a sandboxed workspace — it reads, edits,
         and runs files. Describe a task to begin.
       </p>
-      <div class="model-picker" role="radiogroup" aria-label="Code-mode model">
-        {#each codeModelOptions as m}
-          <button
-            type="button"
-            class="model-chip"
-            class:active={sameModelId(m.id, codeModel)}
-            role="radio"
-            aria-checked={sameModelId(m.id, codeModel)}
-            onclick={() => pickCodeModel(m.id)}
-            disabled={busy || savingCodeModel}
-          >
-            {m.label}
-          </button>
-        {/each}
-      </div>
-      <p class="model-hint">{currentCodeModel.hint}</p>
+      <p class="model-hint">
+        Model: {codeModelLabel} — change it in ⚙ Settings → Models → Code Mode.
+      </p>
     {:else}
       <h2>How can I help today?</h2>
       <p class="muted">
@@ -308,37 +262,6 @@
     .suggestions {
       grid-template-columns: 1fr;
     }
-  }
-  .model-picker {
-    display: flex;
-    gap: var(--sp-1);
-    flex-wrap: wrap;
-    justify-content: center;
-    margin-top: var(--sp-2);
-  }
-  .model-chip {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: var(--r-pill);
-    padding: 6px 12px;
-    font-size: var(--fs-sm);
-    color: var(--text);
-    cursor: pointer;
-    transition: border-color var(--t-fast), background var(--t-fast),
-      color var(--t-fast);
-  }
-  .model-chip:hover:not(:disabled) {
-    border-color: var(--border-strong);
-    background: var(--row-hover);
-  }
-  .model-chip.active {
-    background: linear-gradient(135deg, #4a8fe7, #6b5fd6);
-    border-color: transparent;
-    color: var(--accent-fg);
-  }
-  .model-chip:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
   }
   .model-hint {
     color: var(--muted);
