@@ -88,6 +88,9 @@ class Settings:
     auto_summary_keep_recent: int = int(os.getenv("AUTO_SUMMARY_KEEP_RECENT", "4"))
 
     model_chat: str = os.getenv("MODEL_CHAT", "@cf/google/gemma-4-26b-a4b-it")
+    # Fallback vision model: image turns auto-route here when the model that
+    # would otherwise run can't see images and the user set no Vision slot.
+    model_vision: str = os.getenv("MODEL_VISION", "@cf/meta/llama-4-scout-17b-16e-instruct")
     model_coder: str = os.getenv("MODEL_CODER", "@cf/google/gemma-4-26b-a4b-it")
     model_writer: str = os.getenv("MODEL_WRITER", "@cf/openai/gpt-oss-120b")
     model_research: str = os.getenv("MODEL_RESEARCH", "@cf/openai/gpt-oss-120b")

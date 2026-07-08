@@ -2718,20 +2718,32 @@ async def chat_stream(
     if req.think and not req.model:
         requested_model = f"{providers.CF_BUILTIN_ID}::{settings.model_think}"
 
-    # Vision override: when the conversation carries image input and the user
-    # configured tool_models.vision, route the turn there — so a known
-    # vision-capable model (e.g. Llama 4 Scout) answers image turns even when
-    # the chat default is degraded or text-only. Wins over the per-chat model
-    # and the Think swap (a text-only reasoning model can't see the image);
-    # loses only to an explicit per-request pick.
-    _vision_model = (tool_models.get("vision") or "").strip() or None
-    if (
-        not code_mode
-        and _vision_model
-        and not req.model
-        and (req.vision or _has_image_input(msgs))
-    ):
-        requested_model = _vision_model
+    # Vision routing: image turns MUST run on a vision-capable model — a
+    # text-only model 400s on multimodal content. So when the conversation
+    # carries images and the model that WOULD run can't see them, override to
+    # a vision model. Capability is a hard requirement, not a preference, so
+    # this wins over the per-chat pin, the Think swap, AND an explicit
+    # per-request pick — but only when that pick is itself non-vision. The
+    # target is: the user's Vision slot if set, else the chat model if it's
+    # already vision-capable, else the vision default (Llama 4 Scout). A
+    # notice is streamed so the swap is transparent.
+    from .cf import _is_vision_model as _cf_is_vision
+    vision_notice: Optional[str] = None
+    if not code_mode and (req.vision or _has_image_input(msgs)):
+        _would_run = requested_model or f"{providers.CF_BUILTIN_ID}::{settings.model_chat}"
+        if not _cf_is_vision(_would_run):
+            _vision_model = (
+                (tool_models.get("vision") or "").strip()
+                or f"{providers.CF_BUILTIN_ID}::{settings.model_vision}"
+            )
+            if _vision_model != requested_model:
+                requested_model = _vision_model
+                reasoning_effort = None  # vision default isn't the think model
+                vision_notice = (
+                    f"*[image attached — answering with {short_name(_vision_model)} "
+                    "(vision). Set a Vision model in Settings → Models to "
+                    "choose which.]*\n\n"
+                )
 
     # Smart routing: only when the turn would run the env-default chat model
     # (no explicit pick anywhere) — HARD turns escalate to the heavy model.
@@ -2748,6 +2760,8 @@ async def chat_stream(
     resolved_model, budget_notice = await _budget_downshift(requested_model, user_id=user["id"])
 
     run = create_run(chat_id, user_id=user["id"])
+    if vision_notice:
+        run.append(vision_notice)
     if budget_notice:
         # Streamed as the first chunk — visible live and on reconnect (it is
         # part of run.chunks), though not persisted with the reply.

@@ -49,6 +49,57 @@ def _is_reasoning_model(model: str) -> bool:
     return any(h in m for h in _REASONING_MODEL_HINTS)
 
 
+# CF model id substrings for models that accept OpenAI-shaped multimodal
+# content (a `content` ARRAY with image_url parts). Everything else only
+# accepts a string `content` and 400s on an array — so we flatten image
+# turns to text for them. Keep aligned with the "vision" notes in the
+# frontend CHAT_MODELS / VISION_MODELS lists.
+_VISION_MODEL_HINTS: tuple[str, ...] = (
+    "gemma-4",
+    "llama-4",
+    "kimi-k2.6",
+    "kimi-k2.7",
+    "vision",       # llama-3.2-*-vision
+    "pixtral",
+    "llava",
+    "qwen2-vl",
+    "qwen2.5-vl",
+)
+
+
+def _is_vision_model(model: str) -> bool:
+    m = (model or "").lower()
+    return any(h in m for h in _VISION_MODEL_HINTS)
+
+
+def flatten_for_text_model(messages: list[dict]) -> list[dict]:
+    """Collapse OpenAI multimodal content (a list of text/image_url parts)
+    into a plain string, for models that don't accept array content. Image
+    parts become a bracketed placeholder so the model knows one was there
+    (and can say it can't see it) instead of the request 400-ing. No-op on
+    messages whose content is already a string."""
+    out: list[dict] = []
+    for m in messages:
+        c = m.get("content")
+        if not isinstance(c, list):
+            out.append(m)
+            continue
+        parts: list[str] = []
+        n_img = 0
+        for p in c:
+            if not isinstance(p, dict):
+                parts.append(str(p))
+            elif p.get("type") == "text":
+                parts.append(p.get("text", ""))
+            elif p.get("type") == "image_url":
+                n_img += 1
+        if n_img:
+            parts.append(f"[{n_img} image(s) attached, but the current model "
+                         "cannot see images — ask to switch to a vision model]")
+        out.append({**m, "content": "\n".join(x for x in parts if x).strip() or " "})
+    return out
+
+
 # Single shared async client — connection pool reused across all CF calls.
 # Lifetime is the FastAPI app's; closed on shutdown via lifespan.
 _client: Optional[httpx.AsyncClient] = None

@@ -83,6 +83,8 @@ services:
       - QDRANT_URL=${QDRANT_URL:-http://tomsense-qdrant:6333}
       # ── Models (all overridable in .env) ──
       - MODEL_CHAT=${MODEL_CHAT:-@cf/google/gemma-4-26b-a4b-it}
+      # Fallback for image turns when the active model can't see images.
+      - MODEL_VISION=${MODEL_VISION:-@cf/meta/llama-4-scout-17b-16e-instruct}
       - MODEL_CODER=${MODEL_CODER:-@cf/google/gemma-4-26b-a4b-it}
       - MODEL_WRITER=${MODEL_WRITER:-@cf/openai/gpt-oss-120b}
       - MODEL_RESEARCH=${MODEL_RESEARCH:-@cf/openai/gpt-oss-120b}

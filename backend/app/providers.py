@@ -159,7 +159,20 @@ def build_payload(
     model: str, messages: list[dict], max_tokens: int,
     tools: Optional[list[dict]] = None, stream: bool = True,
     temperature: Optional[float] = None, reasoning_effort: Optional[str] = None,
+    flatten_vision: bool = False,
 ) -> dict:
+    # A text-only model 400s on OpenAI multimodal content (a `content` array
+    # with image parts). When the resolved model can't do vision but the
+    # conversation carries images, flatten them to text so the turn still
+    # answers (with a note that it can't see the image) instead of crashing.
+    # The proper fix is setting a vision model in Settings → Models → Vision;
+    # this is the fail-safe when that isn't configured. Gated to callers that
+    # opt in (the CF builtin) — custom providers may host vision models our
+    # hint list doesn't know, and we don't want to drop their images.
+    from .cf import _is_reasoning_model, _is_vision_model, flatten_for_text_model
+    if flatten_vision and not _is_vision_model(model):
+        messages = flatten_for_text_model(messages)
+
     payload: dict[str, Any] = {
         "model": model,
         "messages": messages,
@@ -168,7 +181,6 @@ def build_payload(
     }
     # Reasoning models burn the token budget unless effort is capped. Caller can
     # override; default stays "low".
-    from .cf import _is_reasoning_model
     if _is_reasoning_model(model):
         payload["reasoning_effort"] = reasoning_effort or "low"
     # Low temperature for deterministic work (code edits); unset = provider
@@ -189,7 +201,8 @@ async def chat_complete(
     tools: Optional[list[dict]] = None,
 ) -> dict:
     """Non-streaming chat call against any OpenAI-compatible provider."""
-    payload = build_payload(model, messages, max_tokens, tools, stream=False)
+    payload = build_payload(model, messages, max_tokens, tools, stream=False,
+                            flatten_vision=provider.get("id") == CF_BUILTIN_ID)
     payload["stop"] = [
         "<|end|>", "<|start|>", "<|endoftext|>", "<eot_id>",
         "<|im_end|>", "<|assistant|>", "<|channel|>",
