@@ -415,20 +415,28 @@ MODEL_SHORT = {
 }
 
 
-def short_name(model: str) -> str:
-    # Drop a `provider_id::model_id` prefix first — otherwise a model id with
-    # no "/" (e.g. an OpenRouter "gpt-4o") would render as the raw
+def short_name(model: str, provider_names: dict | None = None) -> str:
+    # Split a `provider_id::model_id` prefix. Otherwise a model id with no "/"
+    # (e.g. an OpenRouter "gpt-4o") would render as the raw
     # "provider-uuid::gpt-4o" string in the stats footer.
+    prov = None
     if "::" in model:
-        model = model.split("::", 1)[1]
+        pid, model = model.split("::", 1)
+        # Disambiguate custom-provider models: the same model name can exist on
+        # CF and OpenRouter (e.g. Gemma 4), so tag the provider when it isn't
+        # the CF builtin. Needs the id→name map resolved by the caller.
+        if pid and pid != "cf" and provider_names:
+            prov = provider_names.get(pid)
     key = model.split("/")[-1]
-    return MODEL_SHORT.get(key, key)
+    name = MODEL_SHORT.get(key, key)
+    return f"{name} ({prov})" if prov else name
 
 
-def stats_footer(models_used: set, usage: dict, elapsed: float, summarized: int = 0) -> str:
+def stats_footer(models_used: set, usage: dict, elapsed: float, summarized: int = 0,
+                 provider_names: dict | None = None) -> str:
     if not models_used:
         return ""
-    names = ", ".join(short_name(m) for m in sorted(models_used))
+    names = ", ".join(short_name(m, provider_names) for m in sorted(models_used))
     ptok = usage.get("prompt_tokens", 0)
     ctok = usage.get("completion_tokens", 0)
     tps = round(ctok / elapsed, 0) if elapsed > 0 and ctok > 0 else 0
@@ -681,6 +689,19 @@ async def run_chat(
     max_tokens = max_tokens or (
         settings.max_tokens_coder if code_mode else settings.max_tokens_chat
     )
+
+    # id→name map for the stats footer, so a custom-provider model (OpenRouter
+    # Gemma 4) is distinguished from the same-named CF builtin. Best-effort.
+    provider_names: dict = {}
+    _uid = (tool_context or {}).get("user_id")
+    if _uid and not subagent:
+        try:
+            from .providers import list_user_providers_with_builtin
+            provider_names = {
+                p["id"]: p["name"] for p in await list_user_providers_with_builtin(_uid)
+            }
+        except Exception:
+            provider_names = {}
 
     # Pluck the most recent generated-image path off the conversation so
     # edit_image can fall back to it when the user references "the image"
@@ -965,7 +986,7 @@ async def run_chat(
                 f"↑{total_usage['prompt_tokens']} ↓{total_usage['completion_tokens']} "
                 f"| tools_dispatched={tools_dispatched}"
             )
-            footer = "" if subagent else stats_footer(models_used, total_usage, time.monotonic() - start, summarized=summarized)
+            footer = "" if subagent else stats_footer(models_used, total_usage, time.monotonic() - start, summarized=summarized, provider_names=provider_names)
             if footer:
                 yield f"\n\n---\n{footer}"
             if stats_out is not None:
@@ -998,7 +1019,7 @@ async def run_chat(
             yield ("\n\n> ⚠️ **Stopping** — the model repeated the same action "
                    "without making progress.")
             print(f"[chat] run aborted: identical tool call repeated x{repeat_count + 1}")
-            footer = "" if subagent else stats_footer(models_used, total_usage, time.monotonic() - start, summarized=summarized)
+            footer = "" if subagent else stats_footer(models_used, total_usage, time.monotonic() - start, summarized=summarized, provider_names=provider_names)
             if footer:
                 yield f"\n\n---\n{footer}"
             if stats_out is not None:
@@ -1034,7 +1055,7 @@ async def run_chat(
                 yield _fcf
             print(f"[chat] ask_user — turn paused for user input after "
                   f"{round_num+1} round(s)")
-            footer = "" if subagent else stats_footer(models_used, total_usage, time.monotonic() - start, summarized=summarized)
+            footer = "" if subagent else stats_footer(models_used, total_usage, time.monotonic() - start, summarized=summarized, provider_names=provider_names)
             if footer:
                 yield f"\n\n---\n{footer}"
             if stats_out is not None:
@@ -1379,7 +1400,7 @@ async def run_chat(
         f"{time.monotonic() - start:.1f}s | ↑{total_usage['prompt_tokens']} "
         f"↓{total_usage['completion_tokens']}"
     )
-    footer = "" if subagent else stats_footer(models_used, total_usage, time.monotonic() - start, summarized=summarized)
+    footer = "" if subagent else stats_footer(models_used, total_usage, time.monotonic() - start, summarized=summarized, provider_names=provider_names)
     if footer:
         yield f"\n\n---\n{footer}"
     if stats_out is not None:
