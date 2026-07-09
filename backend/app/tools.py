@@ -1263,11 +1263,12 @@ async def _image_via_chat_completions(
 async def _image_via_images_api(
     provider: dict, mid: str, prompt: str, edit_srcs: Optional[list[dict]],
 ) -> tuple[Optional[bytes], Optional[str], Optional[float]]:
-    """Pure-diffusion image path (OpenRouter Flux / Stable Diffusion, output
-    modality image-only): the OpenAI-style /images/generations endpoint. Source
-    images for edits ride in `input_references` as base64 data URLs; the result
-    comes back as data[].b64_json (or a url). Returns (bytes, error, real_cost) —
-    see _image_via_chat_completions for what `cost` means."""
+    """Pure-diffusion image path (OpenRouter Flux / Stable Diffusion / Seedream,
+    output modality image-only): the OpenAI-style /images/generations endpoint.
+    For edits, source images ride in `input_references` as image_url OBJECTS
+    (the API rejects bare data-URL strings with a Zod invalid_type error); the
+    result comes back as data[].b64_json (or a url). Returns (bytes, error,
+    real_cost) — see _image_via_chat_completions for what `cost` means."""
     base = (provider.get("base_url") or "").rstrip("/")
     if base.endswith("/chat/completions"):
         base = base[: -len("/chat/completions")]
@@ -1279,7 +1280,8 @@ async def _image_via_images_api(
     for s in (edit_srcs or []):
         raw = _read_src(s)
         if raw:
-            refs.append(f"data:image/png;base64,{base64.b64encode(raw).decode()}")
+            data_url = f"data:image/png;base64,{base64.b64encode(raw).decode()}"
+            refs.append({"type": "image_url", "image_url": {"url": data_url}})
     if refs:
         payload["input_references"] = refs
     try:
