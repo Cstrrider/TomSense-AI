@@ -72,12 +72,15 @@ def _is_vision_model(model: str) -> bool:
     return any(h in m for h in _VISION_MODEL_HINTS)
 
 
-def flatten_for_text_model(messages: list[dict]) -> list[dict]:
+def flatten_for_text_model(messages: list[dict], image_note: str = "") -> list[dict]:
     """Collapse OpenAI multimodal content (a list of text/image_url parts)
     into a plain string, for models that don't accept array content. Image
-    parts become a bracketed placeholder so the model knows one was there
-    (and can say it can't see it) instead of the request 400-ing. No-op on
-    messages whose content is already a string."""
+    parts become a bracketed note. Default note tells the model it can't see
+    the image (so it can say so). Pass `image_note` to steer instead — e.g.
+    for an edit turn, tell it to call edit_image (which receives the image
+    directly). No-op on messages whose content is already a string."""
+    default_note = ("{n} image(s) attached, but the current model cannot see "
+                    "images — ask to switch to a vision model")
     out: list[dict] = []
     for m in messages:
         c = m.get("content")
@@ -94,8 +97,8 @@ def flatten_for_text_model(messages: list[dict]) -> list[dict]:
             elif p.get("type") == "image_url":
                 n_img += 1
         if n_img:
-            parts.append(f"[{n_img} image(s) attached, but the current model "
-                         "cannot see images — ask to switch to a vision model]")
+            note = (image_note or default_note).format(n=n_img)
+            parts.append(f"[{note}]")
         out.append({**m, "content": "\n".join(x for x in parts if x).strip() or " "})
     return out
 

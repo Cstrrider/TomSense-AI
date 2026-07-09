@@ -2123,6 +2123,20 @@ async def _autotitle_if_needed(chat_id: str, user_id: str) -> None:
         await db.rename_chat(chat_id, user_id, title)
 
 
+# Image ACTION intent — the user wants to modify/create an image, so the turn
+# should call edit_image/generate_image (which get the image directly) rather
+# than route to a vision model to "read" it. Kept deliberately narrow to
+# action verbs so questions ("what is this?", "describe…") still get vision.
+_IMAGE_ACTION_RE = _re.compile(
+    r"\b(edit|add|remove|erase|delete|change|replace|swap|make (?:it|this|the)|"
+    r"turn (?:it|this)|put (?:a|an|some)|give (?:it|the|them)|restyle|redraw|"
+    r"recolou?r|colou?r|paint|draw|generate|create|render|upscale|enhance|"
+    r"blur|crop|rotate|flip|combine|merge|overlay|convert (?:it|this)|"
+    r"cartoon|anime|photoreal|background)\b",
+    _re.I,
+)
+
+
 def _has_image_input(msgs: list[dict]) -> bool:
     """True when any message carries multimodal image parts — this turn's
     attachment or an earlier one still in context (follow-up questions about
@@ -2783,23 +2797,43 @@ async def chat_stream(
     # target is: the user's Vision slot if set, else the chat model if it's
     # already vision-capable, else the vision default (Llama 4 Scout). A
     # notice is streamed so the swap is transparent.
-    from .cf import _is_vision_model as _cf_is_vision
+    from .cf import _is_vision_model as _cf_is_vision, flatten_for_text_model
     vision_notice: Optional[str] = None
     if not code_mode and (req.vision or _has_image_input(msgs)):
-        _would_run = requested_model or f"{providers.CF_BUILTIN_ID}::{settings.model_chat}"
-        if not _cf_is_vision(_would_run):
-            _vision_model = (
-                (tool_models.get("vision") or "").strip()
-                or f"{providers.CF_BUILTIN_ID}::{settings.model_vision}"
+        # Image EDIT/GENERATE intent: the model doesn't need to SEE the image —
+        # generate_image/edit_image get it directly, and a text-only model
+        # writes the instruction fine (logs: gpt-oss-20b calls edit_image in
+        # 0.6s). So skip the vision detour (extra latency/cost) and instead
+        # flatten the image parts to a text note so a text-only model doesn't
+        # choke on multimodal content. Vision routing stays for QUESTIONS about
+        # an image, where the model must actually see it to answer.
+        _asked_action = bool(_IMAGE_ACTION_RE.search(_last_user_text(msgs)))
+        if _asked_action:
+            # Steer the (possibly text-only) model to call the image tool
+            # rather than say it can't see the image — edit_image/generate_image
+            # receive the actual image bytes directly.
+            msgs[:] = flatten_for_text_model(
+                msgs,
+                "{n} image(s) attached. To modify them, call edit_image with the "
+                "requested change — the tool receives the images directly, so you "
+                "do NOT need to see them yourself. Do not reply that you can't see "
+                "the image; just call the tool",
             )
-            if _vision_model != requested_model:
-                requested_model = _vision_model
-                reasoning_effort = None  # vision default isn't the think model
-                vision_notice = (
-                    f"*[image attached — answering with {short_name(_vision_model)} "
-                    "(vision). Set a Vision model in Settings → Models to "
-                    "choose which.]*\n\n"
+        else:
+            _would_run = requested_model or f"{providers.CF_BUILTIN_ID}::{settings.model_chat}"
+            if not _cf_is_vision(_would_run):
+                _vision_model = (
+                    (tool_models.get("vision") or "").strip()
+                    or f"{providers.CF_BUILTIN_ID}::{settings.model_vision}"
                 )
+                if _vision_model != requested_model:
+                    requested_model = _vision_model
+                    reasoning_effort = None  # vision default isn't the think model
+                    vision_notice = (
+                        f"*[image attached — answering with {short_name(_vision_model)} "
+                        "(vision). Set a Vision model in Settings → Models to "
+                        "choose which.]*\n\n"
+                    )
 
     # Smart routing: only when the turn would run the env-default chat model
     # (no explicit pick anywhere) — HARD turns escalate to the heavy model.

@@ -36,6 +36,17 @@ renderer.code = function (args: { text: string; lang?: string; escaped?: boolean
   }
 };
 
+// Images: add loading="lazy" + decoding="async" so the browser doesn't block
+// the main thread decoding several multi-MB generated images at once when the
+// message list re-renders (e.g. on a regenerate/rerun) — that synchronous
+// decode is a real mobile freeze source.
+renderer.image = function (args: { href: string; title?: string | null; text?: string }) {
+  const { href, title, text } = args;
+  const t = title ? ` title="${title.replace(/"/g, '&quot;')}"` : '';
+  const alt = (text || '').replace(/"/g, '&quot;');
+  return `<img src="${href}" alt="${alt}"${t} loading="lazy" decoding="async" />`;
+};
+
 marked.use({ renderer });
 
 // ─── LaTeX math via KaTeX ────────────────────────────────────────────────────
