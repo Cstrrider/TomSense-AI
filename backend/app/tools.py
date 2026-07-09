@@ -1072,6 +1072,59 @@ def _read_src(src: dict) -> Optional[bytes]:
         return None
 
 
+# Aspect ratios these image models accept, as (w, h). Snapping an edit's source
+# dimensions to the nearest keeps the output from being squished into a 1:1
+# default. Ordered set covers portrait/landscape/wide.
+_ASPECT_RATIOS = [
+    (1, 1), (2, 3), (3, 2), (3, 4), (4, 3), (4, 5), (5, 4),
+    (9, 16), (16, 9), (2, 1), (1, 2), (21, 9),
+]
+
+
+def _nearest_aspect_ratio(raw: bytes) -> Optional[str]:
+    """Return the closest supported "W:H" aspect string for an image's real
+    dimensions, so an edit preserves the source shape instead of defaulting to
+    square. None if the image can't be read. Used by the chat-completions
+    (Gemini) path, which takes image_config.aspect_ratio."""
+    try:
+        from PIL import Image
+        import io as _io
+        w, h = Image.open(_io.BytesIO(raw)).size
+        if not w or not h:
+            return None
+    except Exception:
+        return None
+    target = w / h
+    best = min(_ASPECT_RATIOS, key=lambda r: abs((r[0] / r[1]) - target))
+    return f"{best[0]}:{best[1]}"
+
+
+def _aspect_size(raw: bytes) -> Optional[str]:
+    """Return an explicit "WxH" size matching an image's aspect ratio, scaled to
+    ~4 MP. The OpenRouter images API (Seedream, Flux, SD) takes `size`, NOT
+    aspect_ratio — and Seedream rejects anything under ~3.69 MP — so an edit
+    without this defaults to a 2048² square and squishes a portrait/landscape
+    source. Snapped to /32; bumped until it clears Seedream's minimum."""
+    import math
+    try:
+        from PIL import Image
+        import io as _io
+        w, h = Image.open(_io.BytesIO(raw)).size
+        if not w or not h:
+            return None
+    except Exception:
+        return None
+    aspect = w / h
+    hh = math.sqrt((2048 * 2048) / aspect)
+    ww = aspect * hh
+    ww = max(64, round(ww / 32) * 32)
+    hh = max(64, round(hh / 32) * 32)
+    while ww * hh < 3_686_400:      # Seedream's minimum pixel count
+        ww += 32
+        hh = max(32, round(ww / aspect / 32) * 32)
+    return f"{ww}x{hh}"
+
+
 async def _call_flux_dev(
     *, model: str, prompt: str, hd: bool,
     edit_src: Optional[dict] = None,
@@ -1231,6 +1284,12 @@ async def _image_via_chat_completions(
                             "image_url": {"url": f"data:image/png;base64,{b64}"}})
     payload: dict = {"model": mid, "messages": [{"role": "user", "content": content}],
                      "modalities": ["image", "text"]}
+    # For an edit, keep the output shaped like the source (else it defaults to
+    # 1:1 and squishes a portrait/landscape input).
+    if edit_srcs:
+        ar = _nearest_aspect_ratio(_read_src(edit_srcs[0]) or b"")
+        if ar:
+            payload["image_config"] = {"aspect_ratio": ar}
     if _is_openrouter(provider):
         payload["usage"] = {"include": True}
     try:
@@ -1277,13 +1336,22 @@ async def _image_via_images_api(
     if _is_openrouter(provider):
         payload["usage"] = {"include": True}
     refs = []
+    first_raw: Optional[bytes] = None
     for s in (edit_srcs or []):
         raw = _read_src(s)
         if raw:
+            if first_raw is None:
+                first_raw = raw
             data_url = f"data:image/png;base64,{base64.b64encode(raw).decode()}"
             refs.append({"type": "image_url", "image_url": {"url": data_url}})
     if refs:
         payload["input_references"] = refs
+        # Match the source shape so the edit isn't squished into a square.
+        # The images API takes explicit `size` (Seedream/Flux honor it;
+        # aspect_ratio is ignored here).
+        sz = _aspect_size(first_raw or b"")
+        if sz:
+            payload["size"] = sz
     try:
         r = await get_client().post(
             url, headers={"Authorization": f"Bearer {provider.get('api_key') or ''}",
