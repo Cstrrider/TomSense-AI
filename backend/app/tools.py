@@ -1206,13 +1206,20 @@ def _extract_data_url_image(s) -> Optional[bytes]:
     return None
 
 
+def _is_openrouter(provider: dict) -> bool:
+    return "openrouter.ai" in (provider.get("base_url") or "")
+
+
 async def _image_via_chat_completions(
     provider: dict, mid: str, prompt: str, edit_srcs: Optional[list[dict]],
-) -> tuple[Optional[bytes], Optional[str]]:
+) -> tuple[Optional[bytes], Optional[str], Optional[float]]:
     """Multimodal-LLM image path (OpenRouter Gemini / OpenAI GPT-image): the
     chat-completions endpoint with modalities:["image","text"]; the image comes
     back as a base64 data URL in message.images[]. Edits attach the source as an
-    image_url part."""
+    image_url part. Returns (bytes, error, real_cost) — cost is OpenRouter's
+    ACTUAL billed dollar amount for this exact request (usage.include=true),
+    not an estimate, so it already reflects the real resolution/complexity of
+    what was generated. None when the provider doesn't report it."""
     base = (provider.get("base_url") or "").rstrip("/")
     url = base if base.endswith("/chat/completions") else base + "/chat/completions"
     content: list[dict] = [{"type": "text", "text": prompt}]
@@ -1222,45 +1229,52 @@ async def _image_via_chat_completions(
             b64 = base64.b64encode(raw).decode()
             content.append({"type": "image_url",
                             "image_url": {"url": f"data:image/png;base64,{b64}"}})
-    payload = {"model": mid, "messages": [{"role": "user", "content": content}],
-               "modalities": ["image", "text"]}
+    payload: dict = {"model": mid, "messages": [{"role": "user", "content": content}],
+                     "modalities": ["image", "text"]}
+    if _is_openrouter(provider):
+        payload["usage"] = {"include": True}
     try:
         r = await get_client().post(
             url, headers={"Authorization": f"Bearer {provider.get('api_key') or ''}",
                           "Content-Type": "application/json"},
             json=payload, timeout=240.0)
     except Exception as e:
-        return None, f"request failed: {e}"
+        return None, f"request failed: {e}", None
     if not r.is_success:
-        return None, f"{r.status_code}: {r.text[:300]}"
+        return None, f"{r.status_code}: {r.text[:300]}", None
     try:
-        msg = ((r.json().get("choices") or [{}])[0].get("message") or {})
+        data = r.json()
+        msg = ((data.get("choices") or [{}])[0].get("message") or {})
     except Exception:
-        return None, "provider returned non-JSON"
+        return None, "provider returned non-JSON", None
+    cost = (data.get("usage") or {}).get("cost")
     for im in (msg.get("images") or []):
         iu = im.get("image_url") if isinstance(im, dict) else None
         u = iu.get("url") if isinstance(iu, dict) else (im if isinstance(im, str) else None)
         b = _extract_data_url_image(u)
         if b:
-            return b, None
+            return b, None, cost
     b = _extract_data_url_image(msg.get("content"))
     if b:
-        return b, None
-    return None, "no image in chat-completions response"
+        return b, None, cost
+    return None, "no image in chat-completions response", None
 
 
 async def _image_via_images_api(
     provider: dict, mid: str, prompt: str, edit_srcs: Optional[list[dict]],
-) -> tuple[Optional[bytes], Optional[str]]:
+) -> tuple[Optional[bytes], Optional[str], Optional[float]]:
     """Pure-diffusion image path (OpenRouter Flux / Stable Diffusion, output
     modality image-only): the OpenAI-style /images/generations endpoint. Source
     images for edits ride in `input_references` as base64 data URLs; the result
-    comes back as data[].b64_json (or a url)."""
+    comes back as data[].b64_json (or a url). Returns (bytes, error, real_cost) —
+    see _image_via_chat_completions for what `cost` means."""
     base = (provider.get("base_url") or "").rstrip("/")
     if base.endswith("/chat/completions"):
         base = base[: -len("/chat/completions")]
     url = base + "/images/generations"
     payload: dict = {"model": mid, "prompt": prompt}
+    if _is_openrouter(provider):
+        payload["usage"] = {"include": True}
     refs = []
     for s in (edit_srcs or []):
         raw = _read_src(s)
@@ -1274,78 +1288,84 @@ async def _image_via_images_api(
                           "Content-Type": "application/json"},
             json=payload, timeout=240.0)
     except Exception as e:
-        return None, f"request failed: {e}"
+        return None, f"request failed: {e}", None
     if not r.is_success:
-        return None, f"{r.status_code}: {r.text[:300]}"
+        return None, f"{r.status_code}: {r.text[:300]}", None
     try:
         data = r.json()
     except Exception:
-        return None, "provider returned non-JSON"
+        return None, "provider returned non-JSON", None
+    cost = (data.get("usage") or {}).get("cost")
     for item in (data.get("data") or []):
         if not isinstance(item, dict):
             continue
         if item.get("b64_json"):
             try:
-                return base64.b64decode(item["b64_json"]), None
+                return base64.b64decode(item["b64_json"]), None, cost
             except Exception:
                 pass
         u = item.get("url")
         if isinstance(u, str):
             b = _extract_data_url_image(u)
             if b:
-                return b, None
+                return b, None, cost
             if u.startswith("http"):
                 try:
                     ir = await get_client().get(u, timeout=60.0)
                     if ir.is_success:
-                        return ir.content, None
+                        return ir.content, None, cost
                 except Exception:
                     pass
-    return None, "no image in images-API response"
+    return None, "no image in images-API response", None
 
 
 async def _call_openai_compat_image(
     model_str: str, prompt: str, edit_srcs: Optional[list[dict]], context: dict,
-) -> tuple[Optional[bytes], Optional[str]]:
+) -> tuple[Optional[bytes], Optional[str], Optional[float], Optional[str], Optional[str]]:
     """Image gen/edit via a custom OpenAI-compatible provider (e.g. OpenRouter).
     OpenRouter serves image models two different ways — multimodal LLMs (Gemini
     'nano banana', GPT-image) via chat-completions, and pure diffusion models
     (Flux, Stable Diffusion) via the OpenAI images API. We try chat-completions
     first and fall back to the images API when the model isn't a chat model
-    (404 / no-image), so both kinds work without the user knowing which is which."""
+    (404 / no-image), so both kinds work without the user knowing which is which.
+    Returns (bytes, error, real_cost, provider_id, provider_name) — cost/id/name
+    let the caller record real per-image spend in the usage tracker."""
     from .providers import parse_model_str, resolve_provider
     pid, mid = parse_model_str(model_str)
     provider = await resolve_provider(pid, user_id=(context or {}).get("user_id"))
     if not provider:
-        return None, f"No such provider for image model {model_str!r}."
+        return None, f"No such provider for image model {model_str!r}.", None, None, None
     if provider.get("kind") == "anthropic":
-        return None, "This model can't generate images — pick an image-capable model."
+        return None, "This model can't generate images — pick an image-capable model.", None, None, None
+    pname = provider.get("name", "provider")
 
-    png, err = await _image_via_chat_completions(provider, mid, prompt, edit_srcs)
+    png, err, cost = await _image_via_chat_completions(provider, mid, prompt, edit_srcs)
     if png is not None:
-        return png, None
+        return png, None, cost, pid, pname
     # Flux/SD reject chat-completions (404 "no such model") or return no image —
     # retry on the images-generations endpoint.
-    png2, err2 = await _image_via_images_api(provider, mid, prompt, edit_srcs)
+    png2, err2, cost2 = await _image_via_images_api(provider, mid, prompt, edit_srcs)
     if png2 is not None:
-        return png2, None
+        return png2, None, cost2, pid, pname
 
-    pname = provider.get("name", "provider")
     both = f"chat-completions: {err}; images-api: {err2}"
     if "404" in (err or "") and "404" in (err2 or ""):
         return None, (f"{pname} has no model '{mid}' (404 on both image "
-                      f"endpoints). Check the model id exists on {pname}.")
-    return None, f"{pname} image request failed — {both}"
+                      f"endpoints). Check the model id exists on {pname}."), None, None, None
+    return None, f"{pname} image request failed — {both}", None, None, None
 
 
 async def _execute_image_model(
     model: str, prompt: str, *, hd: bool, edit_srcs: Optional[list[dict]],
     steps_override: Optional[int] = None, context: Optional[dict] = None,
-) -> tuple[Optional[bytes], Optional[str]]:
+) -> tuple[Optional[bytes], Optional[str], Optional[float], Optional[str], Optional[str]]:
     """Single entry point for "generate one image with this model". Picks the
-    right adapter by family; returns (bytes, error). edit_srcs=None means
-    text-to-image; non-empty means img2img. `steps_override` only matters
-    for Flux family — other adapters ignore it."""
+    right adapter by family; returns (bytes, error, real_cost, provider_id,
+    provider_name) — cost/provider are only populated for custom-provider
+    (OpenRouter etc.) models that report real billed cost; CF-family calls
+    return (bytes, error, None, None, None). edit_srcs=None means text-to-image;
+    non-empty means img2img. `steps_override` only matters for Flux family —
+    other adapters ignore it."""
     # A provider-qualified id (`<provider>::<model>`) that survived
     # resolve_image_model is a CUSTOM provider's image model (CF ids get the
     # cf:: prefix stripped there) — route it to that provider's API, not CF.
@@ -1355,28 +1375,30 @@ async def _execute_image_model(
         return await _call_openai_compat_image(model, prompt, edit_srcs, context or {})
     family = _model_family(model)
     if family == "flux_klein":
-        return await _call_flux(
+        png, err = await _call_flux(
             model=model, prompt=prompt, hd=hd, edit_srcs=edit_srcs,
             steps_override=steps_override,
         )
-    if family == "flux_dev":
+    elif family == "flux_dev":
         first = (edit_srcs or [None])[0]
-        return await _call_flux_dev(
+        png, err = await _call_flux_dev(
             model=model, prompt=prompt, hd=hd, edit_src=first,
             steps_override=steps_override,
         )
-    if family == "sd15":
+    elif family == "sd15":
         first = (edit_srcs or [None])[0]
-        return await _call_sd15_img2img(model=model, prompt=prompt, src=first)
-    if family == "imagen":
+        png, err = await _call_sd15_img2img(model=model, prompt=prompt, src=first)
+    elif family == "imagen":
         if edit_srcs:
-            return None, "Imagen doesn't support editing — pick another model."
-        return await _call_imagen(model=model, prompt=prompt)
-    if family == "nano_banana":
-        return await _call_nano_banana(model=model, prompt=prompt, hd=hd, edit_srcs=edit_srcs)
-    if family == "gpt_image":
-        return await _call_gpt_image(model=model, prompt=prompt, hd=hd, edit_srcs=edit_srcs)
-    return None, f"`{model}` isn't wired for image generation/editing."
+            return None, "Imagen doesn't support editing — pick another model.", None, None, None
+        png, err = await _call_imagen(model=model, prompt=prompt)
+    elif family == "nano_banana":
+        png, err = await _call_nano_banana(model=model, prompt=prompt, hd=hd, edit_srcs=edit_srcs)
+    elif family == "gpt_image":
+        png, err = await _call_gpt_image(model=model, prompt=prompt, hd=hd, edit_srcs=edit_srcs)
+    else:
+        return None, f"`{model}` isn't wired for image generation/editing.", None, None, None
+    return png, err, None, None, None
 
 
 def resolve_image_model(context: dict, tool_key: str, hd: bool) -> str:
@@ -1456,6 +1478,22 @@ def _effective_hd(args: dict, context: dict) -> bool:
     return bool(args.get("hd", False))
 
 
+async def _record_image_cost(context: dict, pid: Optional[str], pname: Optional[str],
+                             cost: float) -> None:
+    """Log real image-generation spend into the same per-provider daily usage
+    table the chat loop uses (db.record_usage) — otherwise the sidebar's
+    tokens/cost counter silently misses every image, since image generation
+    doesn't go through run_chat's token accounting at all."""
+    uid = (context or {}).get("user_id")
+    if not uid or not pid:
+        return
+    try:
+        from . import db
+        await db.record_usage(uid, pid, pname or pid, 0, 0, cost)
+    except Exception as e:
+        print(f"[image cost] recording failed: {e}")
+
+
 async def tool_generate_image(args: dict, context: dict) -> str:
     prompt = (args.get("prompt") or "").strip()
     if not prompt:
@@ -1464,7 +1502,7 @@ async def tool_generate_image(args: dict, context: dict) -> str:
     model = resolve_image_model(context, "image", hd)
     steps_override = _cf_model_steps_override(context, model)
     print(f"[tool:gen_image] {'HD' if hd else 'SD'} model={model} steps_override={steps_override} | {prompt[:80]}")
-    png, err = await _execute_image_model(
+    png, err, cost, pid, pname = await _execute_image_model(
         model, prompt, hd=hd, edit_srcs=None, steps_override=steps_override,
         context=context,
     )
@@ -1473,7 +1511,7 @@ async def tool_generate_image(args: dict, context: dict) -> str:
     if (err or png is None) and _is_flagged_error(err) and model != settings.model_image_sd:
         fb = settings.model_image_sd
         print(f"[tool:gen_image] output flagged on {model} — retrying on {fb}")
-        png, err = await _execute_image_model(
+        png, err, cost, pid, pname = await _execute_image_model(
             fb, prompt, hd=False, edit_srcs=None,
             steps_override=_cf_model_steps_override(context, fb), context=context,
         )
@@ -1481,6 +1519,9 @@ async def tool_generate_image(args: dict, context: dict) -> str:
         if _is_flagged_error(err):
             return _flag_fail_message("generation")
         return f"Image generation failed: {err or 'no data'}"
+    if cost is not None:
+        print(f"[tool:gen_image] real cost=${cost:.5f} ({pname})")
+        await _record_image_cost(context, pid, pname, cost)
     url = _save_image_bytes(png)
     # No inline model label — the stats footer already names the model.
     return f"![Generated Image]({url})"
@@ -1512,7 +1553,7 @@ async def tool_edit_image(args: dict, context: dict) -> str:
     model = resolve_image_model(context, "image_edit", hd)
     steps_override = _cf_model_steps_override(context, model)
     print(f"[tool:edit_image] {'HD' if hd else 'SD'} model={model} steps_override={steps_override} src={src_tag} refs={n} | {prompt[:80]}")
-    png, err = await _execute_image_model(
+    png, err, cost, pid, pname = await _execute_image_model(
         model, prompt, hd=hd, edit_srcs=srcs, steps_override=steps_override,
         context=context,
     )
@@ -1521,7 +1562,7 @@ async def tool_edit_image(args: dict, context: dict) -> str:
     if (err or png is None) and _is_flagged_error(err) and model != settings.model_image_sd:
         fb = settings.model_image_sd
         print(f"[tool:edit_image] output flagged on {model} — retrying on {fb}")
-        png, err = await _execute_image_model(
+        png, err, cost, pid, pname = await _execute_image_model(
             fb, prompt, hd=False, edit_srcs=srcs,
             steps_override=_cf_model_steps_override(context, fb), context=context,
         )
@@ -1529,6 +1570,9 @@ async def tool_edit_image(args: dict, context: dict) -> str:
         if _is_flagged_error(err):
             return _flag_fail_message("edit")
         return f"Image edit failed: {err or 'no data'}"
+    if cost is not None:
+        print(f"[tool:edit_image] real cost=${cost:.5f} ({pname})")
+        await _record_image_cost(context, pid, pname, cost)
     url = _save_image_bytes(png)
     # No inline model label — the stats footer already names the model.
     return f"![Edited Image]({url})"
