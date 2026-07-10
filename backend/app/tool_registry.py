@@ -80,7 +80,10 @@ TOOL_MODELS_CATALOG: list[dict] = [
     },
 ]
 
-TOOL_MODELS_KEYS: set[str] = {t["key"] for t in TOOL_MODELS_CATALOG}
+TOOL_MODELS_KEYS: set[str] = (
+    {t["key"] for t in TOOL_MODELS_CATALOG}
+    | {"chat_fallback", "vision_fallback", "code_mode_fallback"}
+)
 
 
 # ─── Code-mode model catalog (I5) ───────────────────────────────────────────
