@@ -226,19 +226,42 @@
     }))
   );
 
-  // Derived so the code_mode list stays in sync with the /info-sourced
-  // catalog. The other rows are static frontend constants.
-  let CF_DEFAULTS = $derived<Record<ToolKey, ModelOption[]>>({
+  // Hardcoded fallbacks, used only until /info's cf_models_catalog loads (or if
+  // it's empty). The registry is the source of truth — adding a CF model is one
+  // backend change, no frontend rebuild.
+  const CF_FALLBACK: Record<ToolKey, ModelOption[]> = {
     chat: CHAT_MODELS,
     vision: VISION_MODELS,
     code: CODE_MODELS,
-    code_mode: CODE_MODE_MODEL_OPTIONS,
+    code_mode: [],
     research: RESEARCH_MODELS,
     title: TITLE_MODELS,
     image: IMAGE_GEN_MODELS,
     image_hd: IMAGE_GEN_MODELS,
     image_edit: IMAGE_EDIT_MODELS,
     image_edit_hd: IMAGE_EDIT_MODELS
+  };
+
+  // CF model options per tool, sourced from the backend registry
+  // (cf_models_catalog) by declared `roles`; HD variants reuse the base role.
+  function catalogFor(role: string): ModelOption[] {
+    const cat = app.info?.cf_models_catalog ?? [];
+    return cat
+      .filter((m) => (m.roles ?? []).includes(role))
+      .map((m) => ({ id: m.id, label: m.label, note: m.note }));
+  }
+  let CF_DEFAULTS = $derived<Record<ToolKey, ModelOption[]>>({
+    chat: catalogFor('chat').length ? catalogFor('chat') : CF_FALLBACK.chat,
+    vision: catalogFor('vision').length ? catalogFor('vision') : CF_FALLBACK.vision,
+    code: catalogFor('code').length ? catalogFor('code') : CF_FALLBACK.code,
+    // code_mode stays sourced from the dedicated code-mode picker catalog.
+    code_mode: CODE_MODE_MODEL_OPTIONS,
+    research: catalogFor('research').length ? catalogFor('research') : CF_FALLBACK.research,
+    title: catalogFor('title').length ? catalogFor('title') : CF_FALLBACK.title,
+    image: catalogFor('image').length ? catalogFor('image') : CF_FALLBACK.image,
+    image_hd: catalogFor('image').length ? catalogFor('image') : CF_FALLBACK.image,
+    image_edit: catalogFor('image_edit').length ? catalogFor('image_edit') : CF_FALLBACK.image_edit,
+    image_edit_hd: catalogFor('image_edit').length ? catalogFor('image_edit') : CF_FALLBACK.image_edit
   });
 
   // Derived from the catalog, in catalog order, with key narrowed to ToolKey.

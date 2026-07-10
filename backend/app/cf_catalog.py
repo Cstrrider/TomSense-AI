@@ -88,10 +88,16 @@ CF_MODELS: list[dict] = [
         "note": "tiny", "vision": False, "reasoning": False, "context": 16000,
         "roles": ["chat", "title"],
     },
-    # ── image generation / edit (modality: image; vision/reasoning N/A) ──
+    # ── image generation / edit (modality: image; vision/reasoning N/A). The
+    # google/openai ids are AI-Gateway partner models routed through CF. ──
     {
         "id": "@cf/black-forest-labs/flux-2-klein-4b", "label": "Flux 2 Klein 4B",
         "note": "default · ~$0.001/img", "vision": False, "reasoning": False,
+        "roles": ["image", "image_edit"],
+    },
+    {
+        "id": "@cf/runwayml/stable-diffusion-v1-5-img2img", "label": "SD v1.5",
+        "note": "beta · FREE · CF", "vision": False, "reasoning": False,
         "roles": ["image", "image_edit"],
     },
     {
@@ -100,13 +106,23 @@ CF_MODELS: list[dict] = [
         "roles": ["image", "image_edit"],
     },
     {
+        "id": "google/imagen-4", "label": "Imagen 4",
+        "note": "~$0.04/img · photorealistic", "vision": False, "reasoning": False,
+        "roles": ["image"],
+    },
+    {
         "id": "@cf/black-forest-labs/flux-2-dev", "label": "Flux 2 Dev",
-        "note": "premium · multi-ref", "vision": False, "reasoning": False,
+        "note": "premium · ~$0.04/img · multi-ref", "vision": False, "reasoning": False,
         "roles": ["image", "image_edit"],
     },
     {
-        "id": "@cf/runwayml/stable-diffusion-v1-5-img2img", "label": "SD v1.5",
-        "note": "beta · FREE · CF", "vision": False, "reasoning": False,
+        "id": "openai/gpt-image-2", "label": "gpt-image-2",
+        "note": "$0.055/img medium · OpenAI", "vision": False, "reasoning": False,
+        "roles": ["image", "image_edit"],
+    },
+    {
+        "id": "google/nano-banana-2", "label": "Nano Banana 2",
+        "note": "~$0.08/img · best all-rounder", "vision": False, "reasoning": False,
         "roles": ["image", "image_edit"],
     },
 ]
