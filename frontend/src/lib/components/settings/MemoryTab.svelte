@@ -1,24 +1,14 @@
 <script lang="ts">
   import { IconBrain, IconTrash } from '$lib/icons';
-  import { S, savePrefsPatch, onAddMemory, onDeleteMemory } from './state.svelte';
+  import { S, onAddMemory, onDeleteMemory } from './state.svelte';
+  import SchemaFields from './SchemaFields.svelte';
 </script>
 
 <p class="muted">
   Facts the model has saved about you (across all chats). Add or
   remove them by hand here, or say "remember that I…" in any chat.
 </p>
-<label class="mcp-row auto-mem">
-  <span>
-    <strong>Automatic memory</strong>
-    <span class="muted"> — quietly save durable facts from your messages</span>
-  </span>
-  <input
-    type="checkbox"
-    checked={S.prefs?.auto_memory !== false}
-    onchange={(e) =>
-      savePrefsPatch({ auto_memory: (e.currentTarget as HTMLInputElement).checked })}
-  />
-</label>
+<SchemaFields section="memory" />
 {#if S.memoriesLoading && S.memories.length === 0}
   <p class="muted">Loading…</p>
 {:else if S.memories.length === 0}

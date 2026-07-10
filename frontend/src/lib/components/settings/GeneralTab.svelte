@@ -1,7 +1,8 @@
 <script lang="ts">
   import { IconRefresh } from '$lib/icons';
   import { getThemeChoice, type ThemeChoice } from '$lib/theme';
-  import { S, applyTheme, savePrefsPatch, saveInstanceUrl } from './state.svelte';
+  import { S, applyTheme, saveInstanceUrl } from './state.svelte';
+  import SchemaFields from './SchemaFields.svelte';
 
   // Seed the theme select from device-local storage on first render (kept out
   // of module init so SSR/prerender never touches localStorage).
@@ -26,25 +27,7 @@
   </select>
 </div>
 
-<div class="tool-row" style="margin-bottom: var(--sp-2);">
-  <div class="tool-meta">
-    <div class="tool-label">Usage counter</div>
-    <div class="tool-hint">
-      What the sidebar shows. Auto follows the active provider —
-      Cloudflare neurons, or tokens + $ cost for OpenRouter etc.
-    </div>
-  </div>
-  <select
-    class="model-select compact"
-    value={S.prefs?.usage_display ?? 'auto'}
-    onchange={(e) =>
-      savePrefsPatch({ usage_display: (e.currentTarget as HTMLSelectElement).value as any })}
-  >
-    <option value="auto">Auto (per provider)</option>
-    <option value="neurons">Neurons (Cloudflare)</option>
-    <option value="tokens">Tokens &amp; cost</option>
-  </select>
-</div>
+<SchemaFields section="general" />
 
 {#if S.instanceUrl}
   <p class="muted" style="margin-top: var(--sp-3);">

@@ -937,3 +937,8 @@
   font-weight: 700;
   color: #d63d3d;
 }
+
+/* Schema-rendered enum rows (P5) keep the tool-row spacing General used. */
+.cs .tool-row.schema-enum {
+  margin-bottom: var(--sp-2);
+}

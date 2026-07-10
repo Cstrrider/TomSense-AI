@@ -55,6 +55,7 @@ from .schemas import (
     UpdateSystemPromptRequest,
 )
 from .tool_registry import ANTHROPIC_MODELS, CODE_MODELS_CATALOG, TOOL_MODELS_CATALOG, TOOL_MODELS_KEYS
+from . import prefs_registry
 from .tools import GENERATED_DIR, TOOL_SPECS
 from . import mounts as _mounts
 
@@ -232,6 +233,9 @@ def _info_payload() -> dict:
         # Single source of truth for tool-model slots — frontend reads this
         # instead of maintaining its own TOOL_KEYS / TOOL_LABELS arrays.
         "tool_models_catalog": TOOL_MODELS_CATALOG,
+        # Declared prefs fields (P5): the frontend renders ui="auto" fields
+        # generically — adding a simple pref is ONE prefs_registry.py entry.
+        "prefs_schema": prefs_registry.schema_for_info(),
         # Default code-mode model picker entries (I5). Adding a model is one
         # backend deploy — no frontend rebuild required.
         "code_models_catalog": CODE_MODELS_CATALOG,
@@ -653,46 +657,17 @@ async def me_prefs_update(request: Request, user: dict = Depends(current_user)):
     body = await _json_body(request)
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="body must be an object")
-    # Only accept a known whitelist of keys to avoid arbitrary growth
-    allowed = {
-        "tts_provider", "tts_voice", "stt_provider",
-        "embed_model", "embed_dim",  # RAG embedding backend override
-        "tool_models", "cf_models", "export_format",
-        "setup_dismissed",  # first-run wizard "I've seen this" flag
-        "review_edits",     # code mode: pause for Apply/Reject before each edit
-        "verify_edits",     # code mode: run post-edit build/type-check (default on)
-        "max_rounds_code",  # code mode: per-user agentic round cap override
-        "max_tokens_coder", # code mode: per-user response length cap override
-        "auto_route",       # chat: difficulty-route default turns to the heavy model
-        "auto_memory",      # chat: auto-extract durable facts into memory
-        "usage_display",    # sidebar counter: 'auto' | 'neurons' | 'tokens'
-    }
-    patch = {k: v for k, v in body.items() if k in allowed}
+    # Whitelist + simple-field validation both derive from prefs_registry —
+    # the single declaration that also feeds /info's prefs_schema and the
+    # frontend's generic renderer, so a new pref can't drift out of sync
+    # (the 2026-07-10 fallback-keys snap-back was exactly that drift).
+    patch = {k: v for k, v in body.items() if k in prefs_registry.PREFS_KEYS}
     if not patch:
         raise HTTPException(status_code=400, detail="no valid prefs keys")
-    if "usage_display" in patch and patch["usage_display"] not in ("auto", "neurons", "tokens"):
-        raise HTTPException(status_code=400, detail="usage_display must be auto|neurons|tokens")
-    if "review_edits" in patch:
-        patch["review_edits"] = bool(patch["review_edits"])
-    if "verify_edits" in patch:
-        patch["verify_edits"] = bool(patch["verify_edits"])
-    if "auto_route" in patch:
-        patch["auto_route"] = bool(patch["auto_route"])
-    if "auto_memory" in patch:
-        patch["auto_memory"] = bool(patch["auto_memory"])
-    # Numeric code-mode overrides: clamp to sane ranges; null/empty clears the
-    # override (falls back to the env/global default).
-    for _key, _lo, _hi in (("max_rounds_code", 1, 100),
-                           ("max_tokens_coder", 512, 32768)):
-        if _key in patch:
-            _v = patch[_key]
-            if _v in (None, "", 0):
-                patch[_key] = None
-            else:
-                try:
-                    patch[_key] = max(_lo, min(int(_v), _hi))
-                except (TypeError, ValueError):
-                    raise HTTPException(status_code=400, detail=f"{_key} must be an integer")
+    try:
+        patch = prefs_registry.validate_patch(patch)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     # tool_models is a nested dict — keys whitelisted via the canonical
     # TOOL_MODELS_KEYS set so adding a new slot is one entry in
     # tool_registry.py instead of touching this allowlist too.
@@ -713,23 +688,6 @@ async def me_prefs_update(request: Request, user: dict = Depends(current_user)):
         else:
             merged = incoming
         patch["tool_models"] = merged
-    if "export_format" in patch and patch["export_format"] not in ("md", "json"):
-        raise HTTPException(status_code=400, detail="export_format must be 'md' or 'json'")
-    # Embedding backend override: embed_model is a `provider::model` string
-    # (empty clears back to the CF default); embed_dim must match the model's
-    # output width — a wrong value silently breaks retrieval.
-    if "embed_model" in patch:
-        em = patch["embed_model"]
-        patch["embed_model"] = (str(em).strip() if em else "") or None
-    if "embed_dim" in patch:
-        ed = patch["embed_dim"]
-        if ed in (None, "", 0):
-            patch["embed_dim"] = None
-        else:
-            try:
-                patch["embed_dim"] = max(8, min(int(ed), 8192))
-            except (TypeError, ValueError):
-                raise HTTPException(status_code=400, detail="embed_dim must be an integer")
     # cf_models: when set, REPLACES the frontend's hardcoded CF model list.
     # Lets the user add/remove CF models without a redeploy. Validate shape:
     # array of {id, label, note?, tools[]}.

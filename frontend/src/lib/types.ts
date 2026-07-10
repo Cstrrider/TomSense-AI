@@ -189,6 +189,25 @@ export interface InfoResponse {
   }>;
   /** Cloudflare embedding default — fallback shown in the RAG settings. */
   embed_default?: { model: string; dim: number };
+  /** Declared prefs fields (P5) — ui:"auto" ones render generically. */
+  prefs_schema?: PrefField[];
+}
+
+/** One declared pref field from the backend's prefs_registry.py. */
+export interface PrefField {
+  key: string;
+  type: 'bool' | 'int' | 'enum' | 'string' | 'object' | 'array';
+  ui: 'auto' | 'custom';
+  default?: unknown;
+  section?: string;
+  label?: string;
+  hint?: string;
+  nullable?: boolean;
+  min?: number;
+  max?: number;
+  step?: number;
+  placeholder?: string;
+  options?: Array<{ value: string; label: string }>;
 }
 
 export type ToolKey =

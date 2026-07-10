@@ -273,11 +273,6 @@ export const S = $state({
   newSecretValue: '',
   savingSecret: false,
 
-  // Coder tab number inputs (empty = use default). Seeded from prefs by
-  // CoderTab's $effect.
-  maxRoundsCode: '',
-  maxTokensCoder: '',
-
   // Embedding backend (RAG)
   ragStatus: null as RagStatus | null,
   ragBusy: false,
@@ -426,13 +421,6 @@ export function sttSelectValue() {
 export function embedCustom() { return splitRef(S.prefs.embed_model); }
 export function embedIsCustom() { return !!(S.prefs.embed_model ?? '').includes('::'); }
 export function embedSelectValue() { return embedIsCustom() ? embedCustom().pid : ''; }
-
-// Coder derived
-export function reviewEdits() { return !!(S.prefs.review_edits ?? app.prefs?.review_edits); }
-export function verifyEdits() {
-  // Auto-verify defaults ON: only false when explicitly turned off.
-  return (S.prefs.verify_edits ?? app.prefs?.verify_edits ?? true) !== false;
-}
 
 // Persona / share derived
 export function dirty() { return S.prompt !== S.originalPrompt; }
@@ -1083,36 +1071,6 @@ export async function savedPref(
     if (busy === 'prefs') S.prefsSaving = false;
     else if (busy === 'rag') S.ragBusy = false;
   }
-}
-
-export async function saveCoderPref(patch: UserPrefs, okMsg: string) {
-  await savedPref(patch, okMsg);
-}
-
-export function toggleReviewEdits() {
-  const next = !reviewEdits();
-  void saveCoderPref({ review_edits: next },
-    next ? 'Edit review on — edits will pause for approval' : 'Edit review off');
-}
-export function toggleVerifyEdits() {
-  const next = !verifyEdits();
-  void saveCoderPref({ verify_edits: next }, next ? 'Auto-verify on' : 'Auto-verify off');
-}
-export function saveMaxRounds() {
-  const raw = S.maxRoundsCode.trim();
-  const val = raw === '' ? null : Math.max(1, Math.min(parseInt(raw, 10) || 0, 100));
-  S.maxRoundsCode = val == null ? '' : String(val);
-  void saveCoderPref({ max_rounds_code: val }, 'Max steps saved');
-}
-export function saveMaxTokens() {
-  const raw = S.maxTokensCoder.trim();
-  const val = raw === '' ? null : Math.max(512, Math.min(parseInt(raw, 10) || 0, 32768));
-  S.maxTokensCoder = val == null ? '' : String(val);
-  void saveCoderPref({ max_tokens_coder: val }, 'Response cap saved');
-}
-
-export async function savePrefsPatch(patch: UserPrefs) {
-  await savedPref(patch, 'Saved', { busy: null });
 }
 
 export async function savePrefs(patch: UserPrefs) {
