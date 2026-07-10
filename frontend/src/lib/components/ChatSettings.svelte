@@ -23,6 +23,7 @@
     reindexUpload,
     getRagStatus,
     reindexAll,
+    discoverProviderModels,
     type RagStatus,
     revokeShare,
     setChatModel,
@@ -359,10 +360,34 @@
   let providerSaving = $state(false);
   let providerTesting = $state<string | null>(null);
   let providerTestResult = $state<Record<string, string>>({});
+  // Models discovered at the provider's /models endpoint — feed a datalist so
+  // the model-id fields are a text box + dropdown of real options.
+  let discoveredModels = $state<string[]>([]);
+  let discovering = $state(false);
+
+  async function discoverModels() {
+    discovering = true;
+    try {
+      const models = await discoverProviderModels({
+        provider_id: editingProviderId ?? undefined,
+        base_url: providerForm.base_url.trim(),
+        api_key: providerForm.api_key.trim() || undefined
+      });
+      discoveredModels = models;
+      toast.success(
+        models.length ? `Found ${models.length} models` : 'No models advertised at /models'
+      );
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      discovering = false;
+    }
+  }
 
   function startCreateProvider() {
     editingProviderId = null;
     providerForm = { name: '', base_url: '', api_key: '', models: [] };
+    discoveredModels = [];
     providerFormOpen = true;
   }
 
@@ -376,7 +401,9 @@
       api_key: '',
       models: (p.models || []).map((m) => ({ ...m, tools: [...(m.tools || [])] }))
     };
+    discoveredModels = [];
     providerFormOpen = true;
+    void discoverModels(); // best-effort — saved provider has a stored key
   }
 
   function cancelProviderForm() {
@@ -399,15 +426,17 @@
     const m = providerForm.models[idx];
     const has = (m.tools || []).includes(t);
     const next: ToolKey[] = has ? m.tools.filter((x) => x !== t) : [...(m.tools || []), t];
+    // The `vision` role IS the vision-capability control — keep the declared
+    // capability in sync so one chip covers both.
+    const patch: Partial<ProviderModel> = { tools: next };
+    if (t === 'vision') patch.vision = !has;
     providerForm.models = providerForm.models.map((row, i) =>
-      i === idx ? { ...row, tools: next } : row
+      i === idx ? { ...row, ...patch } : row
     );
   }
 
-  // Declared model capabilities (vision / reasoning) — the backend registry
-  // trusts these over any name-based guess, so a vision or reasoning model on
-  // this provider is handled correctly regardless of its id.
-  function toggleModelCap(idx: number, cap: 'vision' | 'reasoning') {
+  // Reasoning is the one capability with no tool role — a standalone toggle.
+  function toggleModelCap(idx: number, cap: 'reasoning') {
     providerForm.models = providerForm.models.map((row, i) =>
       i === idx ? { ...row, [cap]: !row[cap] } : row
     );
@@ -1975,11 +2004,17 @@
                   Add the specific model IDs you want surfaced in the per-tool pickers.
                   Tick the tools each model is appropriate for.
                 </p>
+                <datalist id="discovered-models">
+                  {#each discoveredModels as dm}
+                    <option value={dm}></option>
+                  {/each}
+                </datalist>
                 <div class="model-rows">
                   {#each providerForm.models as m, idx (idx)}
                     <div class="model-row">
                       <input
                         class="model-id"
+                        list="discovered-models"
                         placeholder="gpt-4o"
                         bind:value={providerForm.models[idx].id}
                       />
@@ -1998,30 +2033,26 @@
                           <button
                             type="button"
                             class="tool-chip"
+                            class:cap={t === 'vision'}
                             class:on={(providerForm.models[idx].tools || []).includes(t)}
                             onclick={() => toggleModelTool(idx, t)}
-                            title={`Use this model for ${t}`}
-                          >{TOOL_CHIP_LABEL[t]}</button>
+                            title={t === 'vision'
+                              ? 'Vision — the model can see images; also lists it in the Vision slot'
+                              : `Use this model for ${t}`}
+                          >{t === 'vision' ? '👁 vision' : TOOL_CHIP_LABEL[t]}</button>
                         {/each}
                         <span class="cap-sep">can:</span>
                         <button
                           type="button"
                           class="tool-chip cap"
-                          class:on={!!providerForm.models[idx].vision}
-                          onclick={() => toggleModelCap(idx, 'vision')}
-                          title="Capability: this model can see images (accepts image input). Distinct from the 'vision' tool role, which assigns it to the Vision slot."
-                        >👁 sees images</button>
-                        <button
-                          type="button"
-                          class="tool-chip cap"
                           class:on={!!providerForm.models[idx].reasoning}
                           onclick={() => toggleModelCap(idx, 'reasoning')}
-                          title="Capability: this model emits a hidden reasoning channel (its effort gets capped)."
+                          title="This model emits a hidden reasoning channel (its effort gets capped)"
                         >💭 reasons</button>
                       </div>
                       <div class="model-tools-legend">
-                        <span>Tool roles (which pickers list it)</span>
-                        <span>· Capabilities (what it can do)</span>
+                        <span>Chips = which pickers list the model.</span>
+                        <span>👁 vision also flags image capability; 💭 reasons a hidden reasoning channel.</span>
                       </div>
                       <button
                         type="button"
@@ -2034,7 +2065,17 @@
                     </div>
                   {/each}
                 </div>
-                <button class="btn-text" onclick={addModelRow}>+ Add model</button>
+                <div class="model-add-row">
+                  <button class="btn-text" onclick={addModelRow}>+ Add model</button>
+                  <button class="btn-text" onclick={discoverModels}
+                    disabled={discovering || !providerForm.base_url.trim()}
+                    title="Fetch the model list from this provider's /models endpoint">
+                    {discovering ? 'Discovering…' : '⟳ Discover models'}
+                  </button>
+                  {#if discoveredModels.length}
+                    <span class="muted small">{discoveredModels.length} available — pick from the ID field</span>
+                  {/if}
+                </div>
               </div>
 
               <div class="actions">
@@ -3108,6 +3149,12 @@
     font-size: 10px;
     color: var(--muted);
     margin-top: 2px;
+  }
+  .model-add-row {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+    flex-wrap: wrap;
   }
   @media (max-width: 480px) {
     .tool-row {

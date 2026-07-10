@@ -518,3 +518,27 @@ async def test_provider(provider: dict) -> dict:
         return {"ok": True, "status": r.status_code, "model_count": n}
     except Exception:
         return {"ok": True, "status": r.status_code, "model_count": None}
+
+
+async def discover_models(provider: dict) -> list[str]:
+    """Fetch the model ids a provider advertises at its OpenAI-shaped /models
+    endpoint (returns [] on any failure — discovery is best-effort)."""
+    base = (provider.get("base_url") or "").rstrip("/")
+    if base.endswith("/chat/completions"):
+        base = base[: -len("/chat/completions")]
+    try:
+        r = await get_client().get(f"{base}/models", headers=_headers(provider), timeout=15.0)
+        if not r.is_success:
+            return []
+        data = r.json()
+        rows = data.get("data") if isinstance(data, dict) else data
+        if not isinstance(rows, list):
+            return []
+        ids: list[str] = []
+        for row in rows:
+            mid = row.get("id") if isinstance(row, dict) else row
+            if isinstance(mid, str) and mid:
+                ids.append(mid)
+        return sorted(set(ids))
+    except Exception:
+        return []

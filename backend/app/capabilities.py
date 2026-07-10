@@ -34,9 +34,13 @@ def _declared(provider: Optional[dict], model_id: str) -> Optional[dict]:
     for m in ((provider or {}).get("models") or []):
         if m.get("id") != model_id:
             continue
-        if any(k in m for k in _CAP_KEYS):
+        # The `vision` tool role IMPLIES vision capability — a model is only
+        # assigned to the Vision slot if it can see images, so one control
+        # covers both (no separate capability toggle in the UI).
+        vision_role = "vision" in (m.get("tools") or [])
+        if vision_role or any(k in m for k in _CAP_KEYS):
             return {
-                "vision": bool(m.get("vision")),
+                "vision": bool(m.get("vision")) or vision_role,
                 "reasoning": bool(m.get("reasoning")),
                 "context": m.get("context"),
             }

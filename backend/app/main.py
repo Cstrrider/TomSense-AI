@@ -887,6 +887,32 @@ async def me_providers_test(provider_id: str, user: dict = Depends(current_user)
     return await providers.test_provider(p)
 
 
+@app.post("/me/providers/discover")
+async def me_providers_discover(request: Request, user: dict = Depends(current_user)):
+    """List the model ids a provider advertises at /models. Works for a SAVED
+    provider (body {provider_id}, uses its stored key) or an in-progress one
+    (body {base_url, api_key}), so the add/edit form can offer a dropdown."""
+    body = await _json_body(request)
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be an object")
+    pid = (body.get("provider_id") or "").strip()
+    provider: Optional[dict] = None
+    if pid:
+        provider = await providers.resolve_provider(pid, user_id=user["id"])
+        if not provider:
+            raise HTTPException(status_code=404, detail="provider not found")
+        key = (body.get("api_key") or "").strip()
+        if key:  # form is rotating the key — use the new one for discovery
+            provider = {**provider, "api_key": key}
+    else:
+        base_url = (body.get("base_url") or "").strip()
+        if not base_url:
+            raise HTTPException(status_code=400, detail="base_url or provider_id required")
+        await _check_provider_url(base_url)
+        provider = {"base_url": base_url, "api_key": (body.get("api_key") or "").strip()}
+    return {"models": await providers.discover_models(provider)}
+
+
 # ─── /me/projects ───────────────────────────────────────────────────────────
 
 @app.get("/me/projects")

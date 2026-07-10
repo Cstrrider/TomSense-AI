@@ -438,6 +438,18 @@ export async function testProvider(id: string): Promise<ProviderTestResult> {
   return http<ProviderTestResult>(`/me/providers/${id}/test`, { method: 'POST' });
 }
 
+/** Discover the model ids a provider advertises at /models — for a saved
+ *  provider (provider_id) or an in-progress form (base_url + api_key). */
+export async function discoverProviderModels(
+  body: { provider_id?: string; base_url?: string; api_key?: string }
+): Promise<string[]> {
+  const j = await http<{ models: string[] }>('/me/providers/discover', {
+    method: 'POST',
+    body: JSON.stringify(body)
+  });
+  return j.models;
+}
+
 export async function listMemories(): Promise<Memory[]> {
   const j = await http<{ memories: Memory[] }>('/me/memories');
   return j.memories;
