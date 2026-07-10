@@ -204,6 +204,12 @@ export interface ProviderModel {
   label: string;
   note?: string;
   tools: ToolKey[];
+  /** Declared capabilities — the backend registry trusts these over any
+   *  name-based guess, so vision/reasoning models are handled correctly on
+   *  any provider (fixes CF-name-substring misclassification). */
+  vision?: boolean;
+  reasoning?: boolean;
+  context?: number;
   /** Optional step-count override for Flux family models. Klein bills per
    *  megapixel so this only affects latency/quality there; Dev bills per
    *  step so this directly drives cost. Ignored for non-Flux models. */

@@ -71,50 +71,17 @@ def chunk_text(text: str) -> list[str]:
     return chunks
 
 
-# ─── embedding (Cloudflare Workers AI bge) ─────────────────────────────────
+# ─── embedding (provider-agnostic — see operations/embed.py) ───────────────
 
-# CF bge accepts batches but a 600-item single-shot call times out / hits
-# request-size caps. Chunk the batch.
-EMBED_SUBBATCH = 64
+from .operations import embed as _embed_op
 
 
-async def embed_batch(texts: list[str]) -> list[list[float]]:
-    """Embed a batch of strings via CF Workers AI. Auto sub-batches so big
-    documents don't blow up the request."""
-    if not texts:
-        return []
-    out: list[list[float]] = []
-    for start in range(0, len(texts), EMBED_SUBBATCH):
-        sub = texts[start : start + EMBED_SUBBATCH]
-        vectors = await _embed_one_batch(sub)
-        out.extend(vectors)
-    return out
-
-
-async def _embed_one_batch(texts: list[str]) -> list[list[float]]:
-    url = f"{settings.cf_run_url}/{settings.model_embed}"
-    headers = {
-        "Authorization": f"Bearer {settings.cf_api_token}",
-        "Content-Type": "application/json",
-    }
-    body = {"text": texts}
-    r = await get_client().post(url, headers=headers, json=body, timeout=90.0)
-    if not r.is_success:
-        raise RuntimeError(f"CF embed {r.status_code}: {r.text[:300]}")
-    data = r.json()
-    result = data.get("result") or {}
-    if isinstance(result, dict) and "data" in result:
-        items = result["data"]
-        return [
-            (e if isinstance(e, list) else (e.get("embedding") or e.get("vector")))
-            for e in items
-        ]
-    if isinstance(result, list):
-        return [
-            (e if isinstance(e, list) else (e.get("embedding") if isinstance(e, dict) else e))
-            for e in result
-        ]
-    raise RuntimeError(f"unexpected embed response: {str(data)[:200]}")
+async def embed_batch(
+    texts: list[str], user_id=None, cfg=None,
+) -> list[list[float]]:
+    """Embed via the user's configured embedding backend (CF default, or any
+    OpenAI-compatible /embeddings provider). Thin delegate to the adapter."""
+    return await _embed_op.embed_batch(texts, user_id=user_id, cfg=cfg)
 
 
 # ─── qdrant client (lazy + safe) ───────────────────────────────────────────
@@ -145,7 +112,7 @@ def _collection_for(user_id: str) -> str:
     return f"tomsense_u_{user_id.replace('-', '')}"
 
 
-async def ensure_collection(user_id: str) -> bool:
+async def ensure_collection(user_id: str, dim=None) -> bool:
     cli = _client()
     if cli is None:
         return False
@@ -157,7 +124,9 @@ async def ensure_collection(user_id: str) -> bool:
         from qdrant_client.models import Distance, VectorParams
         await cli.create_collection(
             collection_name=coll,
-            vectors_config=VectorParams(size=settings.embed_dim, distance=Distance.COSINE),
+            vectors_config=VectorParams(
+                size=dim or settings.embed_dim, distance=Distance.COSINE
+            ),
         )
         return True
     except Exception as e:
@@ -181,14 +150,15 @@ async def index_document(
     cli = _client()
     if cli is None:
         return 0
-    if not await ensure_collection(user_id):
+    cfg = await _embed_op.resolve_embed(user_id)
+    if not await ensure_collection(user_id, cfg["dim"]):
         return 0
 
     chunks = chunk_text(text)
     if not chunks:
         return 0
     try:
-        vectors = await embed_batch(chunks)
+        vectors = await embed_batch(chunks, cfg=cfg)
     except Exception as e:
         log.warning("embed failed for %s: %s", upload_id, e)
         return 0
@@ -248,7 +218,7 @@ async def search(
     except Exception:
         return []
     try:
-        vectors = await embed_batch([query.strip()])
+        vectors = await embed_batch([query.strip()], user_id=user_id)
     except Exception as e:
         log.warning("query embed failed: %s", e)
         return []

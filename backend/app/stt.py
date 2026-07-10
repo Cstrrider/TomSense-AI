@@ -32,11 +32,45 @@ async def transcribe(
     audio_bytes: bytes,
     filename: str,
     content_type: str,
+    user_id: str = None,
 ) -> str:
-    p = (provider or "whisper").lower()
+    p = provider or "whisper"
+    # `provider::model` → a user-configured OpenAI-compatible provider.
+    from . import providers as _prov
+    if _prov.SEP in p:
+        return await _custom_stt(p, audio_bytes, filename, content_type, user_id)
+    p = p.lower()
     if p == "cf-whisper":
         return await _cf_whisper(audio_bytes)
     return await _whisper_local(audio_bytes, filename, content_type)
+
+
+async def _custom_stt(
+    provider_str: str, audio_bytes: bytes, filename: str,
+    content_type: str, user_id: str,
+) -> str:
+    """Transcribe via a user-configured OpenAI-compatible provider —
+    POST {base_url}/audio/transcriptions (OpenAI multipart shape)."""
+    from . import providers as _prov
+    pid, model = _prov.parse_model_str(provider_str)
+    provider = await _prov.resolve_provider(pid, user_id=user_id)
+    if not provider:
+        raise RuntimeError(f"STT provider {pid!r} not found")
+    base = (provider.get("base_url") or "").rstrip("/")
+    if base.endswith("/chat/completions"):
+        base = base[: -len("/chat/completions")]
+    url = f"{base}/audio/transcriptions"
+    headers = {"Authorization": f"Bearer {provider.get('api_key') or ''}"}
+    files = {"file": (filename, audio_bytes, content_type)}
+    data = {"model": model, "response_format": "json"}
+    async with httpx.AsyncClient(timeout=90.0) as client:
+        r = await client.post(url, headers=headers, files=files, data=data)
+    if not r.is_success:
+        raise _stt_error(f"stt {model}", r.status_code, r.text)
+    try:
+        return (r.json().get("text") or "").strip()
+    except Exception:
+        return r.text.strip()
 
 
 async def _whisper_local(audio_bytes: bytes, filename: str, content_type: str) -> str:

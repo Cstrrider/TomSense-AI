@@ -160,17 +160,21 @@ def build_payload(
     tools: Optional[list[dict]] = None, stream: bool = True,
     temperature: Optional[float] = None, reasoning_effort: Optional[str] = None,
     flatten_vision: bool = False,
+    is_reasoning: Optional[bool] = None, sees_images: Optional[bool] = None,
 ) -> dict:
+    # Capability (vision / reasoning) is resolved by the caller via the
+    # capabilities registry and passed in as `sees_images` / `is_reasoning`.
+    # When a caller doesn't supply them we fall back to the demoted
+    # name-substring heuristics so nothing regresses.
+    from .cf import _is_reasoning_model, _is_vision_model, flatten_for_text_model
+    _sees = sees_images if sees_images is not None else _is_vision_model(model)
+    _reasons = is_reasoning if is_reasoning is not None else _is_reasoning_model(model)
+
     # A text-only model 400s on OpenAI multimodal content (a `content` array
     # with image parts). When the resolved model can't do vision but the
-    # conversation carries images, flatten them to text so the turn still
-    # answers (with a note that it can't see the image) instead of crashing.
-    # The proper fix is setting a vision model in Settings → Models → Vision;
-    # this is the fail-safe when that isn't configured. Gated to callers that
-    # opt in (the CF builtin) — custom providers may host vision models our
-    # hint list doesn't know, and we don't want to drop their images.
-    from .cf import _is_reasoning_model, _is_vision_model, flatten_for_text_model
-    if flatten_vision and not _is_vision_model(model):
+    # conversation carries images, flatten them to a text note so the turn still
+    # answers instead of crashing. Gated to callers that opt in (flatten_vision).
+    if flatten_vision and not _sees:
         messages = flatten_for_text_model(messages)
 
     payload: dict[str, Any] = {
@@ -181,7 +185,7 @@ def build_payload(
     }
     # Reasoning models burn the token budget unless effort is capped. Caller can
     # override; default stays "low".
-    if _is_reasoning_model(model):
+    if _reasons:
         payload["reasoning_effort"] = reasoning_effort or "low"
     # Low temperature for deterministic work (code edits); unset = provider
     # default otherwise.
@@ -201,8 +205,11 @@ async def chat_complete(
     tools: Optional[list[dict]] = None,
 ) -> dict:
     """Non-streaming chat call against any OpenAI-compatible provider."""
+    from . import capabilities
+    caps = capabilities.model_capabilities(provider, model)
     payload = build_payload(model, messages, max_tokens, tools, stream=False,
-                            flatten_vision=provider.get("id") == CF_BUILTIN_ID)
+                            flatten_vision=provider.get("id") == CF_BUILTIN_ID,
+                            is_reasoning=caps["reasoning"], sees_images=caps["vision"])
     payload["stop"] = [
         "<|end|>", "<|start|>", "<|endoftext|>", "<eot_id>",
         "<|im_end|>", "<|assistant|>", "<|channel|>",
@@ -266,8 +273,11 @@ async def stream_round(
             yield ev
         return
 
+    from . import capabilities
+    caps = capabilities.model_capabilities(provider, model)
     payload = build_payload(model, messages, max_tokens, tools, stream=True,
-                            temperature=temperature, reasoning_effort=reasoning_effort)
+                            temperature=temperature, reasoning_effort=reasoning_effort,
+                            is_reasoning=caps["reasoning"], sees_images=caps["vision"])
 
     accumulated_text = ""
     accumulated_tools: dict[int, dict] = {}

@@ -602,6 +602,7 @@ async def me_prefs_update(request: Request, user: dict = Depends(current_user)):
     # Only accept a known whitelist of keys to avoid arbitrary growth
     allowed = {
         "tts_provider", "tts_voice", "stt_provider",
+        "embed_model", "embed_dim",  # RAG embedding backend override
         "tool_models", "cf_models", "export_format",
         "setup_dismissed",  # first-run wizard "I've seen this" flag
         "review_edits",     # code mode: pause for Apply/Reject before each edit
@@ -660,6 +661,21 @@ async def me_prefs_update(request: Request, user: dict = Depends(current_user)):
         patch["tool_models"] = merged
     if "export_format" in patch and patch["export_format"] not in ("md", "json"):
         raise HTTPException(status_code=400, detail="export_format must be 'md' or 'json'")
+    # Embedding backend override: embed_model is a `provider::model` string
+    # (empty clears back to the CF default); embed_dim must match the model's
+    # output width — a wrong value silently breaks retrieval.
+    if "embed_model" in patch:
+        em = patch["embed_model"]
+        patch["embed_model"] = (str(em).strip() if em else "") or None
+    if "embed_dim" in patch:
+        ed = patch["embed_dim"]
+        if ed in (None, "", 0):
+            patch["embed_dim"] = None
+        else:
+            try:
+                patch["embed_dim"] = max(8, min(int(ed), 8192))
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="embed_dim must be an integer")
     # cf_models: when set, REPLACES the frontend's hardcoded CF model list.
     # Lets the user add/remove CF models without a redeploy. Validate shape:
     # array of {id, label, note?, tools[]}.
@@ -1689,6 +1705,7 @@ async def uploads_create(
         try:
             transcript = await stt_mod.transcribe(
                 provider, raw, meta["filename"], file.content_type or "audio/mpeg",
+                user_id=user["id"],
             )
             meta["text_excerpt"] = transcript[: up_mod.MAX_EXCERPT_CHARS] or None
         except Exception as e:
@@ -1763,6 +1780,7 @@ async def transcribe(
             raw,
             file.filename or "audio.webm",
             file.content_type or "audio/webm",
+            user_id=user["id"],
         )
     except stt_mod.STTInputError as e:
         raise HTTPException(status_code=400, detail=f"invalid audio: {e}")
@@ -1799,7 +1817,7 @@ async def tts(
     )
 
     try:
-        stream = await tts_mod.open_tts(provider, text, voice, fmt)
+        stream = await tts_mod.open_tts(provider, text, voice, fmt, user_id=user["id"])
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"{provider} failed: {e}")
 
@@ -2797,7 +2815,8 @@ async def chat_stream(
     # target is: the user's Vision slot if set, else the chat model if it's
     # already vision-capable, else the vision default (Llama 4 Scout). A
     # notice is streamed so the swap is transparent.
-    from .cf import _is_vision_model as _cf_is_vision, flatten_for_text_model
+    from .cf import flatten_for_text_model
+    from . import capabilities
     vision_notice: Optional[str] = None
     if not code_mode and (req.vision or _has_image_input(msgs)):
         # Image EDIT/GENERATE intent: the model doesn't need to SEE the image —
@@ -2821,7 +2840,13 @@ async def chat_stream(
             )
         else:
             _would_run = requested_model or f"{providers.CF_BUILTIN_ID}::{settings.model_chat}"
-            if not _cf_is_vision(_would_run):
+            # Capability via the registry (declared caps → CF catalogue →
+            # demoted heuristics), so a vision model on ANY provider — including
+            # one the user tagged vision on their own OpenRouter/OpenAI entry —
+            # is recognised and NOT needlessly overridden.
+            _wr_pid, _wr_mid = providers.parse_model_str(_would_run)
+            _wr_provider = await providers.resolve_provider(_wr_pid, user_id=user["id"])
+            if not capabilities.model_sees_images(_wr_provider, _wr_mid):
                 _vision_model = (
                     (tool_models.get("vision") or "").strip()
                     or f"{providers.CF_BUILTIN_ID}::{settings.model_vision}"

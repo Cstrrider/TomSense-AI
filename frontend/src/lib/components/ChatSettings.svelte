@@ -360,6 +360,15 @@
     );
   }
 
+  // Declared model capabilities (vision / reasoning) — the backend registry
+  // trusts these over any name-based guess, so a vision or reasoning model on
+  // this provider is handled correctly regardless of its id.
+  function toggleModelCap(idx: number, cap: 'vision' | 'reasoning') {
+    providerForm.models = providerForm.models.map((row, i) =>
+      i === idx ? { ...row, [cap]: !row[cap] } : row
+    );
+  }
+
   async function saveProviderForm() {
     const name = providerForm.name.trim();
     const base_url = providerForm.base_url.trim();
@@ -378,7 +387,11 @@
         id: m.id.trim(),
         label: (m.label || '').trim() || m.id.trim(),
         note: (m.note || '').trim() || undefined,
-        tools: (m.tools || []).filter(Boolean) as ToolKey[]
+        tools: (m.tools || []).filter(Boolean) as ToolKey[],
+        // Declared capabilities — only sent when true, keeping the stored
+        // JSONB tidy; the registry reads these to route vision/reasoning.
+        ...(m.vision ? { vision: true } : {}),
+        ...(m.reasoning ? { reasoning: true } : {})
       }))
       .filter((m) => m.id && m.tools.length > 0);
     providerSaving = true;
@@ -1826,6 +1839,21 @@
                             title={`Use this model for ${t}`}
                           >{TOOL_CHIP_LABEL[t]}</button>
                         {/each}
+                        <span class="cap-sep" aria-hidden="true">|</span>
+                        <button
+                          type="button"
+                          class="tool-chip cap"
+                          class:on={!!providerForm.models[idx].vision}
+                          onclick={() => toggleModelCap(idx, 'vision')}
+                          title="This model can see images (accepts image input)"
+                        >👁 vision</button>
+                        <button
+                          type="button"
+                          class="tool-chip cap"
+                          class:on={!!providerForm.models[idx].reasoning}
+                          onclick={() => toggleModelCap(idx, 'reasoning')}
+                          title="This model emits a reasoning channel (cap its effort)"
+                        >💭 reasoning</button>
                       </div>
                       <button
                         type="button"
@@ -2788,6 +2816,20 @@
     background: rgba(255, 138, 76, 0.2);
     color: var(--accent);
     border-color: var(--accent);
+  }
+  .tool-chip.cap {
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  .tool-chip.cap.on {
+    background: rgba(96, 165, 250, 0.2);
+    color: #60a5fa;
+    border-color: #60a5fa;
+  }
+  .cap-sep {
+    align-self: center;
+    color: var(--border);
+    font-size: 11px;
   }
   @media (max-width: 480px) {
     .tool-row {
