@@ -360,10 +360,21 @@
   let providerSaving = $state(false);
   let providerTesting = $state<string | null>(null);
   let providerTestResult = $state<Record<string, string>>({});
-  // Models discovered at the provider's /models endpoint — feed a datalist so
-  // the model-id fields are a text box + dropdown of real options.
+  // Models discovered at the provider's /models endpoint — feed a compact
+  // inline combobox (native <datalist> takes over the whole screen on mobile).
   let discoveredModels = $state<string[]>([]);
   let discovering = $state(false);
+  let modelIdOpen = $state<number | null>(null);
+  function modelIdMatches(idx: number): string[] {
+    const q = (providerForm.models[idx]?.id || '').toLowerCase();
+    return discoveredModels.filter((m) => m.toLowerCase().includes(q)).slice(0, 40);
+  }
+  function pickModelId(idx: number, val: string) {
+    providerForm.models = providerForm.models.map((row, i) =>
+      i === idx ? { ...row, id: val, label: row.label || val } : row
+    );
+    modelIdOpen = null;
+  }
 
   async function discoverModels() {
     discovering = true;
@@ -2004,20 +2015,29 @@
                   Add the specific model IDs you want surfaced in the per-tool pickers.
                   Tick the tools each model is appropriate for.
                 </p>
-                <datalist id="discovered-models">
-                  {#each discoveredModels as dm}
-                    <option value={dm}></option>
-                  {/each}
-                </datalist>
                 <div class="model-rows">
                   {#each providerForm.models as m, idx (idx)}
                     <div class="model-row">
-                      <input
-                        class="model-id"
-                        list="discovered-models"
-                        placeholder="gpt-4o"
-                        bind:value={providerForm.models[idx].id}
-                      />
+                      <div class="model-id-wrap">
+                        <input
+                          class="model-id"
+                          placeholder="gpt-4o"
+                          autocomplete="off"
+                          bind:value={providerForm.models[idx].id}
+                          onfocus={() => (modelIdOpen = discoveredModels.length ? idx : null)}
+                          oninput={() => (modelIdOpen = discoveredModels.length ? idx : null)}
+                          onblur={() => setTimeout(() => { if (modelIdOpen === idx) modelIdOpen = null; }, 150)}
+                        />
+                        {#if modelIdOpen === idx && modelIdMatches(idx).length}
+                          <div class="model-id-menu">
+                            {#each modelIdMatches(idx) as dm}
+                              <button type="button" class="model-id-opt"
+                                onmousedown={(e) => { e.preventDefault(); pickModelId(idx, dm); }}
+                              >{dm}</button>
+                            {/each}
+                          </div>
+                        {/if}
+                      </div>
                       <input
                         class="model-label"
                         placeholder="Label (e.g. GPT-4o)"
@@ -3155,6 +3175,43 @@
     align-items: center;
     gap: var(--sp-3);
     flex-wrap: wrap;
+  }
+  .model-id-wrap {
+    position: relative;
+  }
+  .model-id-wrap .model-id {
+    width: 100%;
+  }
+  .model-id-menu {
+    position: absolute;
+    top: calc(100% + 2px);
+    left: 0;
+    right: 0;
+    z-index: 60;
+    max-height: 190px;
+    overflow-y: auto;
+    background: var(--panel);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r-2);
+    box-shadow: var(--shadow-lg);
+  }
+  .model-id-opt {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: 0;
+    padding: 8px 10px;
+    font-size: var(--fs-xs);
+    color: var(--text);
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .model-id-opt:hover {
+    background: var(--panel-2);
+    color: var(--accent);
   }
   @media (max-width: 480px) {
     .tool-row {
