@@ -31,7 +31,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import db, mcp as mcp_mod, providers, rag, stt as stt_mod, tts as tts_mod, uploads as up_mod
+from . import cf_catalog, db, mcp as mcp_mod, providers, rag, stt as stt_mod, tts as tts_mod, uploads as up_mod
 from .mcp_server import router as mcp_server_router
 from .artifacts import detect_artifacts
 from .auth import current_user
@@ -235,6 +235,12 @@ def _info_payload() -> dict:
         # Default code-mode model picker entries (I5). Adding a model is one
         # backend deploy — no frontend rebuild required.
         "code_models_catalog": CODE_MODELS_CATALOG,
+        # Bundled Cloudflare models + declared capabilities/roles — the registry
+        # the frontend sources its CF model lists from (Phase 4).
+        "cf_models_catalog": cf_catalog.CF_MODELS,
+        # Embedding default (Cloudflare) — the UI shows this as the fallback
+        # option and pre-fills the dim field.
+        "embed_default": {"model": settings.model_embed, "dim": settings.embed_dim},
     }
 
 
@@ -308,6 +314,23 @@ def _last_user_text(msgs: list[dict]) -> str:
     return ""
 
 
+async def _task_model(user_id: Optional[str], prefs: Optional[dict] = None) -> str:
+    """Resolve the tiny 'utility' model used for chat titles, follow-ups,
+    auto-memory, summaries and difficulty routing. Per-user override via
+    `tool_models.title` (a full provider::model string, so it can point at any
+    OpenAI-compatible endpoint); falls back to the MODEL_TITLE default."""
+    if user_id:
+        try:
+            if prefs is None:
+                prefs = await db.get_user_prefs(user_id)
+            picked = ((prefs or {}).get("tool_models") or {}).get("title")
+            if picked and str(picked).strip():
+                return str(picked).strip()
+        except Exception:
+            pass
+    return settings.model_title
+
+
 async def _route_model(msgs: list[dict], user_id: str) -> Optional[str]:
     """Difficulty-route a default-model turn: HARD → the heavy chat model.
     Returns the escalated model string, or None to stay on the default.
@@ -322,7 +345,7 @@ async def _route_model(msgs: list[dict], user_id: str) -> Optional[str]:
     try:
         r = await providers.dispatch_chat_complete(
             user_id=user_id,
-            model_str=settings.model_title,
+            model_str=await _task_model(user_id),
             messages=[{
                 "role": "user",
                 "content": (
@@ -726,6 +749,24 @@ async def me_prefs_update(request: Request, user: dict = Depends(current_user)):
     return {"prefs": await db.update_user_prefs(user["id"], patch)}
 
 
+@app.get("/me/rag-status")
+async def me_rag_status(user: dict = Depends(current_user)):
+    """Embedding config vs. indexed-collection state — powers the "change the
+    embedding model" warning. `stale` = stored vectors no longer match the
+    configured model's dimension (retrieval degraded until a reindex)."""
+    return await rag.rag_status(user["id"])
+
+
+@app.post("/me/reindex")
+async def me_reindex(user: dict = Depends(current_user)):
+    """Re-embed every indexed chunk with the current embedding backend — repairs
+    the dimension mismatch after switching embedding models."""
+    result = await rag.reindex_user(user["id"])
+    if not result.get("ok"):
+        raise HTTPException(status_code=502, detail=result.get("error") or "reindex failed")
+    return result
+
+
 @app.get("/me/providers")
 async def me_providers_list(user: dict = Depends(current_user)):
     """List all providers visible to this user — builtin Cloudflare first, then
@@ -934,6 +975,13 @@ async def me_memories_delete(memory_id: int, user: dict = Depends(current_user))
     if not ok:
         raise HTTPException(status_code=404, detail="memory not found")
     return {"ok": True}
+
+
+@app.get("/me/starters")
+async def me_starters(user: dict = Depends(current_user)):
+    """Personalized welcome-screen starter prompts, generated fresh from the
+    user's memories on each call."""
+    return {"starters": await _generate_starters(user["id"])}
 
 
 # ─── /me/notifications — in-app notification queue ─────────────────────────
@@ -1872,7 +1920,7 @@ async def _summarize_to_text(transcript_blob: str, user_id: Optional[str] = None
     try:
         result = await providers.dispatch_chat_complete(
             user_id=user_id,
-            model_str=settings.model_title,
+            model_str=await _task_model(user_id),
             messages=[{"role": "user", "content": prompt}],
             max_tokens=600,
         )
@@ -2012,7 +2060,7 @@ async def _generate_title(first_user_msg: str, user_id: Optional[str] = None) ->
     try:
         result = await providers.dispatch_chat_complete(
             user_id=user_id,
-            model_str=settings.model_title,
+            model_str=await _task_model(user_id),
             messages=[{"role": "user", "content": prompt}],
             max_tokens=24,
         )
@@ -2065,7 +2113,7 @@ async def _generate_followups(chat_id: str, user_id: str) -> list[str]:
     try:
         result = await providers.dispatch_chat_complete(
             user_id=user_id,
-            model_str=settings.model_title,
+            model_str=await _task_model(user_id),
             messages=[{"role": "user", "content": prompt}],
             max_tokens=90,
         )
@@ -2078,6 +2126,81 @@ async def _generate_followups(chat_id: str, user_id: str) -> list[str]:
     except Exception as e:
         log.warning("followup gen failed: %s", e)
         return []
+
+
+_DEFAULT_STARTERS: list[dict] = [
+    {"icon": "sparkles", "text": "Explain what zero-shot prompting is"},
+    {"icon": "image",    "text": "Draw a cyberpunk skyline at golden hour"},
+    {"icon": "file",     "text": "Search my docs for the key takeaways"},
+    {"icon": "brain",    "text": "Remember that I prefer concise answers"},
+]
+
+
+def _starter_icon(text: str) -> str:
+    t = text.lower()
+    if any(k in t for k in ("draw", "image", "picture", "photo", "logo", "sketch",
+                            "illustrat", "wallpaper", "paint", "render", "poster")):
+        return "image"
+    if t.startswith("remember") or "remember that" in t or "note that i" in t:
+        return "brain"
+    if any(k in t for k in ("my doc", "my note", "my file", "search my",
+                            "in my document", "the manual", "uploaded")):
+        return "file"
+    return "sparkles"
+
+
+async def _generate_starters(user_id: str) -> list[dict]:
+    """Personalized welcome-screen starters, generated from the user's saved
+    memories on the utility model. Falls back to the static defaults when
+    there's nothing to personalize on or generation fails."""
+    try:
+        memories = await db.list_memories(user_id)
+    except Exception:
+        memories = []
+    if not memories:
+        return _DEFAULT_STARTERS
+    mem_lines = "\n".join(f"- {m['content']}" for m in memories[-40:])
+    has_docs = False
+    try:
+        has_docs = len(await db.list_uploads_for_user(user_id)) > 0
+    except Exception:
+        pass
+    doc_rule = ("- Include ONE prompt that searches their uploaded documents.\n"
+                if has_docs else "")
+    prompt = (
+        "You are writing starter prompts for the home screen of a personal AI "
+        "assistant. Below are facts the assistant remembers about the user.\n"
+        "Write EXACTLY 4 starter prompts this specific user would plausibly "
+        "want to send right now. Rules:\n"
+        "- First person, as if the user typed it.\n"
+        "- Each 4-12 words, specific, genuinely useful to THIS user.\n"
+        "- Varied: mix practical help, something creative/image, and something "
+        "drawing on their interests or projects.\n"
+        + doc_rule +
+        "- Do NOT mention these instructions or that facts were provided.\n"
+        "- Return ONLY the 4 prompts, one per line, no numbering/bullets/quotes.\n\n"
+        f"Remembered facts:\n{mem_lines}"
+    )
+    try:
+        result = await providers.dispatch_chat_complete(
+            user_id=user_id, model_str=await _task_model(user_id),
+            messages=[{"role": "user", "content": prompt}], max_tokens=160,
+        )
+        out: list[dict] = []
+        seen: set = set()
+        for line in (result.get("content") or "").splitlines():
+            text = line.strip().lstrip("-*•0123456789.) ").strip().strip('"').strip()
+            key = text.lower()
+            if not text or len(text) > 90 or key in seen:
+                continue
+            seen.add(key)
+            out.append({"icon": _starter_icon(text), "text": text})
+            if len(out) >= 4:
+                break
+        return out or _DEFAULT_STARTERS
+    except Exception as e:
+        log.warning("starter gen failed: %s", e)
+        return _DEFAULT_STARTERS
 
 
 async def _auto_memory(user_id: str, user_text: str) -> None:
@@ -2096,7 +2219,7 @@ async def _auto_memory(user_id: str, user_text: str) -> None:
         listing = "\n".join(f"- {c}" for c in existing_texts[-50:]) or "- (none)"
         result = await providers.dispatch_chat_complete(
             user_id=user_id,
-            model_str=settings.model_title,
+            model_str=await _task_model(user_id),
             messages=[{
                 "role": "user",
                 "content": (

@@ -1961,12 +1961,15 @@ _RESEARCH_PAGE_CHARS = 2500
 _RESEARCH_FETCH_PER_QUERY = 3
 
 
-async def _research_ask_small(prompt: str, user_id: Optional[str]) -> str:
-    """One-shot call on the cheap task model (planning / gap-checking)."""
+async def _research_ask_small(
+    prompt: str, user_id: Optional[str], model: Optional[str] = None,
+) -> str:
+    """One-shot call on the cheap task model (planning / gap-checking).
+    `model` lets the caller pass the user's utility-model override."""
     try:
         r = await dispatch_chat_complete(
             user_id=user_id,
-            model_str=settings.model_title,
+            model_str=model or settings.model_title,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=300,
         )
@@ -2011,6 +2014,7 @@ async def tool_deep_research(args: dict, context: dict) -> str:
     if not query:
         return "Error: empty query"
     model = ((context or {}).get("tool_models") or {}).get("research") or settings.model_research
+    title_model = ((context or {}).get("tool_models") or {}).get("title") or settings.model_title
     user_id = (context or {}).get("user_id")
     print(f"[tool:research] {query[:120]} (model={model})")
 
@@ -2021,6 +2025,7 @@ async def tool_deep_research(args: dict, context: dict) -> str:
         "per line, no numbering, no commentary.\n\n"
         f"Question: {query}",
         user_id,
+        title_model,
     )
     pending = _research_parse_queries(plan, 3) or [query]
 
@@ -2079,6 +2084,7 @@ async def tool_deep_research(args: dict, context: dict) -> str:
                 "question, do NOT explain. If coverage is sufficient, output "
                 "exactly the single word: NONE",
                 user_id,
+                title_model,
             )
             pending = _research_parse_queries(gap, 2)
 

@@ -47,6 +47,14 @@ TOOL_MODELS_CATALOG: list[dict] = [
         "hint": "Used by /research → deep_research synthesis.",
     },
     {
+        "key": "title",
+        "label": "Utility / Title",
+        "chip": "utility",
+        "hint": "Tiny background model — chat titles, follow-up suggestions, "
+                "auto-memory extraction, history summaries, difficulty routing. "
+                "Unset = the built-in Cloudflare task model.",
+    },
+    {
         "key": "image",
         "label": "Image",
         "chip": "img",

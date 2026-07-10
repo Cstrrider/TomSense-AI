@@ -299,3 +299,116 @@ async def delete_user_collection(user_id: str) -> None:
         await cli.delete_collection(_collection_for(user_id))
     except Exception as e:
         log.warning("collection delete failed: %s", e)
+
+
+# ─── embedding status + reindex ────────────────────────────────────────────
+
+def _collection_dim(info) -> Optional[int]:
+    """Pull the vector size out of a qdrant get_collection() response, tolerant
+    of the named/unnamed vector shapes across client versions."""
+    try:
+        vectors = info.config.params.vectors
+    except Exception:
+        return None
+    size = getattr(vectors, "size", None)
+    if isinstance(size, int):
+        return size
+    if isinstance(vectors, dict):
+        for v in vectors.values():
+            s = getattr(v, "size", None)
+            if isinstance(s, int):
+                return s
+    return None
+
+
+async def rag_status(user_id: str) -> dict:
+    """Report the user's embedding config vs. the state of their vector
+    collection so the UI can warn when a model/dim change has orphaned the
+    already-indexed documents (`stale` = collection dim != configured dim)."""
+    cfg = await _embed_op.resolve_embed(user_id)
+    out = {
+        "model": cfg["model"], "kind": cfg["kind"], "configured_dim": cfg["dim"],
+        "collection_dim": None, "indexed_chunks": 0, "stale": False,
+    }
+    cli = _client()
+    if cli is None:
+        return out
+    coll = _collection_for(user_id)
+    try:
+        if not await cli.collection_exists(coll):
+            return out
+        info = await cli.get_collection(coll)
+    except Exception as e:
+        log.warning("rag_status failed: %s", e)
+        return out
+    out["collection_dim"] = _collection_dim(info)
+    out["indexed_chunks"] = int(getattr(info, "points_count", 0) or 0)
+    if (out["indexed_chunks"] > 0 and out["collection_dim"] is not None
+            and out["collection_dim"] != cfg["dim"]):
+        out["stale"] = True
+    return out
+
+
+async def reindex_user(user_id: str) -> dict:
+    """Re-embed every indexed chunk with the user's current embedding config.
+    Chunk text lives in the qdrant payloads, so this needs no original files:
+    scroll existing points → recreate the collection at the configured dim →
+    re-embed + re-upsert. Returns {ok, reindexed, error?}."""
+    cli = _client()
+    if cli is None:
+        return {"ok": False, "error": "vector store unavailable"}
+    coll = _collection_for(user_id)
+    cfg = await _embed_op.resolve_embed(user_id)
+    try:
+        exists = await cli.collection_exists(coll)
+    except Exception as e:
+        return {"ok": False, "error": f"collection check failed: {e}"}
+
+    records = []
+    if exists:
+        offset = None
+        try:
+            while True:
+                points, offset = await cli.scroll(
+                    collection_name=coll, limit=256, offset=offset,
+                    with_payload=True, with_vectors=False,
+                )
+                records.extend(points)
+                if offset is None:
+                    break
+        except Exception as e:
+            return {"ok": False, "error": f"scroll failed: {e}"}
+
+    from qdrant_client.models import Distance, VectorParams, PointStruct
+    try:
+        if exists:
+            await cli.delete_collection(coll)
+        await cli.create_collection(
+            collection_name=coll,
+            vectors_config=VectorParams(size=cfg["dim"], distance=Distance.COSINE),
+        )
+    except Exception as e:
+        return {"ok": False, "error": f"recreate failed: {e}"}
+
+    keep = [r for r in records if (getattr(r, "payload", None) or {}).get("text")]
+    if not keep:
+        return {"ok": True, "reindexed": 0}
+    texts = [(r.payload or {}).get("text") or "" for r in keep]
+    try:
+        vectors = await embed_batch(texts, cfg=cfg)
+    except Exception as e:
+        return {"ok": False, "error": f"embed failed: {e}"}
+    if len(vectors) != len(keep):
+        return {"ok": False, "error": "embed count mismatch — collection reset but not repopulated"}
+
+    points = [
+        PointStruct(id=keep[i].id, vector=vectors[i], payload=keep[i].payload or {})
+        for i in range(len(keep))
+    ]
+    try:
+        for start in range(0, len(points), 200):
+            await cli.upsert(collection_name=coll, points=points[start : start + 200], wait=False)
+    except Exception as e:
+        return {"ok": False, "error": f"upsert failed: {e}"}
+    log.info("reindexed %d chunks for user %s → dim %d", len(points), user_id, cfg["dim"])
+    return {"ok": True, "reindexed": len(points)}
