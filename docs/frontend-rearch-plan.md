@@ -51,7 +51,7 @@ one of the structural issues below. Full write-up: session 2026-07-10.
 - Audit remaining desktop-isms (native pickers, hover-only affordances).
 
 ### Phase 5 — Server-driven settings schema
-**Status: pending (own session)**
+**Status: done**
 
 - Extend the backend registry pattern (`tool_models_catalog` already drives
   the model rows) to a full settings schema: `/info` emits sections → fields
@@ -61,7 +61,9 @@ one of the structural issues below. Full write-up: session 2026-07-10.
 - Prereq: Phase 1 (schema renderer replaces tab internals one at a time).
 
 ### Phase 6 — Typed stream events
-**Status: pending (own session; backend + frontend)**
+**Status: done** — scoped: reasoning/chip/notice/stats typed on the wire; stats
+moved to a new messages.meta column (reasoning/chips stay positional in
+content); voice/assist consumers no longer receive footers or chips as text.
 
 - Today notices/chips/stats-footer are markdown mixed into the content stream;
   the client regex-parses them back out and persisted messages carry footers.

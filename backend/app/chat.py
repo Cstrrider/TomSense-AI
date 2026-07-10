@@ -433,6 +433,26 @@ def stats_footer(models_used: set, usage: dict, elapsed: float, summarized: int 
     return f"*{names} | ↑{ptok} ↓{ctok} ⏱{round(elapsed,1)}s {int(tps)}t/s{extra}*"
 
 
+def stats_event(footer: str, models_used: set, usage: dict, elapsed: float,
+                summarized: int = 0) -> dict:
+    """Typed terminal stats event (P6 — typed stream events). `text` carries
+    the legacy markdown footer so a consumer can still just append it; `data`
+    carries the structured fields. _run_generation persists this in the
+    message's meta column, NOT in content — so exports/copies/history no
+    longer drag the footer along (legacy rows keep theirs baked in)."""
+    return {
+        "type": "stats",
+        "text": f"\n\n---\n{footer}",
+        "data": {
+            "models": sorted(models_used),
+            "prompt_tokens": usage.get("prompt_tokens", 0),
+            "completion_tokens": usage.get("completion_tokens", 0),
+            "elapsed_s": round(elapsed, 1),
+            "summarized": summarized,
+        },
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Tool chip — a collapsible <details> block surfacing what the model did
 # ─────────────────────────────────────────────────────────────────────────────
@@ -857,7 +877,7 @@ async def run_chat(
                 # Flush the collected reasoning as one collapsible block the
                 # moment real content starts.
                 if reasoning_buf and not reasoning_flushed:
-                    yield reasoning_block(reasoning_buf)
+                    yield {"type": "reasoning", "text": reasoning_block(reasoning_buf)}
                     reasoning_flushed = True
                 yield payload                         # ← live token stream
             elif kind == "done":
@@ -868,7 +888,7 @@ async def run_chat(
         # Round produced reasoning but no content (e.g. straight to a tool
         # call) — still surface the thinking.
         if reasoning_buf and not reasoning_flushed:
-            yield reasoning_block(reasoning_buf)
+            yield {"type": "reasoning", "text": reasoning_block(reasoning_buf)}
 
         # Strip any chip markup the model hallucinated into its text BEFORE it's
         # appended to the loop context / used for footers — stops the round-over
@@ -1009,7 +1029,8 @@ async def run_chat(
             )
             footer = "" if subagent else stats_footer(models_used, total_usage, time.monotonic() - start, summarized=summarized, labels=model_labels)
             if footer:
-                yield f"\n\n---\n{footer}"
+                yield stats_event(footer, models_used, total_usage,
+                                   time.monotonic() - start, summarized)
             if stats_out is not None:
                 stats_out.update(total_usage)
             return
@@ -1042,7 +1063,8 @@ async def run_chat(
             print(f"[chat] run aborted: identical tool call repeated x{repeat_count + 1}")
             footer = "" if subagent else stats_footer(models_used, total_usage, time.monotonic() - start, summarized=summarized, labels=model_labels)
             if footer:
-                yield f"\n\n---\n{footer}"
+                yield stats_event(footer, models_used, total_usage,
+                                   time.monotonic() - start, summarized)
             if stats_out is not None:
                 stats_out.update(total_usage)
             return
@@ -1078,7 +1100,8 @@ async def run_chat(
                   f"{round_num+1} round(s)")
             footer = "" if subagent else stats_footer(models_used, total_usage, time.monotonic() - start, summarized=summarized, labels=model_labels)
             if footer:
-                yield f"\n\n---\n{footer}"
+                yield stats_event(footer, models_used, total_usage,
+                                   time.monotonic() - start, summarized)
             if stats_out is not None:
                 stats_out.update(total_usage)
             return
@@ -1095,7 +1118,7 @@ async def run_chat(
             # on a failed edit and can wedge the client. Steer to small edits.
             if tc.get("truncated"):
                 print(f"[chat] truncated tool call '{tc['name']}' — steering to smaller edits")
-                yield tool_chip(tc, "⚠ Edit too large — it exceeded the response limit and was cut off (not applied).")
+                yield {"type": "chip", "name": tc["name"], "text": tool_chip(tc, "⚠ Edit too large — it exceeded the response limit and was cut off (not applied).")}
                 msgs.append({
                     "role": "tool",
                     "tool_call_id": tc["id"],
@@ -1129,7 +1152,7 @@ async def run_chat(
                 # Truncate BEFORE the chip so both the chip and the model see
                 # the same capped result (parity with server-side tools).
                 tool_result = (await request_client_tool(call_id))[:3000]
-                yield tool_chip(tc, tool_result)
+                yield {"type": "chip", "name": tc["name"], "text": tool_chip(tc, tool_result)}
                 msgs.append({
                     "role": "tool",
                     "tool_call_id": tc["id"],
@@ -1168,6 +1191,10 @@ async def run_chat(
                     ):
                         if isinstance(_sc, str):
                             _sub_acc += _sc
+                            yield _sc
+                        elif isinstance(_sc, dict) and _sc.get("type") in ("chip", "reasoning"):
+                            # Typed content events (P6): forward for display but
+                            # keep them out of the parent-model summary.
                             yield _sc
                         # subagent has no client_tool/ask_user — ignore stray dicts
                 except Exception as e:
@@ -1216,7 +1243,7 @@ async def run_chat(
                 if not decision.startswith("approve"):
                     # Reject OR no-response → do NOT deploy. Approval is mandatory.
                     print(f"[chat] deploy '{_proj}' NOT approved (decision={decision!r}) — skipping")
-                    yield tool_chip(tc, f"✗ Deploy of {_proj} not approved — nothing rebuilt or restarted.")
+                    yield {"type": "chip", "name": tc["name"], "text": tool_chip(tc, f"✗ Deploy of {_proj} not approved — nothing rebuilt or restarted.")}
                     msgs.append({"role": "tool", "tool_call_id": tc["id"], "content": (
                         f"The deploy of '{_proj}' was NOT approved, so nothing was built or "
                         "restarted. Do not retry automatically — ask the user how to proceed.")})
@@ -1225,7 +1252,7 @@ async def run_chat(
                 yield f"\n\n> 🚀 *Deploying {_proj} — rebuilding and restarting…*\n\n"
                 _ok, _log = await run_deploy(_proj)
                 print(f"[chat] deploy '{_proj}' {'OK' if _ok else 'FAILED'}")
-                yield tool_chip(tc, _log)
+                yield {"type": "chip", "name": tc["name"], "text": tool_chip(tc, _log)}
                 msgs.append({"role": "tool", "tool_call_id": tc["id"], "content": _log[:3000]})
                 continue
 
@@ -1258,7 +1285,7 @@ async def run_chat(
                     )).strip().lower()
                     if decision.startswith("reject"):
                         print(f"[chat] edit REJECTED by user: {tc['name']} {_paths}")
-                        yield tool_chip(tc, f"✗ Rejected by user — {', '.join(_paths) or 'edit'} NOT changed.")
+                        yield {"type": "chip", "name": tc["name"], "text": tool_chip(tc, f"✗ Rejected by user — {', '.join(_paths) or 'edit'} NOT changed.")}
                         msgs.append({
                             "role": "tool",
                             "tool_call_id": tc["id"],
@@ -1317,7 +1344,7 @@ async def run_chat(
             models_used.add(
                 _specialist_model_for(tc["name"], tool_context, tc.get("arguments")) or model
             )
-            yield tool_chip(tc, tool_result)
+            yield {"type": "chip", "name": tc["name"], "text": tool_chip(tc, tool_result)}
 
             # generate_image / edit_image return markdown that contains the
             # rendered image; surface it inline (outside the escaped <details>
@@ -1396,7 +1423,7 @@ async def run_chat(
             fr_reasoning += payload
         elif kind == "text":
             if fr_reasoning and not fr_flushed:
-                yield reasoning_block(fr_reasoning)
+                yield {"type": "reasoning", "text": reasoning_block(fr_reasoning)}
                 fr_flushed = True
             fr_text += payload
             yield payload
@@ -1405,7 +1432,7 @@ async def run_chat(
                 total_usage[k] += (payload.get("usage") or {}).get(k, 0)
             models_used.add(payload.get("model") or model)
     if fr_reasoning and not fr_flushed:
-        yield reasoning_block(fr_reasoning)
+        yield {"type": "reasoning", "text": reasoning_block(fr_reasoning)}
 
     # Same ground-truth footer on the max-rounds exit, plus an explicit
     # cap-hit warning (#8) so a half-done task doesn't read as finished.
@@ -1423,7 +1450,8 @@ async def run_chat(
     )
     footer = "" if subagent else stats_footer(models_used, total_usage, time.monotonic() - start, summarized=summarized, labels=model_labels)
     if footer:
-        yield f"\n\n---\n{footer}"
+        yield stats_event(footer, models_used, total_usage,
+                                   time.monotonic() - start, summarized)
     if stats_out is not None:
         stats_out.update(total_usage)
 

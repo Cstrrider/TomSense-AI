@@ -662,10 +662,26 @@ export async function fetchTTS(
 export interface StreamEvent {
   /** `tool_status` is a transient user-facing progress line ("Opening
    *  Spotify…") emitted while a client tool runs on the device; an empty
-   *  `text` clears it. It is never part of the reply text. */
-  type: 'text' | 'done' | 'error' | 'tool_status';
+   *  `text` clears it. It is never part of the reply text.
+   *
+   *  Typed content events (P6): `reasoning` / `chip` / `notice` carry their
+   *  legacy markdown in `text` (positional — append like text). `stats` is
+   *  the terminal per-reply footer: markdown in `text`, structured fields in
+   *  `data`; it is persisted in the message's meta, NOT its content. */
+  type: 'text' | 'done' | 'error' | 'tool_status'
+      | 'reasoning' | 'chip' | 'notice' | 'stats';
   text?: string;
   error?: string;
+  data?: MessageStats;
+}
+
+/** Structured stats from a `stats` event / message meta. */
+export interface MessageStats {
+  models?: string[];
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  elapsed_s?: number;
+  summarized?: number;
 }
 
 /** Report a client-fulfilled tool's result back to the paused streaming turn. */
@@ -840,7 +856,12 @@ export async function* streamChat(
             }
             await postToolResult(ev.call_id ?? '', decision);
             chunkIndex++;
-          } else if (kind === 'text') {
+          } else if (
+            kind === 'text' || kind === 'reasoning' || kind === 'chip' ||
+            kind === 'notice' || kind === 'stats'
+          ) {
+            // Every run CHUNK must advance chunkIndex — a reconnect resumes
+            // from it, so an uncounted kind would replay (duplicate) on drop.
             chunkIndex++;
             yield ev;
           } else {

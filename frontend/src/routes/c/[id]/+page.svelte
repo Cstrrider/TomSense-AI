@@ -149,7 +149,8 @@
           role: m.role,
           content: m.content,
           uploads: m.uploads ?? [],
-          dbId: m.id
+          dbId: m.id,
+          meta: m.meta ?? null
         }));
       // A reply is still generating — drop any trailing assistant turn the
       // fetch happened to catch; the run re-streams it in full below.
@@ -272,7 +273,8 @@
           role: m.role,
           content: m.content,
           uploads: m.uploads ?? [],
-          dbId: m.id
+          dbId: m.id,
+          meta: m.meta ?? null
         }));
     } catch (e) {
       console.warn('refresh failed', e);
@@ -324,11 +326,25 @@
         onApprove,
         { think: thinkMode }
       )) {
-        if (ev.type === 'text' && ev.text) {
+        if (
+          (ev.type === 'text' || ev.type === 'reasoning' || ev.type === 'chip' ||
+            ev.type === 'notice') && ev.text
+        ) {
           acc += ev.text;
           streamActivityAt = Date.now();
-          messages[assistantIdx] = { role: 'assistant', content: acc };
+          messages[assistantIdx] = { ...messages[assistantIdx], role: 'assistant', content: acc };
           scrollToBottom();
+        } else if (ev.type === 'stats') {
+          // Terminal per-reply stats (P6) — out-of-band, rendered as a footer.
+          messages[assistantIdx] = {
+            ...messages[assistantIdx],
+            role: 'assistant',
+            content: acc,
+            meta: {
+              stats_text: (ev.text ?? '').replace(/^\n\n---\n/, '').trim(),
+              stats: ev.data
+            }
+          };
         } else if (ev.type === 'tool_status') {
           toolStatus = ev.text ?? '';
           streamActivityAt = Date.now();
@@ -385,11 +401,25 @@
     let acc = '';
     try {
       for await (const ev of attachToRun(runId, abortController.signal, onApprove)) {
-        if (ev.type === 'text' && ev.text) {
+        if (
+          (ev.type === 'text' || ev.type === 'reasoning' || ev.type === 'chip' ||
+            ev.type === 'notice') && ev.text
+        ) {
           acc += ev.text;
           streamActivityAt = Date.now();
-          messages[assistantIdx] = { role: 'assistant', content: acc };
+          messages[assistantIdx] = { ...messages[assistantIdx], role: 'assistant', content: acc };
           scrollToBottom();
+        } else if (ev.type === 'stats') {
+          // Terminal per-reply stats (P6) — out-of-band, rendered as a footer.
+          messages[assistantIdx] = {
+            ...messages[assistantIdx],
+            role: 'assistant',
+            content: acc,
+            meta: {
+              stats_text: (ev.text ?? '').replace(/^\n\n---\n/, '').trim(),
+              stats: ev.data
+            }
+          };
         } else if (ev.type === 'tool_status') {
           toolStatus = ev.text ?? '';
           streamActivityAt = Date.now();
@@ -559,6 +589,7 @@
       onlightbox={(src) => (lightboxSrc = src)}
       onreply={(t) => send(t, [])}
       askEnabled={!busy && i === lastAssistantIdx && msg.role === 'assistant'}
+      statsText={msg.meta?.stats_text ?? ''}
     />
   {/each}
 

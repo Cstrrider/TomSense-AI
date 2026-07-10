@@ -166,6 +166,9 @@ CREATE TABLE IF NOT EXISTS messages (
     tool_calls JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- P6 (typed stream events): out-of-band message data — stats footer moved
+-- out of content (legacy rows keep it baked in; both render).
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS meta JSONB;
 
 CREATE TABLE IF NOT EXISTS uploads (
     id UUID PRIMARY KEY,
@@ -362,11 +365,21 @@ def _row_to_message(r: asyncpg.Record) -> dict:
             tool_calls = json.loads(tool_calls)
         except json.JSONDecodeError:
             tool_calls = None
+    # meta (P6): out-of-band message data — currently {stats, stats_text}.
+    # Absent on legacy rows (their stats footer is baked into content).
+    meta = None
+    try:
+        meta = r["meta"]
+        if isinstance(meta, str):
+            meta = json.loads(meta)
+    except (KeyError, IndexError, json.JSONDecodeError):
+        meta = None
     return {
         "id": r["id"],
         "role": r["role"],
         "content": r["content"] or "",
         "tool_calls": tool_calls,
+        "meta": meta,
         "created_at": r["created_at"].isoformat(),
     }
 
@@ -531,7 +544,7 @@ async def get_chat(chat_id: str, user_id: Optional[str] = None) -> Optional[dict
         if chat_row is None:
             return None
         msg_rows = await conn.fetch(
-            "SELECT id, role, content, tool_calls, created_at "
+            "SELECT id, role, content, tool_calls, meta, created_at "
             "FROM messages WHERE chat_id = $1 ORDER BY id ASC",
             cid,
         )
@@ -1009,7 +1022,7 @@ async def get_chat_by_share_token(token: str) -> Optional[dict]:
         if chat_row is None:
             return None
         msg_rows = await conn.fetch(
-            "SELECT id, role, content, tool_calls, created_at "
+            "SELECT id, role, content, tool_calls, meta, created_at "
             "FROM messages WHERE chat_id = $1 ORDER BY id ASC",
             chat_row["id"],
         )
@@ -1074,19 +1087,21 @@ async def add_message(
     content: str,
     tool_calls: Optional[list[dict[str, Any]]] = None,
     upload_ids: Optional[list[str]] = None,
+    meta: Optional[dict] = None,
 ) -> Optional[dict]:
     try:
         cid = uuid.UUID(chat_id)
     except (ValueError, TypeError):
         return None
     tc_json = json.dumps(tool_calls) if tool_calls else None
+    meta_json = json.dumps(meta) if meta else None
     async with _pool_or_raise().acquire() as conn:
         async with conn.transaction():
             row = await conn.fetchrow(
-                "INSERT INTO messages (chat_id, role, content, tool_calls) "
-                "VALUES ($1, $2, $3, $4::jsonb) "
-                "RETURNING id, role, content, tool_calls, created_at",
-                cid, role, content or "", tc_json,
+                "INSERT INTO messages (chat_id, role, content, tool_calls, meta) "
+                "VALUES ($1, $2, $3, $4::jsonb, $5::jsonb) "
+                "RETURNING id, role, content, tool_calls, meta, created_at",
+                cid, role, content or "", tc_json, meta_json,
             )
             if upload_ids:
                 for i, uid in enumerate(upload_ids):

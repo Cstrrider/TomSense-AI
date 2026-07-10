@@ -9,6 +9,18 @@ export interface Message {
   uploads?: UploadRef[];
   /** db id; absent on client-side optimistic-stream placeholders */
   dbId?: number;
+  /** Out-of-band data (P6): stats footer lives here on new replies (legacy
+   *  messages keep it baked into content — both render). */
+  meta?: {
+    stats_text?: string;
+    stats?: {
+      models?: string[];
+      prompt_tokens?: number;
+      completion_tokens?: number;
+      elapsed_s?: number;
+      summarized?: number;
+    };
+  } | null;
 }
 
 export interface UploadRef {
@@ -143,6 +155,7 @@ export interface PersistedMessage {
   content: string;
   tool_calls: unknown[] | null;
   uploads?: UploadRef[];
+  meta?: Message['meta'];
   created_at: string;
 }
 

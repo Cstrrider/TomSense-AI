@@ -2560,6 +2560,7 @@ async def _run_generation(
     regardless of whether any client is still streaming it — so a swipe-away,
     a network drop, or an app restart can no longer lose the reply."""
     accumulated = ""
+    msg_meta: dict = {}
     stats: dict = {}
     err: Optional[str] = None
     try:
@@ -2582,6 +2583,22 @@ async def _run_generation(
                 run.append(chunk)
                 if isinstance(chunk, str):
                     accumulated += chunk
+                elif isinstance(chunk, dict):
+                    _k = chunk.get("type")
+                    if _k in ("reasoning", "chip"):
+                        # Typed content events (P6): positional — they
+                        # interleave with the answer text, so their markdown
+                        # stays in the persisted content (renderer-compatible
+                        # with every legacy message).
+                        accumulated += chunk.get("text") or ""
+                    elif _k == "stats":
+                        # Terminal + non-positional → meta, NOT content: new
+                        # replies no longer drag the footer into exports,
+                        # copies, or edit-history round-trips.
+                        msg_meta["stats"] = chunk.get("data") or {}
+                        msg_meta["stats_text"] = (
+                            (chunk.get("text") or "").replace("\n\n---\n", "", 1).strip()
+                        )
         except Exception as e:
             err = str(e)
             marker = f"\n\n*[error: {err}]*"
@@ -2624,7 +2641,10 @@ async def _run_generation(
                 # Strip only HALLUCINATED chip markup; keep the real tool-call /
                 # reasoning chips (marked data-step="1") so the run's steps stay
                 # visible after completion and on reload.
-                saved = await db.add_message(chat_id, "assistant", _strip_hallucinated_chips(accumulated))
+                saved = await db.add_message(
+                    chat_id, "assistant", _strip_hallucinated_chips(accumulated),
+                    meta=msg_meta or None,
+                )
                 if saved and saved.get("id") is not None:
                     # Code-mode replies put files into the sandbox directly; the
                     # tool chips already show what was written. Auto-extracting
@@ -3037,11 +3057,11 @@ async def chat_stream(
 
     run = create_run(chat_id, user_id=user["id"])
     if vision_notice:
-        run.append(vision_notice)
+        run.append({"type": "notice", "text": vision_notice})
     if budget_notice:
         # Streamed as the first chunk — visible live and on reconnect (it is
         # part of run.chunks), though not persisted with the reply.
-        run.append(budget_notice)
+        run.append({"type": "notice", "text": budget_notice})
     _spawn(
         _run_generation(
             run,

@@ -49,7 +49,7 @@
       <div class="muted">(empty chat)</div>
     {:else}
       {#each messages as msg, i (i)}
-        <Message role={msg.role} content={msg.content} uploads={msg.uploads ?? []} />
+        <Message role={msg.role} content={msg.content} uploads={msg.uploads ?? []} statsText={msg.meta?.stats_text ?? ''} />
       {/each}
     {/if}
   </main>

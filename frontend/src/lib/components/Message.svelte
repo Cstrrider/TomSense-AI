@@ -37,6 +37,10 @@
     onreply?: (text: string) => void;
     /** Whether this message's ask_user card is still live (latest + not busy). */
     askEnabled?: boolean;
+    /** Stats footer from message meta (P6) — new replies carry it out-of-band
+     *  instead of baked into content; rendered with the same divider+italic
+     *  markdown so it's pixel-identical to legacy in-content footers. */
+    statsText?: string;
   }
 
   let {
@@ -53,7 +57,8 @@
     onbranch,
     onlightbox,
     onreply,
-    askEnabled = false
+    askEnabled = false,
+    statsText = ''
   }: Props = $props();
 
   let editing = $state(false);
@@ -65,7 +70,9 @@
   // additive override, not a replacement.
   let actionsOpen = $state(false);
 
-  let html = $derived(renderMarkdown(content));
+  let html = $derived(
+    renderMarkdown(statsText ? `${content}\n\n---\n${statsText}` : content)
+  );
   let bodyEl: HTMLDivElement | undefined = $state();
 
   /** Toggle actions on bubble click. Suppress if the user is actually
