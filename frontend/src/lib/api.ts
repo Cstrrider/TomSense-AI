@@ -369,6 +369,37 @@ export async function updatePrefs(patch: UserPrefs): Promise<UserPrefs> {
   return j.prefs;
 }
 
+// ─── embedding backend (RAG) + starters ──────────────────────────────────────
+
+export interface RagStatus {
+  model: string;
+  kind: string;
+  configured_dim: number;
+  collection_dim: number | null;
+  indexed_chunks: number;
+  stale: boolean;
+}
+
+export async function getRagStatus(): Promise<RagStatus> {
+  return http<RagStatus>('/me/rag-status');
+}
+
+/** Re-embed every indexed chunk with the current embedding backend. */
+export async function reindexAll(): Promise<{ ok: boolean; reindexed: number }> {
+  return http<{ ok: boolean; reindexed: number }>('/me/reindex', { method: 'POST' });
+}
+
+export interface Starter {
+  icon: string;
+  text: string;
+}
+
+/** Personalized welcome-screen starters (generated from the user's memories). */
+export async function getStarters(): Promise<Starter[]> {
+  const j = await http<{ starters: Starter[] }>('/me/starters');
+  return j.starters;
+}
+
 // ─── providers ──────────────────────────────────────────────────────────────
 
 export async function listProviders(): Promise<Provider[]> {

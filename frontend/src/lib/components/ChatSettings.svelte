@@ -21,6 +21,9 @@
     type SecretMeta,
     listUserUploads,
     reindexUpload,
+    getRagStatus,
+    reindexAll,
+    type RagStatus,
     revokeShare,
     setChatModel,
     setCredentials,
@@ -121,6 +124,7 @@
     { key: 'code', label: 'Code Writer', chip: 'writer', hint: '🪄 Single-shot — used by /code → consult_coder.' },
     { key: 'code_mode', label: 'Code Mode', chip: 'agent', hint: '🤖 Agentic — used by code chats.' },
     { key: 'research', label: 'Research', chip: 'research', hint: 'Used by /research → deep_research synthesis.' },
+    { key: 'title', label: 'Utility / Title', chip: 'utility', hint: 'Tiny model for titles, follow-ups, auto-memory, routing.' },
     { key: 'image', label: 'Image', chip: 'img', hint: 'Text-to-image, default quality.' },
     { key: 'image_hd', label: 'Image (HD)', chip: 'img HD', hint: 'Text-to-image, picked when you type /HD.' },
     { key: 'image_edit', label: 'Image edit', chip: 'edit', hint: 'Image-to-image, default quality.' },
@@ -182,6 +186,12 @@
     { id: '@cf/openai/gpt-oss-20b', label: 'GPT-OSS 20B' },
     { id: '@cf/meta/llama-3.3-70b-instruct-fp8-fast', label: 'Llama 3.3 70B' }
   ];
+  // Tiny background "utility" model — titles, follow-ups, auto-memory, routing.
+  const TITLE_MODELS: ModelOption[] = [
+    { id: '@cf/meta/llama-3.2-3b-instruct', label: 'Llama 3.2 3B', note: 'default · tiny & cheap' },
+    { id: '@cf/meta/llama-3.1-8b-instruct', label: 'Llama 3.1 8B' },
+    { id: '@cf/google/gemma-4-26b-a4b-it', label: 'Gemma 4 (26B)' }
+  ];
   // Image generation models (txt2img). All CF-routed — either native Workers
   // AI (Flux/SD) or Unified Billing passthrough (Imagen, Nano Banana 2,
   // gpt-image-2). Sorted cheapest → priciest.
@@ -224,6 +234,7 @@
     code: CODE_MODELS,
     code_mode: CODE_MODE_MODEL_OPTIONS,
     research: RESEARCH_MODELS,
+    title: TITLE_MODELS,
     image: IMAGE_GEN_MODELS,
     image_hd: IMAGE_GEN_MODELS,
     image_edit: IMAGE_EDIT_MODELS,
@@ -295,6 +306,7 @@
   let secProviders = $state(true);
   let secMcp = $state(false);
   let secHd = $state(false);
+  let secEmbed = $state(false);
 
   // Custom CF model list — when non-empty, replaces the hardcoded defaults.
   let cfModels = $state<ProviderModel[]>([]);
@@ -642,6 +654,7 @@
     void loadCredentials();
     void loadSecrets();
     void loadMcp();
+    void loadRagStatus();
   }
 
   // ── MCP servers (Providers tab) ─────────────────────────────────────────
@@ -991,6 +1004,71 @@
   let currentSttProvider = $derived(
     prefs.stt_provider ?? app.info?.stt_providers?.[0]?.id ?? 'whisper'
   );
+
+  // ── Custom audio / embedding backends (reuse configured OpenAI-compatible
+  // providers). A `provider::model` value selects one of these. ──
+  let customProviders = $derived(providersList.filter((p) => !p.builtin));
+  const CUSTOM_PREFIX = 'custom:';
+  function splitRef(v: string | null | undefined): { pid: string; model: string } {
+    const s = v ?? '';
+    const i = s.indexOf('::');
+    return i < 0 ? { pid: '', model: '' } : { pid: s.slice(0, i), model: s.slice(i + 2) };
+  }
+  let ttsCustom = $derived(splitRef(prefs.tts_provider));
+  let ttsIsCustom = $derived((prefs.tts_provider ?? '').includes('::'));
+  let ttsSelectValue = $derived(ttsIsCustom ? `${CUSTOM_PREFIX}${ttsCustom.pid}` : currentTtsProvider);
+  let sttCustom = $derived(splitRef(prefs.stt_provider));
+  let sttIsCustom = $derived((prefs.stt_provider ?? '').includes('::'));
+  let sttSelectValue = $derived(sttIsCustom ? `${CUSTOM_PREFIX}${sttCustom.pid}` : currentSttProvider);
+  function onAudioProviderChange(kind: 'tts' | 'stt', value: string, prevModel: string) {
+    if (value.startsWith(CUSTOM_PREFIX)) {
+      savePrefs({ [`${kind}_provider`]: `${value.slice(CUSTOM_PREFIX.length)}::${prevModel || ''}` });
+    } else {
+      savePrefs({ [`${kind}_provider`]: value });
+    }
+  }
+  function onAudioModelChange(kind: 'tts' | 'stt', pid: string, model: string) {
+    savePrefs({ [`${kind}_provider`]: `${pid}::${model.trim()}` });
+  }
+
+  // ── Embedding backend (RAG) ──
+  let embedCustom = $derived(splitRef(prefs.embed_model));
+  let embedIsCustom = $derived(!!(prefs.embed_model ?? '').includes('::'));
+  let embedSelectValue = $derived(embedIsCustom ? embedCustom.pid : '');
+  let ragStatus = $state<RagStatus | null>(null);
+  let ragBusy = $state(false);
+  async function loadRagStatus() {
+    try { ragStatus = await getRagStatus(); } catch { ragStatus = null; }
+  }
+  async function saveEmbed(patch: UserPrefs) {
+    ragBusy = true;
+    try {
+      prefs = await updatePrefs(patch);
+      app.prefs = prefs;
+      await loadRagStatus();
+      toast.success('Embedding settings saved');
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      ragBusy = false;
+    }
+  }
+  function onEmbedProviderChange(value: string) {
+    if (!value) void saveEmbed({ embed_model: null, embed_dim: null });
+    else void saveEmbed({ embed_model: `${value}::${embedCustom.model || ''}` });
+  }
+  async function runReindexAll() {
+    ragBusy = true;
+    try {
+      const r = await reindexAll();
+      await loadRagStatus();
+      toast.success(`Re-embedded ${r.reindexed} chunk${r.reindexed === 1 ? '' : 's'}`);
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      ragBusy = false;
+    }
+  }
 
   async function applyChatModel(value: string) {
     // 1. Update the user-level default so future new chats pick it up.
@@ -1600,6 +1678,73 @@
                 {/each}
               </div>
             {/if}
+
+            <button type="button" class="sec-head sub" class:open={secEmbed}
+              aria-expanded={secEmbed} onclick={() => (secEmbed = !secEmbed)}>
+              <span class="sec-chev" aria-hidden="true">›</span>
+              <span class="sec-title">Embedding (document search)</span>
+              <span class="sec-hint">
+                {embedIsCustom ? `${embedCustom.pid} · dim ${prefs.embed_dim ?? '?'}` : 'Cloudflare bge'}
+              </span>
+            </button>
+            {#if secEmbed}
+              <p class="muted small">
+                The model that turns uploaded documents into vectors. Defaults to
+                Cloudflare's bge; point it at any OpenAI-compatible
+                <code>/embeddings</code> provider.
+              </p>
+              <label class="field">
+                <span class="field-label">Provider</span>
+                <select class="model-select" value={embedSelectValue}
+                  onchange={(e) => onEmbedProviderChange((e.currentTarget as HTMLSelectElement).value)}
+                  disabled={ragBusy}>
+                  <option value="">Cloudflare — {app.info?.embed_default?.model ?? 'bge'} (default)</option>
+                  {#each customProviders as p (p.id)}
+                    <option value={p.id}>{p.name} — custom</option>
+                  {/each}
+                </select>
+              </label>
+              {#if embedIsCustom}
+                <label class="field">
+                  <span class="field-label">Model</span>
+                  <input type="text" placeholder="e.g. nomic-embed-text / text-embedding-3-small"
+                    value={embedCustom.model}
+                    onchange={(e) => saveEmbed({ embed_model: `${embedCustom.pid}::${(e.currentTarget as HTMLInputElement).value.trim()}` })}
+                    disabled={ragBusy} />
+                </label>
+                <label class="field">
+                  <span class="field-label">Dimensions</span>
+                  <input type="number" min="8" max="8192" placeholder="e.g. 768 / 1024 / 1536"
+                    value={prefs.embed_dim ?? ''}
+                    onchange={(e) => {
+                      const n = parseInt((e.currentTarget as HTMLInputElement).value, 10);
+                      void saveEmbed({ embed_dim: Number.isFinite(n) ? n : null });
+                    }}
+                    disabled={ragBusy} />
+                </label>
+                <p class="muted small">Dimensions must match the model's output width exactly.</p>
+              {/if}
+              {#if ragStatus}
+                <div class="embed-status" class:warn={ragStatus.stale}>
+                  {#if ragStatus.indexed_chunks === 0}
+                    No documents indexed yet.
+                  {:else if ragStatus.stale}
+                    ⚠ {ragStatus.indexed_chunks} chunk{ragStatus.indexed_chunks === 1 ? '' : 's'}
+                    embedded at dim {ragStatus.collection_dim}, but the model now
+                    outputs {ragStatus.configured_dim}. Search is degraded until re-embed.
+                    <button class="primary" onclick={runReindexAll} disabled={ragBusy}>
+                      {ragBusy ? 'Re-embedding…' : 'Re-embed all'}
+                    </button>
+                  {:else}
+                    {ragStatus.indexed_chunks} chunk{ragStatus.indexed_chunks === 1 ? '' : 's'} indexed
+                    at dim {ragStatus.collection_dim ?? ragStatus.configured_dim}.
+                    <button class="btn-text" onclick={runReindexAll} disabled={ragBusy}>
+                      {ragBusy ? 'Re-embedding…' : 'Re-embed all'}
+                    </button>
+                  {/if}
+                </div>
+              {/if}
+            {/if}
           {/if}
 
           {@render secHead(
@@ -2027,16 +2172,38 @@
             <span class="field-label">Provider</span>
             <select
               class="model-select"
-              value={currentTtsProvider}
-              onchange={(e) => savePrefs({ tts_provider: (e.currentTarget as HTMLSelectElement).value })}
+              value={ttsSelectValue}
+              onchange={(e) => onAudioProviderChange('tts', (e.currentTarget as HTMLSelectElement).value, ttsCustom.model)}
               disabled={prefsSaving}
             >
               {#each app.info?.tts_providers ?? [] as p}
                 <option value={p.id}>{p.label}</option>
               {/each}
+              {#if customProviders.length}
+                <optgroup label="Custom (OpenAI-compatible)">
+                  {#each customProviders as p (p.id)}
+                    <option value={`${CUSTOM_PREFIX}${p.id}`}>{p.name} — custom</option>
+                  {/each}
+                </optgroup>
+              {/if}
             </select>
           </label>
-          {#if currentTtsVoices.length > 0}
+          {#if ttsIsCustom}
+            <label class="field">
+              <span class="field-label">Model</span>
+              <input type="text" placeholder="e.g. tts-1 / gpt-4o-mini-tts"
+                value={ttsCustom.model}
+                onchange={(e) => onAudioModelChange('tts', ttsCustom.pid, (e.currentTarget as HTMLInputElement).value)}
+                disabled={prefsSaving} />
+            </label>
+            <label class="field">
+              <span class="field-label">Voice</span>
+              <input type="text" placeholder="e.g. alloy" value={prefs.tts_voice ?? ''}
+                onchange={(e) => savePrefs({ tts_voice: (e.currentTarget as HTMLInputElement).value })}
+                disabled={prefsSaving} />
+            </label>
+            <p class="muted small">Calls <code>POST {'{base_url}'}/audio/speech</code> — set the API key on its Providers card.</p>
+          {:else if currentTtsVoices.length > 0}
             <label class="field">
               <span class="field-label">Voice</span>
               <select
@@ -2057,15 +2224,32 @@
             <span class="field-label">Provider</span>
             <select
               class="model-select"
-              value={currentSttProvider}
-              onchange={(e) => savePrefs({ stt_provider: (e.currentTarget as HTMLSelectElement).value })}
+              value={sttSelectValue}
+              onchange={(e) => onAudioProviderChange('stt', (e.currentTarget as HTMLSelectElement).value, sttCustom.model)}
               disabled={prefsSaving}
             >
               {#each app.info?.stt_providers ?? [] as p}
                 <option value={p.id}>{p.label}</option>
               {/each}
+              {#if customProviders.length}
+                <optgroup label="Custom (OpenAI-compatible)">
+                  {#each customProviders as p (p.id)}
+                    <option value={`${CUSTOM_PREFIX}${p.id}`}>{p.name} — custom</option>
+                  {/each}
+                </optgroup>
+              {/if}
             </select>
           </label>
+          {#if sttIsCustom}
+            <label class="field">
+              <span class="field-label">Model</span>
+              <input type="text" placeholder="e.g. whisper-1"
+                value={sttCustom.model}
+                onchange={(e) => onAudioModelChange('stt', sttCustom.pid, (e.currentTarget as HTMLInputElement).value)}
+                disabled={prefsSaving} />
+            </label>
+            <p class="muted small">Calls <code>POST {'{base_url}'}/audio/transcriptions</code> — set the API key on its Providers card.</p>
+          {/if}
         {/if}
 
         {#if tab === 'app' && instanceUrl}
@@ -2638,6 +2822,25 @@
   }
   .small {
     font-size: var(--fs-xs);
+  }
+  .embed-status {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--sp-2);
+    margin-top: var(--sp-2);
+    padding: var(--sp-2);
+    border-radius: var(--r-2, 6px);
+    border: 1px solid var(--border);
+    font-size: var(--fs-xs);
+    color: var(--muted);
+  }
+  .embed-status.warn {
+    border-color: var(--warning, #d19a00);
+    color: var(--text);
+  }
+  .embed-status button {
+    margin-left: auto;
   }
   .link-btn {
     background: transparent;

@@ -4,7 +4,7 @@
   import AppHeader from '$lib/components/AppHeader.svelte';
   import ChatSettings from '$lib/components/ChatSettings.svelte';
   import Composer from '$lib/components/Composer.svelte';
-  import { createChat, setSystemPrompt } from '$lib/api';
+  import { createChat, setSystemPrompt, getStarters, type Starter } from '$lib/api';
   import { consumeSharedContent } from '$lib/clienttools';
   import { app } from '$lib/stores.svelte';
   import { toast } from '$lib/toast.svelte';
@@ -45,6 +45,8 @@
   // /?share=1 — drain it here and pre-fill the composer so the user can add a
   // question and send.
   onMount(async () => {
+    // Personalize the starter prompts from memory (skip in code mode).
+    if (new URLSearchParams(location.search).get('code') !== '1') void loadStarters();
     // Make sure prefs are loaded so the picker reflects the user's saved
     // code-mode model (instead of always showing the default).
     if (!app.prefs.tool_models) await app.refreshPrefs();
@@ -71,12 +73,25 @@
     }
   });
 
-  const suggestions = [
+  // Static defaults for instant first paint; replaced on open with personalized
+  // starters generated from the user's memories (GET /me/starters). Falls back
+  // to the defaults silently on any error.
+  const DEFAULT_SUGGESTIONS: Starter[] = [
     { icon: 'sparkles', text: 'Explain what zero-shot prompting is' },
     { icon: 'image',    text: 'Draw a cyberpunk skyline at golden hour' },
     { icon: 'file',     text: 'Search my docs: what does the manual say about regenerative braking?' },
     { icon: 'brain',    text: 'Remember that I prefer concise answers' },
   ];
+  let suggestions = $state<Starter[]>(DEFAULT_SUGGESTIONS);
+
+  async function loadStarters() {
+    try {
+      const s = await getStarters();
+      if (s.length) suggestions = s;
+    } catch {
+      /* keep the defaults */
+    }
+  }
 
   async function send(text: string, uploads: UploadResponse[] = []) {
     busy = true;

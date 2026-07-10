@@ -177,6 +177,13 @@ export interface InfoResponse {
   /** False on a pure bring-your-own-provider deployment (no Cloudflare token):
    *  the neuron counter is hidden and usage falls back to token/cost. */
   cf_configured?: boolean;
+  /** Bundled Cloudflare models + capabilities/roles (the registry). */
+  cf_models_catalog?: Array<{
+    id: string; label: string; note?: string;
+    vision?: boolean; reasoning?: boolean; context?: number; roles?: string[];
+  }>;
+  /** Cloudflare embedding default — fallback shown in the RAG settings. */
+  embed_default?: { model: string; dim: number };
 }
 
 export type ToolKey =
@@ -185,6 +192,7 @@ export type ToolKey =
   | 'code'
   | 'code_mode'
   | 'research'
+  | 'title'
   | 'image'
   | 'image_hd'
   | 'image_edit'
@@ -196,6 +204,7 @@ export interface ToolModels {
   code?: string | null;
   code_mode?: string | null;
   research?: string | null;
+  title?: string | null;
   image?: string | null;
   image_hd?: string | null;
   image_edit?: string | null;
@@ -253,6 +262,10 @@ export interface UserPrefs {
   tts_provider?: string;
   tts_voice?: string;
   stt_provider?: string;
+  /** Embedding backend override: a `provider::model` string (empty = built-in
+   *  Cloudflare bge). Output width must match embed_dim. */
+  embed_model?: string | null;
+  embed_dim?: number | null;
   tool_models?: ToolModels;
   /** When non-empty, replaces the frontend's hardcoded Cloudflare model list
    *  in the dropdowns. Lets the user add models CF launches after this
