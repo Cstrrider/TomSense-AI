@@ -174,6 +174,9 @@ export interface InfoResponse {
   tool_models_catalog?: ToolModelCatalogEntry[];
   /** Default code-mode picker entries — sourced by codeModels.ts. */
   code_models_catalog?: Array<{ id: string; label: string; hint: string }>;
+  /** False on a pure bring-your-own-provider deployment (no Cloudflare token):
+   *  the neuron counter is hidden and usage falls back to token/cost. */
+  cf_configured?: boolean;
 }
 
 export type ToolKey =

@@ -173,6 +173,8 @@
   // neurons, any other provider shows tokens + $ cost; the toggle in Settings
   // can force one or the other.
   let usageMode = $derived.by(() => {
+    // Pure BYO deployment (no Cloudflare) has no neurons — always tokens/cost.
+    if (app.info?.cf_configured === false) return 'tokens';
     const pref = app.prefs.usage_display ?? 'auto';
     if (pref === 'neurons' || pref === 'tokens') return pref;
     return (app.usage?.active_provider ?? 'cf') === 'cf' ? 'neurons' : 'tokens';

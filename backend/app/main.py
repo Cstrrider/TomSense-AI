@@ -216,6 +216,10 @@ def _info_payload() -> dict:
         "chat_model_short": short_name(settings.model_chat),
         "tools": [t["function"]["name"] for t in TOOL_SPECS],
         "auth_required": os.getenv("REQUIRE_CF_ACCESS", "").lower() in ("1", "true", "yes"),
+        # Whether Cloudflare Workers AI is wired at all. When false this is a
+        # pure bring-your-own-provider deployment: the frontend hides the
+        # neuron counter (a CF-only metric) and falls back to token/cost usage.
+        "cf_configured": bool(settings.cf_api_token),
         "tts_providers": [
             {"id": "piper",     "label": "Piper (local, CPU)",     "voices": tts_mod.PIPER_VOICES},
             {"id": "cf-aura",   "label": "Cloudflare Aura 2 (EN)", "voices": tts_mod.AURA_VOICES},
@@ -397,6 +401,11 @@ async def me_neurons(user: dict = Depends(current_user)):
     1k neurons beyond it. dollars.gateway is real unified-billing spend on
     external providers (Imagen / gpt-image / Nano Banana …) via AI Gateway.
     """
+    # Pure BYO deployment (no CF token) — neurons are a CF-only metric, so skip
+    # the CF GraphQL calls entirely and return an "unconfigured" shape.
+    if not settings.cf_api_token:
+        return {"configured": False, "used": 0, "limit": 0,
+                "dollars": {"neurons": 0.0, "gateway": 0.0, "total": 0.0}}
     neurons, gateway = await asyncio.gather(
         fetch_neurons_today(), fetch_gateway_spend_today()
     )

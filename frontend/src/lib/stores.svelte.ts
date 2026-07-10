@@ -65,6 +65,12 @@ class AppState {
   }
 
   async refreshNeurons() {
+    // Neurons are a Cloudflare-only metric — skip the fetch on a pure BYO
+    // deployment so it doesn't hit CF GraphQL or show a neuron bar.
+    if (this.info && this.info.cf_configured === false) {
+      this.neurons = null;
+      return;
+    }
     try {
       this.neurons = await getNeurons();
     } catch (e) {
