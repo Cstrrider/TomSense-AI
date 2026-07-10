@@ -428,13 +428,54 @@ async def stream_round(
 async def dispatch_chat_complete(
     user_id: Optional[str], model_str: str, messages: list[dict],
     max_tokens: int, tools: Optional[list[dict]] = None,
+    fallback_model_str: Optional[str] = None,
 ) -> dict:
+    """One-shot completion. When `fallback_model_str` is given, a call that
+    errors, raises, or returns nothing usable (no content AND no tool calls)
+    is retried once on the fallback — the non-streaming twin of the
+    dispatch_stream_round stall guard. Without a fallback, semantics are
+    unchanged (exceptions propagate)."""
     pid, mid = parse_model_str(model_str)
     provider = await resolve_provider(pid, user_id=user_id)
     if not provider:
-        return {"content": "", "tool_calls": [], "usage": {},
-                "error": f"unknown provider {pid!r}"}
-    return await chat_complete(provider, mid, messages, max_tokens, tools)
+        result = {"content": "", "tool_calls": [], "usage": {},
+                  "error": f"unknown provider {pid!r}"}
+    elif not fallback_model_str:
+        return await chat_complete(provider, mid, messages, max_tokens, tools)
+    else:
+        try:
+            result = await chat_complete(provider, mid, messages, max_tokens, tools)
+        except Exception as e:
+            result = {"content": "", "tool_calls": [], "usage": {},
+                      "error": f"{type(e).__name__}: {e}"}
+
+    dead = bool(result.get("error")) or (
+        not (result.get("content") or "").strip() and not result.get("tool_calls")
+    )
+    if not dead or not fallback_model_str:
+        return result
+    fb_pid, fb_mid = parse_model_str(fallback_model_str)
+    if not fb_mid or (fb_pid, fb_mid) == (pid, mid):
+        return result
+    fb_provider = await resolve_provider(fb_pid, user_id=user_id)
+    if not fb_provider:
+        return result
+    why = (result.get("error") or "empty reply")[:120]
+    print(f"[fallback] {mid} failed ({why}) — retrying with {fb_mid}")
+    # A text-only fallback would 400 on multimodal content — flatten first.
+    fb_messages = messages
+    if _messages_have_images(messages):
+        from . import capabilities
+        if not capabilities.model_capabilities(fb_provider, fb_mid)["vision"]:
+            from .cf import flatten_for_text_model
+            fb_messages = flatten_for_text_model(messages)
+    try:
+        fb_result = await chat_complete(fb_provider, fb_mid, fb_messages,
+                                        max_tokens, tools)
+    except Exception as e:
+        print(f"[fallback] {fb_mid} also failed: {type(e).__name__}: {e}")
+        return result
+    return fb_result
 
 
 def _model_short(mid: str) -> str:

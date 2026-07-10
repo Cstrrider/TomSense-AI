@@ -1501,6 +1501,21 @@ def resolve_image_model(context: dict, tool_key: str, hd: bool) -> str:
     return settings.model_image_hd if hd else settings.model_image_sd
 
 
+def resolve_image_fallback(context: dict, tool_key: str, hd: bool) -> Optional[str]:
+    """The user's fallback for an image tool (`{tool_key}[_hd]_fallback`), in
+    the same id form resolve_image_model returns (cf:: prefix stripped).
+    None when unset."""
+    tm = (context or {}).get("tool_models") or {}
+    chain = ([f"{tool_key}_hd_fallback"] if hd else []) + [f"{tool_key}_fallback"]
+    for k in chain:
+        raw = (tm.get(k) or "").strip()
+        if not raw:
+            continue
+        provider_id, model = parse_model_str(raw)
+        return model if provider_id == "cf" else raw
+    return None
+
+
 def _is_flagged_error(err: Optional[str]) -> bool:
     """CF's image safety filter rejected the OUTPUT (code 3030, 'Your output
     has been flagged'). It's non-deterministic and a frequent FALSE positive,
@@ -1585,6 +1600,16 @@ async def tool_generate_image(args: dict, context: dict) -> str:
             fb, prompt, hd=False, edit_srcs=None,
             steps_override=_cf_model_steps_override(context, fb), context=context,
         )
+    # Still failing (any error) → the user's configured fallback model.
+    if err or png is None:
+        user_fb = resolve_image_fallback(context, "image", hd)
+        if user_fb and user_fb != model:
+            print(f"[tool:gen_image] {model} failed — retrying on user fallback {user_fb}")
+            png, err, cost, pid, pname = await _execute_image_model(
+                user_fb, prompt, hd=hd, edit_srcs=None,
+                steps_override=_cf_model_steps_override(context, user_fb),
+                context=context,
+            )
     if err or png is None:
         if _is_flagged_error(err):
             return _flag_fail_message("generation")
@@ -1636,6 +1661,16 @@ async def tool_edit_image(args: dict, context: dict) -> str:
             fb, prompt, hd=False, edit_srcs=srcs,
             steps_override=_cf_model_steps_override(context, fb), context=context,
         )
+    # Still failing (any error) → the user's configured fallback model.
+    if err or png is None:
+        user_fb = resolve_image_fallback(context, "image_edit", hd)
+        if user_fb and user_fb != model:
+            print(f"[tool:edit_image] {model} failed — retrying on user fallback {user_fb}")
+            png, err, cost, pid, pname = await _execute_image_model(
+                user_fb, prompt, hd=hd, edit_srcs=srcs,
+                steps_override=_cf_model_steps_override(context, user_fb),
+                context=context,
+            )
     if err or png is None:
         if _is_flagged_error(err):
             return _flag_fail_message("edit")
@@ -1919,7 +1954,8 @@ async def tool_consult_coder(args: dict, context: dict) -> str:
     task = (args.get("task") or "").strip()
     if not task:
         return "Error: empty task"
-    model = ((context or {}).get("tool_models") or {}).get("code") or settings.model_writer
+    _tm = (context or {}).get("tool_models") or {}
+    model = _tm.get("code") or settings.model_writer
     user_id = (context or {}).get("user_id")
     print(f"[tool:coder] {task[:120]} (model={model})")
     result = await dispatch_chat_complete(
@@ -1931,6 +1967,7 @@ async def tool_consult_coder(args: dict, context: dict) -> str:
         ],
         max_tokens=settings.max_tokens_coder,
         tools=None,
+        fallback_model_str=(_tm.get("code_fallback") or "").strip() or None,
     )
     text = strip_template_tokens(result.get("content", "")).strip()
     return text or "(coder returned no content)"
@@ -1963,6 +2000,7 @@ _RESEARCH_FETCH_PER_QUERY = 3
 
 async def _research_ask_small(
     prompt: str, user_id: Optional[str], model: Optional[str] = None,
+    fallback: Optional[str] = None,
 ) -> str:
     """One-shot call on the cheap task model (planning / gap-checking).
     `model` lets the caller pass the user's utility-model override."""
@@ -1972,6 +2010,7 @@ async def _research_ask_small(
             model_str=model or settings.model_title,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=300,
+            fallback_model_str=fallback,
         )
         return (r.get("content") or "").strip()
     except Exception as e:
@@ -2013,8 +2052,11 @@ async def tool_deep_research(args: dict, context: dict) -> str:
     query = (args.get("query") or "").strip()
     if not query:
         return "Error: empty query"
-    model = ((context or {}).get("tool_models") or {}).get("research") or settings.model_research
-    title_model = ((context or {}).get("tool_models") or {}).get("title") or settings.model_title
+    _tm = (context or {}).get("tool_models") or {}
+    model = _tm.get("research") or settings.model_research
+    title_model = _tm.get("title") or settings.model_title
+    research_fb = (_tm.get("research_fallback") or "").strip() or None
+    title_fb = (_tm.get("title_fallback") or "").strip() or None
     user_id = (context or {}).get("user_id")
     print(f"[tool:research] {query[:120]} (model={model})")
 
@@ -2026,6 +2068,7 @@ async def tool_deep_research(args: dict, context: dict) -> str:
         f"Question: {query}",
         user_id,
         title_model,
+        title_fb,
     )
     pending = _research_parse_queries(plan, 3) or [query]
 
@@ -2085,6 +2128,7 @@ async def tool_deep_research(args: dict, context: dict) -> str:
                 "exactly the single word: NONE",
                 user_id,
                 title_model,
+                title_fb,
             )
             pending = _research_parse_queries(gap, 2)
 
@@ -2110,6 +2154,7 @@ async def tool_deep_research(args: dict, context: dict) -> str:
         ],
         max_tokens=settings.max_tokens_research,
         tools=None,
+        fallback_model_str=research_fb,
     )
     text = strip_template_tokens(result.get("content", "")).strip()
     if not text:

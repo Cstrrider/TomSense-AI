@@ -333,6 +333,20 @@ async def _task_model(user_id: Optional[str], prefs: Optional[dict] = None) -> s
     return settings.model_title
 
 
+async def _task_fallback(user_id: Optional[str], prefs: Optional[dict] = None) -> Optional[str]:
+    """The user's `tool_models.title_fallback` — dispatch_chat_complete retries
+    a failed/empty utility call on it. None when unset."""
+    if not user_id:
+        return None
+    try:
+        if prefs is None:
+            prefs = await db.get_user_prefs(user_id)
+        fb = ((prefs or {}).get("tool_models") or {}).get("title_fallback")
+        return str(fb).strip() if fb and str(fb).strip() else None
+    except Exception:
+        return None
+
+
 async def _route_model(msgs: list[dict], user_id: str) -> Optional[str]:
     """Difficulty-route a default-model turn: HARD → the heavy chat model.
     Returns the escalated model string, or None to stay on the default.
@@ -348,6 +362,7 @@ async def _route_model(msgs: list[dict], user_id: str) -> Optional[str]:
         r = await providers.dispatch_chat_complete(
             user_id=user_id,
             model_str=await _task_model(user_id),
+            fallback_model_str=await _task_fallback(user_id),
             messages=[{
                 "role": "user",
                 "content": (
@@ -1954,6 +1969,7 @@ async def _summarize_to_text(transcript_blob: str, user_id: Optional[str] = None
         result = await providers.dispatch_chat_complete(
             user_id=user_id,
             model_str=await _task_model(user_id),
+            fallback_model_str=await _task_fallback(user_id),
             messages=[{"role": "user", "content": prompt}],
             max_tokens=600,
         )
@@ -2094,6 +2110,7 @@ async def _generate_title(first_user_msg: str, user_id: Optional[str] = None) ->
         result = await providers.dispatch_chat_complete(
             user_id=user_id,
             model_str=await _task_model(user_id),
+            fallback_model_str=await _task_fallback(user_id),
             messages=[{"role": "user", "content": prompt}],
             max_tokens=24,
         )
@@ -2147,6 +2164,7 @@ async def _generate_followups(chat_id: str, user_id: str) -> list[str]:
         result = await providers.dispatch_chat_complete(
             user_id=user_id,
             model_str=await _task_model(user_id),
+            fallback_model_str=await _task_fallback(user_id),
             messages=[{"role": "user", "content": prompt}],
             max_tokens=90,
         )
@@ -2217,6 +2235,7 @@ async def _generate_starters(user_id: str) -> list[dict]:
     try:
         result = await providers.dispatch_chat_complete(
             user_id=user_id, model_str=await _task_model(user_id),
+            fallback_model_str=await _task_fallback(user_id),
             messages=[{"role": "user", "content": prompt}], max_tokens=160,
         )
         out: list[dict] = []
@@ -2253,6 +2272,7 @@ async def _auto_memory(user_id: str, user_text: str) -> None:
         result = await providers.dispatch_chat_complete(
             user_id=user_id,
             model_str=await _task_model(user_id),
+            fallback_model_str=await _task_fallback(user_id),
             messages=[{
                 "role": "user",
                 "content": (
@@ -2732,7 +2752,11 @@ async def _run_scheduled(s: dict) -> None:
         memories = []
 
     from . import notify
-    model, _notice = await _budget_downshift(s.get("model") or None, user_id=user["id"])
+    _tm_dict = tool_models if isinstance(tool_models, dict) else {}
+    _sched_fb = (_tm_dict.get("chat_fallback") or "").strip() or None
+    model, _notice = await _budget_downshift(
+        s.get("model") or None, user_id=user["id"], slot_fallback=_sched_fb
+    )
     run = create_run(chat_id, user_id=user["id"])
     log.info("schedule %r firing → chat %s", s["title"], chat_id)
     await _run_generation(
@@ -2746,8 +2770,9 @@ async def _run_scheduled(s: dict) -> None:
             "user_id": user["id"],
             "chat_id": chat_id,
             "memories": memories,
-            "tool_models": tool_models if isinstance(tool_models, dict) else {},
+            "tool_models": _tm_dict,
             "cf_models": (prefs or {}).get("cf_models") or [],
+            "stall_fallback": _sched_fb,
             "secret_env": {},
         },
         persona=None,
