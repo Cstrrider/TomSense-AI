@@ -1315,11 +1315,9 @@
       <button class:active={tab === 'voice'} onclick={() => (tab = 'voice')}>
         <IconVolume size={14} /> Voice
       </button>
-      {#if instanceUrl}
-        <button class:active={tab === 'app'} onclick={() => (tab = 'app')}>
-          <IconMonitor size={14} /> App
-        </button>
-      {/if}
+      <button class:active={tab === 'app'} onclick={() => (tab = 'app')}>
+        <IconMonitor size={14} /> General
+      </button>
       {#if chatId}
         <button class:active={tab === 'share'} onclick={() => (tab = 'share')}>
           <IconShare size={14} /> Share
@@ -1646,47 +1644,6 @@
               </select>
             </div>
           {/snippet}
-
-          <div class="tool-row" style="margin-bottom: var(--sp-2);">
-            <div class="tool-meta">
-              <div class="tool-label">Theme</div>
-              <div class="tool-hint">
-                System follows your device's light/dark setting.
-              </div>
-            </div>
-            <select
-              class="model-select compact"
-              value={themeChoice}
-              onchange={(e) => {
-                themeChoice = (e.currentTarget as HTMLSelectElement).value as ThemeChoice;
-                setThemeChoice(themeChoice);
-              }}
-            >
-              <option value="system">System</option>
-              <option value="dark">Dark</option>
-              <option value="light">Light</option>
-            </select>
-          </div>
-
-          <div class="tool-row" style="margin-bottom: var(--sp-2);">
-            <div class="tool-meta">
-              <div class="tool-label">Usage counter</div>
-              <div class="tool-hint">
-                What the sidebar shows. Auto follows the active provider —
-                Cloudflare neurons, or tokens + $ cost for OpenRouter etc.
-              </div>
-            </div>
-            <select
-              class="model-select compact"
-              value={prefs?.usage_display ?? 'auto'}
-              onchange={(e) =>
-                savePrefsPatch({ usage_display: (e.currentTarget as HTMLSelectElement).value as any })}
-            >
-              <option value="auto">Auto (per provider)</option>
-              <option value="neurons">Neurons (Cloudflare)</option>
-              <option value="tokens">Tokens &amp; cost</option>
-            </select>
-          </div>
 
           {@render secHead('Models', secModels, () => (secModels = !secModels))}
           {#if secModels}
@@ -2046,21 +2003,25 @@
                             title={`Use this model for ${t}`}
                           >{TOOL_CHIP_LABEL[t]}</button>
                         {/each}
-                        <span class="cap-sep" aria-hidden="true">|</span>
+                        <span class="cap-sep">can:</span>
                         <button
                           type="button"
                           class="tool-chip cap"
                           class:on={!!providerForm.models[idx].vision}
                           onclick={() => toggleModelCap(idx, 'vision')}
-                          title="This model can see images (accepts image input)"
-                        >👁 vision</button>
+                          title="Capability: this model can see images (accepts image input). Distinct from the 'vision' tool role, which assigns it to the Vision slot."
+                        >👁 sees images</button>
                         <button
                           type="button"
                           class="tool-chip cap"
                           class:on={!!providerForm.models[idx].reasoning}
                           onclick={() => toggleModelCap(idx, 'reasoning')}
-                          title="This model emits a reasoning channel (cap its effort)"
-                        >💭 reasoning</button>
+                          title="Capability: this model emits a hidden reasoning channel (its effort gets capped)."
+                        >💭 reasons</button>
+                      </div>
+                      <div class="model-tools-legend">
+                        <span>Tool roles (which pickers list it)</span>
+                        <span>· Capabilities (what it can do)</span>
                       </div>
                       <button
                         type="button"
@@ -2314,30 +2275,71 @@
           {/if}
         {/if}
 
-        {#if tab === 'app' && instanceUrl}
-          <p class="muted">
-            This Android app is a shell around a TomSense server. Point it at
-            a different instance here — the app reconnects immediately.
-            {#if !instanceUrl.isSet}
-              Currently using the URL baked into the APK.
-            {/if}
-          </p>
-          <label class="field">
-            <span class="field-label">Server URL</span>
-            <input
-              type="url"
-              placeholder="https://tomsense.your-domain.com"
-              bind:value={instanceUrlDraft}
-              disabled={instanceUrlSaving}
-            />
-          </label>
-          <button
-            class="primary"
-            onclick={saveInstanceUrl}
-            disabled={instanceUrlSaving || instanceUrlDraft.trim() === instanceUrl.url}
-          >
-            <IconRefresh size={14} /> {instanceUrlSaving ? 'Reconnecting…' : 'Save & reconnect'}
-          </button>
+        {#if tab === 'app'}
+          <div class="tool-row" style="margin-bottom: var(--sp-2);">
+            <div class="tool-meta">
+              <div class="tool-label">Theme</div>
+              <div class="tool-hint">System follows your device's light/dark setting.</div>
+            </div>
+            <select
+              class="model-select compact"
+              value={themeChoice}
+              onchange={(e) => {
+                themeChoice = (e.currentTarget as HTMLSelectElement).value as ThemeChoice;
+                setThemeChoice(themeChoice);
+              }}
+            >
+              <option value="system">System</option>
+              <option value="dark">Dark</option>
+              <option value="light">Light</option>
+            </select>
+          </div>
+
+          <div class="tool-row" style="margin-bottom: var(--sp-2);">
+            <div class="tool-meta">
+              <div class="tool-label">Usage counter</div>
+              <div class="tool-hint">
+                What the sidebar shows. Auto follows the active provider —
+                Cloudflare neurons, or tokens + $ cost for OpenRouter etc.
+              </div>
+            </div>
+            <select
+              class="model-select compact"
+              value={prefs?.usage_display ?? 'auto'}
+              onchange={(e) =>
+                savePrefsPatch({ usage_display: (e.currentTarget as HTMLSelectElement).value as any })}
+            >
+              <option value="auto">Auto (per provider)</option>
+              <option value="neurons">Neurons (Cloudflare)</option>
+              <option value="tokens">Tokens &amp; cost</option>
+            </select>
+          </div>
+
+          {#if instanceUrl}
+            <p class="muted" style="margin-top: var(--sp-3);">
+              This Android app is a shell around a TomSense server. Point it at
+              a different instance here — the app reconnects immediately.
+              {#if !instanceUrl.isSet}
+                Currently using the URL baked into the APK.
+              {/if}
+            </p>
+            <label class="field">
+              <span class="field-label">Server URL</span>
+              <input
+                type="url"
+                placeholder="https://tomsense.your-domain.com"
+                bind:value={instanceUrlDraft}
+                disabled={instanceUrlSaving}
+              />
+            </label>
+            <button
+              class="primary"
+              onclick={saveInstanceUrl}
+              disabled={instanceUrlSaving || instanceUrlDraft.trim() === instanceUrl.url}
+            >
+              <IconRefresh size={14} /> {instanceUrlSaving ? 'Reconnecting…' : 'Save & reconnect'}
+            </button>
+          {/if}
         {/if}
 
         {#if tab === 'share' && chatId}
@@ -3093,8 +3095,19 @@
   }
   .cap-sep {
     align-self: center;
-    color: var(--border);
-    font-size: 11px;
+    color: var(--muted);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-left: 2px;
+  }
+  .model-tools-legend {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+    font-size: 10px;
+    color: var(--muted);
+    margin-top: 2px;
   }
   @media (max-width: 480px) {
     .tool-row {
