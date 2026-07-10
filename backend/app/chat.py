@@ -14,7 +14,7 @@ from . import mounts
 from .clienttools import CLIENT_TOOL_NAMES, request_client_tool
 from .code_hints import active_hint_keys, apply_code_hints
 from .config import settings
-from .providers import dispatch_stream_round
+from .providers import dispatch_stream_round, parse_model_str
 from .tools import (
     ALLOWED_TOOL_NAMES,
     CODE_TOOL_SPECS,
@@ -817,6 +817,7 @@ async def run_chat(
     MAX_TOTAL_MISFIRES = 12  # this doesn't, so a real/misfire/real/misfire stall still ends
     last_call_sig = None  # #7: detect the model repeating the identical tool call
     repeat_count = 0
+    empty_round_retried = False  # normal chat: one retry when a round dies with no output
 
     for round_num in range(rounds):
         # Re-evaluate task hints each round so a hint can fire mid-conversation
@@ -907,6 +908,27 @@ async def run_chat(
                 tool_calls = _rec
 
         if not tool_calls:
+            # A NORMAL chat round that produced neither a tool call nor any
+            # visible text is a dead round — the model reasoned then died, the
+            # stream dropped, or the completion came back empty. Retry once:
+            # on the slot/global fallback when it differs from what just ran,
+            # else the same model (transient CF hiccups often clear). Without
+            # this the user gets a thinking block and silence (2026-07-10).
+            if not code_mode and not (text or "").strip():
+                if not empty_round_retried and round_num + 1 < rounds:
+                    empty_round_retried = True
+                    _fb = ((tool_context or {}).get("stall_fallback")
+                           or settings.stall_fallback_model or "")
+                    if _fb and parse_model_str(_fb) != parse_model_str(served_model):
+                        model = _fb
+                        yield (f"\n\n*[no answer produced — retrying with "
+                               f"{short_name(_fb)}]*\n\n")
+                    else:
+                        yield "\n\n*[no answer produced — retrying]*\n\n"
+                    continue
+                yield ("\n\n> ⚠️ **No answer** — the model returned an empty "
+                       "reply. Try again in a moment, or switch models in "
+                       "Settings → Models.")
             # A code-mode round that produced neither a tool call nor any
             # visible text is a misfire — the model reasoned, then stalled.
             # Nudge it to actually act rather than returning a blank reply.

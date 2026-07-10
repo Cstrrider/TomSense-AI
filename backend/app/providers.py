@@ -389,8 +389,10 @@ async def stream_round(
                 if obj.get("usage"):
                     usage = obj["usage"]
     except Exception as e:
-        print(f"[stream_round:{provider.get('name')}] error: {e}")
-        yield ("text", f"\n\n[stream error: {e}]")
+        # str() of httpx.ReadTimeout is empty — always include the type so the
+        # user-visible note and the log say WHAT failed.
+        print(f"[stream_round:{provider.get('name')}] error: {type(e).__name__}: {e}")
+        yield ("text", f"\n\n[stream error: {type(e).__name__}: {e}]")
 
     tool_calls_out = []
     for idx in sorted(accumulated_tools.keys()):
@@ -440,6 +442,16 @@ def _model_short(mid: str) -> str:
     return mid.rsplit("/", 1)[-1]
 
 
+def _messages_have_images(messages: list[dict]) -> bool:
+    for m in messages:
+        c = m.get("content")
+        if isinstance(c, list) and any(
+            isinstance(p, dict) and p.get("type") == "image_url" for p in c
+        ):
+            return True
+    return False
+
+
 async def dispatch_stream_round(
     user_id: Optional[str], model_str: str, messages: list[dict],
     max_tokens: int, tools: Optional[list[dict]] = None,
@@ -453,52 +465,108 @@ async def dispatch_stream_round(
         yield ("done", {"tool_calls": [], "content": "", "usage": {}})
         return
 
-    # Stall guard: bound the wait for the FIRST streamed event. Reasoning
-    # models stream their thinking, so any healthy model shows bytes within
-    # seconds — a timeout here means the upstream is bricked (observed
-    # 2026-07-07: CF gemma-4 brownout, 180-295s rounds with zero bytes), and
-    # waiting out httpx's full read timeout just tortures the user. Abort and
-    # retry once on the fallback model with a visible notice.
-    # fallback_model_str (per-slot user setting) takes priority over the global
-    # stall_fallback_model so the user can point slow CF models at an alternative.
-    gen = stream_round(provider, mid, messages, max_tokens, tools,
-                       temperature=temperature, reasoning_effort=reasoning_effort)
-    timeout = settings.first_token_timeout_s
+    # Stall watchdog, two phases:
+    #  - FIRST event bounded by first_token_timeout_s (upstream bricked before
+    #    any bytes — observed 2026-07-07 CF gemma-4 brownout, 180-295s of
+    #    nothing).
+    #  - Every SUBSEQUENT gap bounded by stream_idle_timeout_s (model streams
+    #    its thinking, then the stream dies mid-flight — observed 2026-07-10:
+    #    4771 chars of reasoning then silence until the 180s httpx read
+    #    timeout, ending the round with an empty reply).
+    # On a stall with no visible text yet, retry once on the fallback model
+    # (per-slot user setting first, global default second) with a visible
+    # notice. If text already streamed, truncating honestly beats a retry that
+    # would duplicate half an answer.
     _fb_str = fallback_model_str or settings.stall_fallback_model
     fb_pid, fb_mid = parse_model_str(_fb_str)
-    if timeout > 0 and fb_mid and fb_mid != mid:
+    first_t = settings.first_token_timeout_s
+    idle_t = settings.stream_idle_timeout_s
+
+    gen = stream_round(provider, mid, messages, max_tokens, tools,
+                       temperature=temperature, reasoning_effort=reasoning_effort)
+    text_seen = ""
+    timeout = first_t
+    while True:
         try:
-            first = await asyncio.wait_for(gen.__anext__(), timeout=timeout)
-        except asyncio.TimeoutError:
-            await gen.aclose()
-            print(f"[stall-guard] {mid} produced no output in {timeout:.0f}s "
-                  f"— falling back to {fb_mid}")
-            fb_provider = await resolve_provider(fb_pid, user_id=user_id)
-            if not fb_provider:
-                yield ("text", f"\n\n[{_model_short(mid)} stalled and fallback "
-                               f"provider {fb_pid!r} is unavailable]")
-                yield ("done", {"tool_calls": [], "content": "", "usage": {}})
-                return
-            yield ("text", f"*[{_model_short(mid)} stalled — answering with "
-                           f"{_model_short(fb_mid)}]*\n\n")
-            async for ev in stream_round(fb_provider, fb_mid, messages,
-                                         max_tokens, tools,
-                                         temperature=temperature,
-                                         reasoning_effort=reasoning_effort):
-                # Tag the round with the model that ACTUALLY answered, so the
-                # stats footer shows the fallback rather than the stalled model.
-                if ev[0] == "done":
-                    ev[1]["model"] = _fb_str
-                yield ev
-            return
+            if timeout and timeout > 0:
+                ev = await asyncio.wait_for(gen.__anext__(), timeout=timeout)
+            else:
+                ev = await gen.__anext__()
         except StopAsyncIteration:
             return
-        if first[0] == "done":
-            first[1]["model"] = model_str
-        yield first
-    async for ev in gen:
+        except asyncio.TimeoutError:
+            await gen.aclose()
+            break
+        timeout = idle_t
+        if ev[0] == "text":
+            text_seen += ev[1]
         if ev[0] == "done":
+            # Tag the round with the model that actually answered, so the
+            # stats footer shows the right name.
             ev[1]["model"] = model_str
+        yield ev
+
+    # ── stalled ─────────────────────────────────────────────────────────────
+    phase = "mid-stream" if text_seen else "before any visible output"
+    print(f"[stall-guard] {mid} went silent {phase} "
+          f"(first={first_t:.0f}s idle={idle_t:.0f}s)")
+
+    if text_seen:
+        # Part of the answer is already on the user's screen — a fallback
+        # retry would restart from scratch and duplicate it. Close honestly.
+        yield ("text", f"\n\n*[{_model_short(mid)} went silent mid-answer — "
+                       "response may be incomplete]*")
+        yield ("done", {"tool_calls": [], "content": text_seen, "usage": {},
+                        "model": model_str})
+        return
+
+    fb_provider = await resolve_provider(fb_pid, user_id=user_id) if fb_mid else None
+    if not fb_provider or fb_mid == mid:
+        yield ("text", f"\n\n*[{_model_short(mid)} stalled and no fallback "
+                       "model is available]*")
+        yield ("done", {"tool_calls": [], "content": "", "usage": {},
+                        "model": model_str})
+        return
+
+    # An image turn falling back to a text-only model would 400 on the
+    # multimodal content — flatten the images to a text note so the fallback
+    # still answers (degraded beats dead).
+    from . import capabilities
+    fb_messages = messages
+    if _messages_have_images(messages) and not capabilities.model_capabilities(
+            fb_provider, fb_mid)["vision"]:
+        from .cf import flatten_for_text_model
+        fb_messages = flatten_for_text_model(messages)
+
+    yield ("text", f"*[{_model_short(mid)} stalled — answering with "
+                   f"{_model_short(fb_mid)}]*\n\n")
+    fb_gen = stream_round(fb_provider, fb_mid, fb_messages, max_tokens, tools,
+                          temperature=temperature,
+                          reasoning_effort=reasoning_effort)
+    fb_text = ""
+    timeout = first_t
+    while True:
+        try:
+            if timeout and timeout > 0:
+                ev = await asyncio.wait_for(fb_gen.__anext__(), timeout=timeout)
+            else:
+                ev = await fb_gen.__anext__()
+        except StopAsyncIteration:
+            return
+        except asyncio.TimeoutError:
+            await fb_gen.aclose()
+            print(f"[stall-guard] fallback {fb_mid} ALSO went silent — giving up")
+            yield ("text", f"\n\n*[{_model_short(fb_mid)} also went silent — "
+                           "both models are struggling right now, try again "
+                           "in a moment]*")
+            yield ("done", {"tool_calls": [], "content": fb_text, "usage": {},
+                            "model": _fb_str})
+            return
+        timeout = idle_t
+        if ev[0] == "text":
+            fb_text += ev[1]
+        if ev[0] == "done":
+            ev[1]["model"] = _fb_str
         yield ev
 
 

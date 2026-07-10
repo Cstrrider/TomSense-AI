@@ -68,6 +68,13 @@ class Settings:
     # never cut off. Motivated by the 2026-07-07 CF gemma-4 brownout (rounds
     # hung 180-295s with zero bytes). 0 disables the guard.
     first_token_timeout_s: float = float(os.getenv("FIRST_TOKEN_TIMEOUT_S", "45"))
+    # Mid-stream idle watchdog: after the first byte, a gap of this many
+    # seconds with NO streamed events (reasoning, text, or tool deltas) aborts
+    # the round instead of riding out the 180s httpx read timeout. Catches the
+    # "streams its thinking, then dies" failure (2026-07-10: 4771 reasoning
+    # chars then 300s of silence → empty reply). Healthy models never pause
+    # this long between deltas. 0 disables.
+    stream_idle_timeout_s: float = float(os.getenv("STREAM_IDLE_TIMEOUT_S", "90"))
     stall_fallback_model: str = os.getenv("STALL_FALLBACK_MODEL", "@cf/openai/gpt-oss-120b")
     # Workers AI paid-tier price per 1k neurons past the free daily allocation
     # — used for the $ spend estimate in the sidebar.
