@@ -4,6 +4,8 @@
   import type { ToolKey, ToolModels } from '$lib/types';
   import {
     S,
+    armed,
+    confirmTap,
     TOOL_KEYS,
     TOOL_CHIP_LABEL,
     TOOL_LABELS,
@@ -95,13 +97,9 @@
           <button
             class="cred-btn danger"
             disabled={S.credSaving === key}
-            onclick={() => {
-              if (confirm(`Clear ${label} key? Will fall back to env default.`)) {
-                void saveCred(key, null);
-              }
-            }}
+            onclick={() => confirmTap(`cred-${key}`, () => void saveCred(key, null))}
           >
-            <IconTrash size={12} /> Clear
+            <IconTrash size={12} /> {armed(`cred-${key}`) ? 'Sure? (env fallback)' : 'Clear'}
           </button>
         {/if}
       </div>
@@ -406,8 +404,10 @@
     </div>
     <button class="btn-text" onclick={addCfModelRow}>+ Add model</button>
     <div class="actions" style="justify-content: space-between;">
-      <button class="btn-text" onclick={resetCfModelsToDefaults} disabled={S.cfFormSaving}>
-        Reset to defaults
+      <button class="btn-text" class:danger={armed('cf-reset')}
+        onclick={() => confirmTap('cf-reset', () => void resetCfModelsToDefaults())}
+        disabled={S.cfFormSaving}>
+        {armed('cf-reset') ? 'Really reset?' : 'Reset to defaults'}
       </button>
       <div style="display: flex; gap: var(--sp-2);">
         <button class="btn-text" onclick={cancelEditCfModels} disabled={S.cfFormSaving}>Cancel</button>
@@ -482,11 +482,12 @@
       </button>
       <button
         class="icon-btn danger"
+        class:armed={armed(`prov-${p.id}`)}
         title="Delete"
         aria-label="Delete"
-        onclick={() => onDeleteProvider(p)}
+        onclick={() => confirmTap(`prov-${p.id}`, () => void onDeleteProvider(p))}
       >
-        <IconTrash size={14} />
+        {#if armed(`prov-${p.id}`)}Sure?{:else}<IconTrash size={14} />{/if}
       </button>
     </div>
   </div>
@@ -635,7 +636,9 @@
       <button class="btn-text" onclick={() => toggleMcp(s)}>
         {s.enabled ? 'Disable' : 'Enable'}
       </button>
-      <button class="btn-text danger" onclick={() => removeMcp(s)}>Remove</button>
+      <button class="btn-text danger" onclick={() => confirmTap(`mcp-${s.id}`, () => void removeMcp(s))}>
+        {armed(`mcp-${s.id}`) ? 'Sure?' : 'Remove'}
+      </button>
     </div>
   </div>
 {/each}

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { IconKey, IconTrash } from '$lib/icons';
-  import { S, onAddSecret, onDeleteSecret } from './state.svelte';
+  import { S, armed, confirmTap, onAddSecret, onDeleteSecret } from './state.svelte';
 </script>
 
 <p class="muted">
@@ -24,11 +24,12 @@
         <span class="row-content"><code>${s.name}</code></span>
         <button
           class="icon-btn danger"
+          class:armed={armed(`secret-${s.name}`)}
           aria-label="Delete secret"
           title="Delete"
-          onclick={() => onDeleteSecret(s.name)}
+          onclick={() => confirmTap(`secret-${s.name}`, () => void onDeleteSecret(s.name))}
         >
-          <IconTrash size={14} />
+          {#if armed(`secret-${s.name}`)}Sure?{:else}<IconTrash size={14} />{/if}
         </button>
       </li>
     {/each}

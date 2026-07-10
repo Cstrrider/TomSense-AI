@@ -1,6 +1,6 @@
 <script lang="ts">
   import { IconCopy, IconLink } from '$lib/icons';
-  import { S, shareUrl, generateShare, copyShareUrl, revoke } from './state.svelte';
+  import { S, armed, confirmTap, shareUrl, generateShare, copyShareUrl, revoke } from './state.svelte';
 </script>
 
 <p class="muted">
@@ -14,8 +14,8 @@
       <IconCopy size={14} /> Copy
     </button>
   </div>
-  <button class="danger-link" onclick={revoke} disabled={S.saving}>
-    Revoke share link
+  <button class="danger-link" onclick={() => confirmTap('share-revoke', () => void revoke())} disabled={S.saving}>
+    {armed('share-revoke') ? 'Really revoke? Anyone with the URL gets a 404' : 'Revoke share link'}
   </button>
 {:else}
   <button class="primary" onclick={generateShare} disabled={S.saving}>

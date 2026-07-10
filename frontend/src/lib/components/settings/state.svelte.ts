@@ -280,8 +280,31 @@ export const S = $state({
 
   // Embedding backend (RAG)
   ragStatus: null as RagStatus | null,
-  ragBusy: false
+  ragBusy: false,
+
+  // Two-tap destructive-action confirmation (replaces window.confirm, which
+  // is janky in the Android WebView): first tap arms the button, second tap
+  // within 2.5s executes. Holds the armed action's key.
+  confirmArmed: null as string | null
 });
+
+let disarmTimer: ReturnType<typeof setTimeout> | null = null;
+export function armed(key: string): boolean {
+  return S.confirmArmed === key;
+}
+export function confirmTap(key: string, action: () => void) {
+  if (S.confirmArmed === key) {
+    S.confirmArmed = null;
+    if (disarmTimer) clearTimeout(disarmTimer);
+    action();
+  } else {
+    S.confirmArmed = key;
+    if (disarmTimer) clearTimeout(disarmTimer);
+    disarmTimer = setTimeout(() => {
+      if (S.confirmArmed === key) S.confirmArmed = null;
+    }, 2500);
+  }
+}
 
 // ─── Derived values (functions — they read $state, so callers stay reactive) ──
 
@@ -658,7 +681,6 @@ export async function saveProviderForm() {
 }
 
 export async function onDeleteProvider(p: Provider) {
-  if (!confirm(`Delete provider "${p.name}"?\nAny chats currently using its models will fall back to defaults.`)) return;
   try {
     await deleteProvider(p.id);
     await loadProviders();
@@ -787,7 +809,6 @@ export async function saveCfModels() {
   }
 }
 export async function resetCfModelsToDefaults() {
-  if (!confirm('Reset Cloudflare model list to the built-in defaults?')) return;
   S.cfFormSaving = true;
   try {
     const merged = await updatePrefs({ cf_models: [] });
@@ -844,7 +865,6 @@ export async function toggleMcp(s: McpServer) {
 }
 
 export async function removeMcp(s: McpServer) {
-  if (!confirm(`Remove MCP server "${s.name}"?`)) return;
   try {
     await deleteMcpServer(s.id);
     S.mcpServers = S.mcpServers.filter((x) => x.id !== s.id);
@@ -917,7 +937,6 @@ export async function savePersonaForm() {
   }
 }
 export async function deletePersonaConfirm(p: Persona) {
-  if (!confirm(`Delete persona "${p.name}"?`)) return;
   try {
     await deletePersona(p.id);
     await loadPersonas();
@@ -1257,7 +1276,6 @@ export async function onAddSecret() {
 }
 
 export async function onDeleteSecret(name: string) {
-  if (!confirm(`Delete secret $${name}?`)) return;
   try {
     await deleteSecret(name);
     await loadSecrets();
@@ -1294,7 +1312,6 @@ export async function copyShareUrl() {
 }
 
 export async function revoke() {
-  if (!confirm('Revoke this share link? Anyone with the URL will get a 404.')) return;
   S.saving = true;
   try {
     await revokeShare(S.chatId!);

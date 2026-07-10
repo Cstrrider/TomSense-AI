@@ -926,3 +926,14 @@
   }
   .auto-mem input[type='checkbox'] { width: 18px; height: 18px; }
 
+
+/* Two-tap destructive confirmation (Phase 4) — an armed icon button widens to
+   show its "Sure?" text. */
+.cs .icon-btn.armed {
+  width: auto;
+  min-width: 0;
+  padding: 0 8px;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  color: #d63d3d;
+}

@@ -2,6 +2,8 @@
   import { IconCheck, IconEdit, IconTrash } from '$lib/icons';
   import {
     S,
+    armed,
+    confirmTap,
     dirty,
     savePersona,
     startCreatePersona,
@@ -94,10 +96,11 @@
             </button>
             <button
               class="icon-btn danger"
+              class:armed={armed(`persona-${p.id}`)}
               title="Delete"
               aria-label="Delete"
-              onclick={() => deletePersonaConfirm(p)}
-            ><IconTrash size={14} /></button>
+              onclick={() => confirmTap(`persona-${p.id}`, () => void deletePersonaConfirm(p))}
+            >{#if armed(`persona-${p.id}`)}Sure?{:else}<IconTrash size={14} />{/if}</button>
           </div>
         </li>
       {/each}
