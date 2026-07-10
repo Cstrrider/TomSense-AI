@@ -182,6 +182,11 @@ export interface InfoResponse {
     id: string; label: string; note?: string;
     vision?: boolean; reasoning?: boolean; context?: number; roles?: string[];
   }>;
+  /** Bundled Anthropic/Claude models (native Messages API), same shape. */
+  anthropic_models_catalog?: Array<{
+    id: string; label: string; note?: string;
+    vision?: boolean; reasoning?: boolean; context?: number; roles?: string[];
+  }>;
   /** Cloudflare embedding default — fallback shown in the RAG settings. */
   embed_default?: { model: string; dim: number };
 }

@@ -138,3 +138,27 @@ CODE_MODELS_CATALOG: list[dict] = [
         "hint": "Frontier top tier (~125× Qwen3 cost) — hardest tasks only",
     },
 ]
+
+
+# ─── Anthropic (native Messages API) model catalogue ────────────────────────
+# The bundled Claude models, surfaced like cf_catalog so the Anthropic builtin
+# provider card lists them AND they appear in the per-tool pickers. Ids are
+# bare (the `anthropic::` provider prefix is added by the picker). Claude 3+ is
+# multimodal; none are separate reasoning-channel models.
+ANTHROPIC_MODELS: list[dict] = [
+    {
+        "id": "claude-opus-4-7", "label": "Claude Opus 4.7",
+        "note": "frontier top tier", "vision": True, "reasoning": False,
+        "roles": ["chat", "vision", "code", "code_mode", "research"],
+    },
+    {
+        "id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6",
+        "note": "frontier workhorse", "vision": True, "reasoning": False,
+        "roles": ["chat", "vision", "code", "code_mode", "research"],
+    },
+    {
+        "id": "claude-haiku-4-5", "label": "Claude Haiku 4.5",
+        "note": "frontier fast tier", "vision": True, "reasoning": False,
+        "roles": ["chat", "vision", "code", "code_mode", "research"],
+    },
+]

@@ -54,7 +54,7 @@ from .schemas import (
     UpdatePersonaRequest,
     UpdateSystemPromptRequest,
 )
-from .tool_registry import CODE_MODELS_CATALOG, TOOL_MODELS_CATALOG, TOOL_MODELS_KEYS
+from .tool_registry import ANTHROPIC_MODELS, CODE_MODELS_CATALOG, TOOL_MODELS_CATALOG, TOOL_MODELS_KEYS
 from .tools import GENERATED_DIR, TOOL_SPECS
 from . import mounts as _mounts
 
@@ -238,6 +238,8 @@ def _info_payload() -> dict:
         # Bundled Cloudflare models + declared capabilities/roles — the registry
         # the frontend sources its CF model lists from (Phase 4).
         "cf_models_catalog": cf_catalog.CF_MODELS,
+        # Bundled Anthropic/Claude models (native Messages API), same shape.
+        "anthropic_models_catalog": ANTHROPIC_MODELS,
         # Embedding default (Cloudflare) — the UI shows this as the fallback
         # option and pre-fills the dim field.
         "embed_default": {"model": settings.model_embed, "dim": settings.embed_dim},

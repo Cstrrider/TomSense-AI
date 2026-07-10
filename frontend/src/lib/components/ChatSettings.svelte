@@ -250,18 +250,27 @@
       .filter((m) => (m.roles ?? []).includes(role))
       .map((m) => ({ id: m.id, label: m.label, note: m.note }));
   }
+  // Bundled Claude models by role → provider-qualified `anthropic::` options,
+  // so they show in the per-tool pickers alongside CF (not just code mode).
+  function anthropicFor(role: string): ModelOption[] {
+    return (app.info?.anthropic_models_catalog ?? [])
+      .filter((m) => (m.roles ?? []).includes(role))
+      .map((m) => ({ id: `anthropic::${m.id}`, label: m.label, note: m.note }));
+  }
+  const cfOr = (role: string, fb: ModelOption[]) =>
+    catalogFor(role).length ? catalogFor(role) : fb;
   let CF_DEFAULTS = $derived<Record<ToolKey, ModelOption[]>>({
-    chat: catalogFor('chat').length ? catalogFor('chat') : CF_FALLBACK.chat,
-    vision: catalogFor('vision').length ? catalogFor('vision') : CF_FALLBACK.vision,
-    code: catalogFor('code').length ? catalogFor('code') : CF_FALLBACK.code,
+    chat: [...cfOr('chat', CF_FALLBACK.chat), ...anthropicFor('chat')],
+    vision: [...cfOr('vision', CF_FALLBACK.vision), ...anthropicFor('vision')],
+    code: [...cfOr('code', CF_FALLBACK.code), ...anthropicFor('code')],
     // code_mode stays sourced from the dedicated code-mode picker catalog.
     code_mode: CODE_MODE_MODEL_OPTIONS,
-    research: catalogFor('research').length ? catalogFor('research') : CF_FALLBACK.research,
-    title: catalogFor('title').length ? catalogFor('title') : CF_FALLBACK.title,
-    image: catalogFor('image').length ? catalogFor('image') : CF_FALLBACK.image,
-    image_hd: catalogFor('image').length ? catalogFor('image') : CF_FALLBACK.image,
-    image_edit: catalogFor('image_edit').length ? catalogFor('image_edit') : CF_FALLBACK.image_edit,
-    image_edit_hd: catalogFor('image_edit').length ? catalogFor('image_edit') : CF_FALLBACK.image_edit
+    research: [...cfOr('research', CF_FALLBACK.research), ...anthropicFor('research')],
+    title: cfOr('title', CF_FALLBACK.title),
+    image: cfOr('image', CF_FALLBACK.image),
+    image_hd: cfOr('image', CF_FALLBACK.image),
+    image_edit: cfOr('image_edit', CF_FALLBACK.image_edit),
+    image_edit_hd: cfOr('image_edit', CF_FALLBACK.image_edit)
   });
 
   // Derived from the catalog, in catalog order, with key narrowed to ToolKey.
@@ -1031,6 +1040,18 @@
   // ── Custom audio / embedding backends (reuse configured OpenAI-compatible
   // providers). A `provider::model` value selects one of these. ──
   let customProviders = $derived(providersList.filter((p) => !p.builtin));
+
+  // Model chips for the builtin provider cards — sourced from the registry so
+  // Cloudflare and Claude list their models like custom providers do. CF shows
+  // the user's cf_models override if set, else the catalogue.
+  let cfCardModels = $derived(
+    cfModels.length > 0
+      ? cfModels.map((m) => ({ id: m.id, label: m.label, tags: (m.tools || []) as string[] }))
+      : (app.info?.cf_models_catalog ?? []).map((m) => ({ id: m.id, label: m.label, tags: (m.roles || []) }))
+  );
+  let claudeCardModels = $derived(
+    (app.info?.anthropic_models_catalog ?? []).map((m) => ({ id: m.id, label: m.label, tags: (m.roles || []) }))
+  );
   const CUSTOM_PREFIX = 'custom:';
   function splitRef(v: string | null | undefined): { pid: string; model: string } {
     const s = v ?? '';
@@ -1789,7 +1810,7 @@
             Cloudflare for now.
           </p>
 
-          {#each providersList.filter((p) => p.builtin) as p (p.id)}
+          {#each providersList.filter((p) => p.builtin && p.id === 'cf') as p (p.id)}
             <div class="provider-card builtin">
               <div class="provider-head">
                 <div class="provider-name">{p.name} <span class="tag">builtin</span></div>
@@ -1797,8 +1818,17 @@
                 <div class="provider-sub">
                   {cfModels.length > 0
                     ? `${cfModels.length} custom model(s) — overrides defaults`
-                    : 'Using built-in default model list'}
+                    : `${cfCardModels.length} bundled models`}
                 </div>
+                {#if cfCardModels.length}
+                  <div class="provider-models">
+                    {#each cfCardModels as m (m.id)}
+                      <span class="model-chip" title={m.id}>{m.label}
+                        <span class="model-tools">{m.tags.join(' · ')}</span>
+                      </span>
+                    {/each}
+                  </div>
+                {/if}
                 {@render credRow(
                   'cf_api_token',
                   'API key',
@@ -1896,8 +1926,17 @@
           <div class="provider-card builtin">
             <div class="provider-head">
               <div class="provider-name">Anthropic Claude <span class="tag">builtin</span></div>
-              <div class="provider-sub">Native Messages API — the Claude entries in Code Mode.</div>
-              {@render credRow('anthropic_api_key', 'API key', '')}
+              <div class="provider-sub">Native Messages API — prompt-cached.</div>
+              {#if claudeCardModels.length}
+                <div class="provider-models">
+                  {#each claudeCardModels as m (m.id)}
+                    <span class="model-chip" title={`anthropic::${m.id}`}>{m.label}
+                      <span class="model-tools">{m.tags.join(' · ')}</span>
+                    </span>
+                  {/each}
+                </div>
+              {/if}
+              {@render credRow('anthropic_api_key', 'API key', 'Used for the Claude models above (chat, code, vision, research).')}
             </div>
           </div>
 
