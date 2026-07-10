@@ -14,7 +14,7 @@
     embedCustom,
     embedIsCustom,
     embedSelectValue,
-    applyChatModel,
+    pinChatModel,
     savePersistentTool,
     startCredEdit,
     cancelCredEdit,
@@ -123,35 +123,48 @@
   {@const isChat = t.key === 'chat'}
   {@const options = optionsForTool(t.key)}
   {@const defaultId = options[0]?.id ?? ''}
-  {@const current = isChat
-    ? (S.chatModel || defaultId)
-    : (S.toolModels[t.key] ?? defaultId)}
   {@const fbKey = `${t.key}_fallback`}
-  {@const fbOptions = optionsForTool(t.key)}
   <div class="tool-row">
     <div class="tool-meta">
       <div class="tool-label">{t.label}</div>
       <div class="tool-hint">{t.hint}</div>
     </div>
+    <!-- Profile default — one uniform control for every slot. The old Chat
+         dropdown silently ALSO pinned the open chat; pinning is now the
+         explicit row below. -->
     <select
       class="model-select compact"
-      value={current}
+      value={S.toolModels[t.key] ?? defaultId}
       onchange={(e) => {
         const v = (e.currentTarget as HTMLSelectElement).value;
-        if (isChat) {
-          S.chatModel = v;
-          void applyChatModel(v);
-        } else {
-          S.toolModels = { ...S.toolModels, [t.key]: v };
-          void savePersistentTool(t.key, v);
-        }
+        S.toolModels = { ...S.toolModels, [t.key]: v };
+        void savePersistentTool(t.key, v);
       }}
-      disabled={S.savingToolKey === t.key || (isChat && S.savingChatModel)}
+      disabled={S.savingToolKey === t.key}
     >
       {#each options as m}
         <option value={m.id}>{m.label}{m.note ? ` — ${m.note}` : ''}</option>
       {/each}
     </select>
+    {#if isChat && S.chatId}
+      <div class="tool-fallback">
+        <span class="tool-fallback-label">📌 this chat:</span>
+        <select
+          class="model-select compact fallback-select"
+          value={S.chatModel || defaultId}
+          onchange={(e) => {
+            const v = (e.currentTarget as HTMLSelectElement).value;
+            S.chatModel = v;
+            void pinChatModel(v);
+          }}
+          disabled={S.savingChatModel}
+        >
+          {#each options as m}
+            <option value={m.id}>{m.label}{m.note ? ` — ${m.note}` : ''}</option>
+          {/each}
+        </select>
+      </div>
+    {/if}
     <div class="tool-fallback">
       <span class="tool-fallback-label">⚡ if slow / over limit:</span>
       <select
@@ -165,7 +178,7 @@
         disabled={S.savingToolKey === fbKey}
       >
         <option value="">(none)</option>
-        {#each fbOptions as m}
+        {#each options as m}
           <option value={m.id}>{m.label}{m.note ? ` — ${m.note}` : ''}</option>
         {/each}
       </select>
@@ -176,8 +189,9 @@
 {@render secHead('Models', S.secModels, () => (S.secModels = !S.secModels))}
 {#if S.secModels}
   <p class="muted">
-    Pick a model for each tool. Saved to your profile and used on every
-    chat. The Chat row also overrides the model for this conversation.
+    Pick a default model for each tool — saved to your profile and used on
+    every chat. Inside a chat, the Chat row gains a 📌 row that pins a model
+    to that conversation only.
   </p>
   <div class="tool-models">
     {#each TOOL_LABELS().filter((t) => !t.key.endsWith('_hd')) as t}

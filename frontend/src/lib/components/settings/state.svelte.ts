@@ -1019,26 +1019,24 @@ export async function savePersistentTool(key: string, value: string) {
   }
 }
 
-export async function applyChatModel(value: string) {
-  // 1. Update the user-level default so future new chats pick it up.
-  void savePersistentTool('chat', value);
-  // 2. If we're inside an existing chat, pin it to that chat too — without
-  //    this the backend's chat_model_override would keep using the model
-  //    the chat was created with and the dropdown would appear to reset on
-  //    the next drawer open.
-  if (S.chatId && value !== S.originalChatModel) {
-    S.savingChatModel = true;
-    try {
-      await setChatModel(S.chatId, value);
-      S.originalChatModel = value;
-      await app.refreshChats();
-    } catch (e) {
-      toast.error((e as Error).message);
-    } finally {
-      S.savingChatModel = false;
-    }
-  } else {
+/** Pin a model to THE OPEN CHAT only. The profile default is a separate,
+ *  explicit control (savePersistentTool('chat', …)) — the old single dropdown
+ *  silently did both, which surprised more than it helped. */
+export async function pinChatModel(value: string) {
+  if (!S.chatId || value === S.originalChatModel) {
     S.originalChatModel = value;
+    return;
+  }
+  S.savingChatModel = true;
+  try {
+    await setChatModel(S.chatId, value);
+    S.originalChatModel = value;
+    await app.refreshChats();
+    toast.success('Model pinned to this chat');
+  } catch (e) {
+    toast.error((e as Error).message);
+  } finally {
+    S.savingChatModel = false;
   }
 }
 
