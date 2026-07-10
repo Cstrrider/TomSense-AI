@@ -284,7 +284,7 @@
   let originalChatModel = $state('');
   let savingChatModel = $state(false);
   let toolModels = $state<ToolModels>({});
-  let savingToolKey = $state<ToolKey | null>(null);
+  let savingToolKey = $state<string | null>(null);
 
   // Providers
   let providersList = $state<Provider[]>([]);
@@ -918,7 +918,7 @@
     }
   }
 
-  async function savePersistentTool(key: ToolKey, value: string) {
+  async function savePersistentTool(key: string, value: string) {
     const next: ToolModels = { ...toolModels, [key]: value || null };
     savingToolKey = key;
     try {
@@ -927,7 +927,8 @@
       const merged = await updatePrefs({ tool_models: next });
       toolModels = { ...(merged.tool_models ?? {}) };
       app.prefs = merged;
-      toast.success(`${key.charAt(0).toUpperCase() + key.slice(1)} model saved`);
+      const label = key.replace(/_fallback$/, ' fallback').replace(/_/g, ' ');
+      toast.success(`${label.charAt(0).toUpperCase() + label.slice(1)} saved`);
     } catch (e) {
       toast.error((e as Error).message);
     } finally {
@@ -1658,6 +1659,11 @@
             {@const current = isChat
               ? (chatModel || defaultId)
               : (toolModels[t.key] ?? defaultId)}
+            {@const fbKey = t.key === 'chat' ? 'chat_fallback'
+              : t.key === 'vision' ? 'vision_fallback'
+              : t.key === 'code_mode' ? 'code_mode_fallback'
+              : null}
+            {@const fbOptions = optionsForTool('chat')}
             <div class="tool-row">
               <div class="tool-meta">
                 <div class="tool-label">{t.label}</div>
@@ -1682,6 +1688,26 @@
                   <option value={m.id}>{m.label}{m.note ? ` — ${m.note}` : ''}</option>
                 {/each}
               </select>
+              {#if fbKey}
+                <div class="tool-fallback">
+                  <span class="tool-fallback-label">⚡ if slow / over limit:</span>
+                  <select
+                    class="model-select compact fallback-select"
+                    value={toolModels[fbKey as keyof ToolModels] ?? ''}
+                    onchange={(e) => {
+                      const v = (e.currentTarget as HTMLSelectElement).value;
+                      toolModels = { ...toolModels, [fbKey]: v || null };
+                      void savePersistentTool(fbKey, v);
+                    }}
+                    disabled={savingToolKey === fbKey}
+                  >
+                    <option value="">(none)</option>
+                    {#each fbOptions as m}
+                      <option value={m.id}>{m.label}{m.note ? ` — ${m.note}` : ''}</option>
+                    {/each}
+                  </select>
+                </div>
+              {/if}
             </div>
           {/snippet}
 
@@ -2944,6 +2970,28 @@
   .model-select.compact {
     padding: 8px 10px;
     font-size: var(--fs-sm);
+  }
+  .tool-fallback {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    padding-top: 4px;
+    border-top: 1px solid var(--border);
+    margin-top: 2px;
+  }
+  .tool-fallback-label {
+    font-size: var(--fs-xs);
+    color: var(--muted);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .fallback-select {
+    flex: 1;
+    min-width: 0;
+    font-size: var(--fs-xs);
+    padding: 5px 8px;
+    opacity: 0.85;
   }
   .small {
     font-size: var(--fs-xs);

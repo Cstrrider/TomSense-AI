@@ -205,9 +205,12 @@ export type ToolKey =
 
 export interface ToolModels {
   chat?: string | null;
+  chat_fallback?: string | null;
   vision?: string | null;
+  vision_fallback?: string | null;
   code?: string | null;
   code_mode?: string | null;
+  code_mode_fallback?: string | null;
   research?: string | null;
   title?: string | null;
   image?: string | null;

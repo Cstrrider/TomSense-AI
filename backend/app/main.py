@@ -370,11 +370,12 @@ async def _route_model(msgs: list[dict], user_id: str) -> Optional[str]:
     return f"{providers.CF_BUILTIN_ID}::{heavy}"
 
 
-async def _budget_downshift(model_str: Optional[str], user_id: str = "") -> tuple[Optional[str], Optional[str]]:
-    """Swap heavy CF models for the budget model when today's neuron use
-    crosses the soft cap. Returns (model_str, notice) — notice is None when
-    no downshift happened. Non-CF providers (anthropic::, user providers)
-    never downshift: they don't consume neurons."""
+async def _budget_downshift(
+    model_str: Optional[str], user_id: str = "", slot_fallback: Optional[str] = None
+) -> tuple[Optional[str], Optional[str]]:
+    """Swap heavy CF models when today's neuron use crosses the soft cap.
+    Prefers the user's per-slot fallback (slot_fallback) over the server
+    budget model when one is configured. Non-CF providers never downshift."""
     cap_pct = settings.neuron_soft_cap_pct
     if cap_pct <= 0:
         return model_str, None
@@ -392,8 +393,12 @@ async def _budget_downshift(model_str: Optional[str], user_id: str = "") -> tupl
     limit = settings.cf_daily_neuron_limit
     if used < limit * cap_pct / 100:
         return model_str, None
-    budget = settings.budget_model
-    log.warning("budget mode: %s → %s (neurons %s/%s)", mid, budget, used, limit)
+    target = (
+        slot_fallback if slot_fallback
+        else f"{providers.CF_BUILTIN_ID}::{settings.budget_model}"
+    )
+    target_name = short_name(target)
+    log.warning("budget mode: %s → %s (neurons %s/%s)", mid, target_name, used, limit)
     # Push once per day when the cap first bites.
     from datetime import date
     today = date.today().isoformat()
@@ -403,16 +408,16 @@ async def _budget_downshift(model_str: Optional[str], user_id: str = "") -> tupl
         _spawn(notify.push(
             "🪫 TomSense budget mode",
             f"{used:,}/{limit:,} free neurons used today — heavy models "
-            f"downshifted to {budget.rsplit('/', 1)[-1]} until midnight UTC.",
+            f"downshifted to {target_name} until midnight UTC.",
             tags="battery", priority="low",
             user_id=user_id,
         ))
     notice = (
         f"> 🪫 **Budget mode** — {used:,}/{limit:,} free neurons used today; "
-        f"running `{budget.rsplit('/', 1)[-1]}` instead of `{mid.rsplit('/', 1)[-1]}`. "
+        f"running `{target_name}` instead of `{mid.rsplit('/', 1)[-1]}`. "
         f"Resets at midnight UTC.\n\n"
     )
-    return f"{providers.CF_BUILTIN_ID}::{budget}", notice
+    return target, notice
 
 
 @app.get("/me/neurons")
@@ -3030,9 +3035,22 @@ async def chat_stream(
     ):
         requested_model = await _route_model(msgs, user["id"])
 
+    # Per-slot fallback: if the primary model stalls or hits the neuron cap,
+    # switch to the user's configured fallback for this slot rather than the
+    # server-wide defaults.
+    if vision_notice:
+        _slot_fb_key = "vision_fallback"
+    elif code_mode:
+        _slot_fb_key = "code_mode_fallback"
+    else:
+        _slot_fb_key = "chat_fallback"
+    slot_fallback = (tool_models.get(_slot_fb_key) or "").strip() or None
+
     # Budget mode may then swap a heavy CF model for the budget one (this
     # also reins the router back in when the neuron cap is near).
-    resolved_model, budget_notice = await _budget_downshift(requested_model, user_id=user["id"])
+    resolved_model, budget_notice = await _budget_downshift(
+        requested_model, user_id=user["id"], slot_fallback=slot_fallback
+    )
 
     run = create_run(chat_id, user_id=user["id"])
     if vision_notice:
@@ -3066,6 +3084,7 @@ async def chat_stream(
                 "mcp_specs": mcp_specs or None,
                 "tool_models": tool_models,
                 "cf_models": cf_models,
+                "stall_fallback": slot_fallback,
                 "review_edits": bool((user_prefs or {}).get("review_edits")),
                 "verify_edits": (user_prefs or {}).get("verify_edits", True),
                 "max_rounds_code": (user_prefs or {}).get("max_rounds_code"),

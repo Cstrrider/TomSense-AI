@@ -444,6 +444,7 @@ async def dispatch_stream_round(
     user_id: Optional[str], model_str: str, messages: list[dict],
     max_tokens: int, tools: Optional[list[dict]] = None,
     temperature: Optional[float] = None, reasoning_effort: Optional[str] = None,
+    fallback_model_str: Optional[str] = None,
 ) -> AsyncIterator[tuple[str, Any]]:
     pid, mid = parse_model_str(model_str)
     provider = await resolve_provider(pid, user_id=user_id)
@@ -458,10 +459,13 @@ async def dispatch_stream_round(
     # 2026-07-07: CF gemma-4 brownout, 180-295s rounds with zero bytes), and
     # waiting out httpx's full read timeout just tortures the user. Abort and
     # retry once on the fallback model with a visible notice.
+    # fallback_model_str (per-slot user setting) takes priority over the global
+    # stall_fallback_model so the user can point slow CF models at an alternative.
     gen = stream_round(provider, mid, messages, max_tokens, tools,
                        temperature=temperature, reasoning_effort=reasoning_effort)
     timeout = settings.first_token_timeout_s
-    fb_pid, fb_mid = parse_model_str(settings.stall_fallback_model)
+    _fb_str = fallback_model_str or settings.stall_fallback_model
+    fb_pid, fb_mid = parse_model_str(_fb_str)
     if timeout > 0 and fb_mid and fb_mid != mid:
         try:
             first = await asyncio.wait_for(gen.__anext__(), timeout=timeout)
@@ -484,7 +488,7 @@ async def dispatch_stream_round(
                 # Tag the round with the model that ACTUALLY answered, so the
                 # stats footer shows the fallback rather than the stalled model.
                 if ev[0] == "done":
-                    ev[1]["model"] = settings.stall_fallback_model
+                    ev[1]["model"] = _fb_str
                 yield ev
             return
         except StopAsyncIteration:

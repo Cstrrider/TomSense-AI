@@ -848,6 +848,7 @@ async def run_chat(
             (tool_context or {}).get("user_id"), model, msgs, max_tokens, tools=active_specs,
             temperature=(0.3 if code_mode else None),  # #6: deterministic code edits
             reasoning_effort=reasoning_effort,
+            fallback_model_str=(tool_context or {}).get("stall_fallback") or None,
         ):
             if kind == "reasoning":
                 reasoning_buf += payload
