@@ -1042,18 +1042,34 @@ export async function applyChatModel(value: string) {
   }
 }
 
-export async function saveCoderPref(patch: UserPrefs, okMsg: string) {
-  S.prefsSaving = true;
+/** One save path for every prefs patch: busy flag, server-merge resync into
+ *  S.prefs AND app.prefs (so the sidebar reacts live), success toast, error
+ *  toast. `busy` picks which spinner flag the control watches; `after` runs
+ *  extra refresh work (e.g. RAG status) before the toast. */
+export async function savedPref(
+  patch: UserPrefs,
+  ok: string,
+  opts: { busy?: 'prefs' | 'rag' | null; after?: () => Promise<void> } = {}
+) {
+  const busy = opts.busy === undefined ? 'prefs' : opts.busy;
+  if (busy === 'prefs') S.prefsSaving = true;
+  else if (busy === 'rag') S.ragBusy = true;
   try {
     const merged = await updatePrefs(patch);
     S.prefs = merged;
     app.prefs = merged;
-    toast.success(okMsg);
+    if (opts.after) await opts.after();
+    toast.success(ok);
   } catch (e) {
     toast.error((e as Error).message);
   } finally {
-    S.prefsSaving = false;
+    if (busy === 'prefs') S.prefsSaving = false;
+    else if (busy === 'rag') S.ragBusy = false;
   }
+}
+
+export async function saveCoderPref(patch: UserPrefs, okMsg: string) {
+  await savedPref(patch, okMsg);
 }
 
 export function toggleReviewEdits() {
@@ -1079,25 +1095,11 @@ export function saveMaxTokens() {
 }
 
 export async function savePrefsPatch(patch: UserPrefs) {
-  try {
-    S.prefs = await updatePrefs(patch);
-    app.prefs = S.prefs; // keep the store in sync so the sidebar reacts live
-    toast.success('Saved');
-  } catch (e) {
-    toast.error((e as Error).message);
-  }
+  await savedPref(patch, 'Saved', { busy: null });
 }
 
 export async function savePrefs(patch: UserPrefs) {
-  S.prefsSaving = true;
-  try {
-    S.prefs = await updatePrefs(patch);
-    toast.success('Voice settings saved');
-  } catch (e) {
-    toast.error((e as Error).message);
-  } finally {
-    S.prefsSaving = false;
-  }
+  await savedPref(patch, 'Voice settings saved');
 }
 
 export function onAudioProviderChange(kind: 'tts' | 'stt', value: string, prevModel: string) {
@@ -1117,17 +1119,7 @@ export async function loadRagStatus() {
   try { S.ragStatus = await getRagStatus(); } catch { S.ragStatus = null; }
 }
 export async function saveEmbed(patch: UserPrefs) {
-  S.ragBusy = true;
-  try {
-    S.prefs = await updatePrefs(patch);
-    app.prefs = S.prefs;
-    await loadRagStatus();
-    toast.success('Embedding settings saved');
-  } catch (e) {
-    toast.error((e as Error).message);
-  } finally {
-    S.ragBusy = false;
-  }
+  await savedPref(patch, 'Embedding settings saved', { busy: 'rag', after: loadRagStatus });
 }
 export function onEmbedProviderChange(value: string) {
   if (!value) void saveEmbed({ embed_model: null, embed_dim: null });
