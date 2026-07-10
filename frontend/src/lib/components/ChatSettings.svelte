@@ -1659,11 +1659,8 @@
             {@const current = isChat
               ? (chatModel || defaultId)
               : (toolModels[t.key] ?? defaultId)}
-            {@const fbKey = t.key === 'chat' ? 'chat_fallback'
-              : t.key === 'vision' ? 'vision_fallback'
-              : t.key === 'code_mode' ? 'code_mode_fallback'
-              : null}
-            {@const fbOptions = optionsForTool('chat')}
+            {@const fbKey = `${t.key}_fallback`}
+            {@const fbOptions = optionsForTool(t.key)}
             <div class="tool-row">
               <div class="tool-meta">
                 <div class="tool-label">{t.label}</div>
@@ -1688,8 +1685,7 @@
                   <option value={m.id}>{m.label}{m.note ? ` — ${m.note}` : ''}</option>
                 {/each}
               </select>
-              {#if fbKey}
-                <div class="tool-fallback">
+              <div class="tool-fallback">
                   <span class="tool-fallback-label">⚡ if slow / over limit:</span>
                   <select
                     class="model-select compact fallback-select"
@@ -1707,7 +1703,6 @@
                     {/each}
                   </select>
                 </div>
-              {/if}
             </div>
           {/snippet}
 

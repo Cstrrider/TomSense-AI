@@ -82,7 +82,7 @@ TOOL_MODELS_CATALOG: list[dict] = [
 
 TOOL_MODELS_KEYS: set[str] = (
     {t["key"] for t in TOOL_MODELS_CATALOG}
-    | {"chat_fallback", "vision_fallback", "code_mode_fallback"}
+    | {f'{t["key"]}_fallback' for t in TOOL_MODELS_CATALOG}
 )
 
 

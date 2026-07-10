@@ -209,14 +209,21 @@ export interface ToolModels {
   vision?: string | null;
   vision_fallback?: string | null;
   code?: string | null;
+  code_fallback?: string | null;
   code_mode?: string | null;
   code_mode_fallback?: string | null;
   research?: string | null;
+  research_fallback?: string | null;
   title?: string | null;
+  title_fallback?: string | null;
   image?: string | null;
+  image_fallback?: string | null;
   image_hd?: string | null;
+  image_hd_fallback?: string | null;
   image_edit?: string | null;
+  image_edit_fallback?: string | null;
   image_edit_hd?: string | null;
+  image_edit_hd_fallback?: string | null;
 }
 
 export interface ProviderModel {
