@@ -76,6 +76,11 @@ class Settings:
     # this long between deltas. 0 disables.
     stream_idle_timeout_s: float = float(os.getenv("STREAM_IDLE_TIMEOUT_S", "90"))
     stall_fallback_model: str = os.getenv("STALL_FALLBACK_MODEL", "@cf/openai/gpt-oss-120b")
+    # Google Cloud Vision API key — powers the reverse_image_lookup tool
+    # (Lens-style landmark + web detection; 1k lookups/mo free tier). Users
+    # can instead store a per-user GOOGLE_VISION_API_KEY in the secret vault,
+    # which takes precedence; this env var is the instance-wide fallback.
+    google_vision_api_key: str = os.getenv("GOOGLE_VISION_API_KEY", "")
     # Workers AI paid-tier price per 1k neurons past the free daily allocation
     # — used for the $ spend estimate in the sidebar.
     neuron_price_per_1k: float = float(os.getenv("NEURON_PRICE_PER_1K", "0.011"))

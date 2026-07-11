@@ -101,6 +101,32 @@ TOOL_SPECS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "reverse_image_lookup",
+            "description": (
+                "Google Lens-style reverse image search on the user's attached "
+                "photo (or the most recent image in this conversation). Use when "
+                "the user asks WHERE a photo was taken or WHAT specific place, "
+                "building, landmark, artwork, or product is pictured and you are "
+                "not confident identifying it yourself. Returns landmark matches "
+                "with coordinates, web entities, and pages where the image "
+                "appears — reason over those to answer. Do NOT use web_search "
+                "with text descriptions of what an image looks like; that does "
+                "not work."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "hint": {
+                        "type": "string",
+                        "description": "Optional context from the user (e.g. 'somewhere in Europe', 'a concert hall').",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "code_interpreter",
             "description": (
                 "Run Python in a Jupyter sandbox (numpy/pandas/scipy/matplotlib/sklearn/sympy). "
@@ -1684,6 +1710,130 @@ async def tool_edit_image(args: dict, context: dict) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# reverse_image_lookup — Google Lens-style landmark + web detection
+# ─────────────────────────────────────────────────────────────────────────────
+
+_VISION_API_URL = "https://vision.googleapis.com/v1/images:annotate"
+
+
+def _lookup_prepare_image(raw: bytes) -> bytes:
+    """Downscale for the Vision API: longest edge ≤ 1600px, JPEG. Keeps the
+    request well under the API's payload cap without hurting detection."""
+    from PIL import Image
+    import io as _io
+    img = Image.open(_io.BytesIO(raw))
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    w, h = img.size
+    scale = min(1600 / w, 1600 / h, 1.0)
+    if scale < 1.0:
+        img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+    buf = _io.BytesIO()
+    img.save(buf, format="JPEG", quality=85)
+    return buf.getvalue()
+
+
+async def _google_vision_key(context: dict) -> str:
+    """Per-user secret vault key first (Settings → Secrets →
+    GOOGLE_VISION_API_KEY — works without a server restart), instance env
+    var second."""
+    user_id = (context or {}).get("user_id")
+    if user_id:
+        try:
+            from . import db
+            key = (await db.get_secrets_decrypted(user_id)).get("GOOGLE_VISION_API_KEY")
+            if key:
+                return key
+        except Exception as e:
+            print(f"[tool:lens] vault lookup failed: {e}")
+    return settings.google_vision_api_key
+
+
+async def tool_reverse_image_lookup(args: dict, context: dict) -> str:
+    srcs = _all_image_uploads(context)
+    if not srcs:
+        # Follow-on UX parity with edit_image: "where is this?" after an
+        # image was already in the conversation.
+        prior = (context or {}).get("prior_image_path")
+        if prior and os.path.exists(prior):
+            srcs = [{"kind": "image", "storage_path": prior}]
+        else:
+            return ("Reverse image lookup needs an image — ask the user to "
+                    "attach the photo they want identified.")
+    key = await _google_vision_key(context)
+    if not key:
+        return (
+            "Reverse image lookup is not configured on this instance. Tell the "
+            "user: add a Google Cloud Vision API key as a secret named "
+            "GOOGLE_VISION_API_KEY in Settings → Secrets (create one free at "
+            "console.cloud.google.com → APIs & Services → enable 'Cloud Vision "
+            "API' → Credentials → API key; the free tier covers 1,000 lookups "
+            "per month). Meanwhile, answer from what you can see yourself."
+        )
+    try:
+        raw = open(srcs[0]["storage_path"], "rb").read()
+        content = base64.b64encode(_lookup_prepare_image(raw)).decode()
+    except Exception as e:
+        return f"Could not read the attached image: {e}"
+    hint = (args.get("hint") or "").strip()
+    print(f"[tool:lens] lookup ({len(content) // 1024}KB b64){' hint=' + hint[:60] if hint else ''}")
+    try:
+        r = await get_client().post(
+            f"{_VISION_API_URL}?key={key}",
+            json={"requests": [{
+                "image": {"content": content},
+                "features": [
+                    {"type": "LANDMARK_DETECTION", "maxResults": 5},
+                    {"type": "WEB_DETECTION", "maxResults": 10},
+                ],
+            }]},
+            timeout=30.0,
+        )
+    except Exception as e:
+        return f"Reverse image lookup failed: {type(e).__name__}: {e}"
+    if not r.is_success:
+        return f"Reverse image lookup failed: HTTP {r.status_code}: {r.text[:300]}"
+    resp = (r.json().get("responses") or [{}])[0]
+    if resp.get("error"):
+        return f"Reverse image lookup failed: {resp['error'].get('message', 'unknown error')}"
+
+    out: list[str] = ["Reverse image lookup results (Google Cloud Vision):"]
+    landmarks = resp.get("landmarkAnnotations") or []
+    if landmarks:
+        out.append("\nLANDMARK MATCHES (visual match against known places — strongest evidence):")
+        for lm in landmarks[:5]:
+            loc = ((lm.get("locations") or [{}])[0].get("latLng") or {})
+            coords = (f" — lat {loc.get('latitude'):.4f}, lng {loc.get('longitude'):.4f}"
+                      if loc.get("latitude") is not None else "")
+            out.append(f"- {lm.get('description', '?')} (confidence {lm.get('score', 0):.2f}){coords}")
+    web = resp.get("webDetection") or {}
+    guesses = [g.get("label") for g in (web.get("bestGuessLabels") or []) if g.get("label")]
+    if guesses:
+        out.append(f"\nBEST GUESS: {'; '.join(guesses)}")
+    entities = [e for e in (web.get("webEntities") or []) if e.get("description")]
+    if entities:
+        out.append("\nWEB ENTITIES (contextual associations):")
+        for e in entities[:8]:
+            out.append(f"- {e['description']} (score {e.get('score', 0):.2f})")
+    pages = web.get("pagesWithMatchingImages") or []
+    if pages:
+        out.append("\nPAGES CONTAINING THIS (or a matching) IMAGE:")
+        for p in pages[:5]:
+            title = re.sub(r"<[^>]+>", "", p.get("pageTitle") or "").strip() or p.get("url", "")
+            out.append(f"- {title} — {p.get('url', '')}")
+    if len(out) == 1:
+        return ("Reverse image lookup found no landmark or web matches for this "
+                "image. Answer from what you can see, and say the lookup came "
+                "up empty.")
+    out.append(
+        "\nGuidance: landmark matches are visual and most reliable; best-guess "
+        "and entities are contextual. Weigh them together, state your "
+        "confidence, and cite a matching page if it confirms the answer."
+    )
+    return "\n".join(out)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # code_interpreter (Jupyter websocket)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -2290,6 +2440,7 @@ DISPATCH = {
     "fetch_page":       tool_fetch_page,
     "generate_image":   tool_generate_image,
     "edit_image":       tool_edit_image,
+    "reverse_image_lookup": tool_reverse_image_lookup,
     "code_interpreter": tool_code_interpreter,
     "consult_coder":    tool_consult_coder,
     "deep_research":    tool_deep_research,
@@ -2305,8 +2456,8 @@ DISPATCH.update(CODE_DISPATCH)
 # Tools that need the per-request context (uploads, chat_id, user_id,
 # tool_models, …). Other tools get the plain args dict.
 _CONTEXT_AWARE = {
-    "generate_image", "edit_image", "search_docs", "remember", "forget",
-    "consult_coder", "deep_research", "update_artifact",
+    "generate_image", "edit_image", "reverse_image_lookup", "search_docs",
+    "remember", "forget", "consult_coder", "deep_research", "update_artifact",
 }
 
 

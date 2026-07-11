@@ -64,6 +64,11 @@ def system_prompt() -> str:
         "But questions ABOUT an attached image (what/who is this, what "
         "color, read the text, describe it) are NOT edits — you can see "
         "the image yourself; answer directly, NO tool call.\n"
+        "  - The user asks WHERE a photo was taken or WHAT specific place, "
+        "building, landmark, artwork, or product is pictured, and you are "
+        "not confident from looking → reverse_image_lookup (a real reverse "
+        "image search). NEVER try to identify a pictured place by "
+        "web_search-ing text descriptions of how it looks — that fails.\n"
         "  - For BOTH image tools, set hd=true when the user types `/HD`, "
         "mentions 'HD', '4K', 'high definition', 'highest quality', or "
         "'best quality'. hd=true routes to their preferred HD model "
@@ -476,6 +481,8 @@ def tool_chip(tc: dict, result: str) -> str:
         summary = f"Generated image: {args.get('prompt', '')[:80]}"
     elif name == "edit_image":
         summary = f"Edited image: {args.get('prompt', '')[:80]}"
+    elif name == "reverse_image_lookup":
+        summary = "Reverse image lookup" + (f": {args.get('hint', '')[:60]}" if args.get("hint") else "")
     elif name == "get_location":
         summary = "Checked your location"
     elif name == "get_calendar":
@@ -1351,6 +1358,7 @@ async def run_chat(
                 "edit_image":     "Editing image",
                 "consult_coder":  "Consulting coder",
                 "deep_research":  "Researching",
+                "reverse_image_lookup": "Reverse image lookup",
             }
             _busy_label = _slow_tools.get(tc["name"])
             if _busy_label:

@@ -64,6 +64,10 @@ services:
       # Anthropic Messages API — enables the Claude entries in the code-mode
       # picker. Optional.
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # Google Cloud Vision key for reverse_image_lookup (Lens-style landmark
+      # + web detection). Optional — a per-user GOOGLE_VISION_API_KEY secret
+      # in the vault also works and needs no restart.
+      - GOOGLE_VISION_API_KEY=${GOOGLE_VISION_API_KEY:-}
       # Fernet master key for at-rest API-key encryption (setup.sh generates).
       - TOMSENSE_ENCRYPTION_KEY=${TOMSENSE_ENCRYPTION_KEY:-}
       # ── Identity / access ──
