@@ -201,10 +201,10 @@
   .menu-btn {
     display: none;
   }
+  /* Match the Composer's think-toggle convention: accent tint, no border. */
   .temp-btn.active {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-    border-color: var(--accent);
     color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
   }
   .export-wrap {
     position: relative;

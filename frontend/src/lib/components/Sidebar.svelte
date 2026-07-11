@@ -448,6 +448,22 @@
       <button class="select-action subtle" onclick={openTasks}>
         <IconRefresh size={13} /> Tasks
       </button>
+      {#if unpinnedChats.length > 0}
+        <button
+          class="select-action subtle clear-all"
+          class:armed={clearArmed}
+          disabled={deleting}
+          onclick={deleteAllUnpinned}
+          title="Delete every non-pinned chat"
+        >
+          <IconTrash size={13} />
+          {#if clearArmed}
+            Delete {unpinnedChats.length}? Tap again
+          {:else}
+            Clear unpinned
+          {/if}
+        </button>
+      {/if}
     {/if}
   </div>
 
@@ -507,22 +523,6 @@
 
       {#if app.chats.length === 0}
         <div class="empty">No chats yet.</div>
-      {/if}
-
-      {#if unpinnedChats.length > 0}
-        <button
-          class="clear-all"
-          class:armed={clearArmed}
-          disabled={deleting}
-          onclick={deleteAllUnpinned}
-        >
-          <IconTrash size={13} />
-          {#if clearArmed}
-            Delete {unpinnedChats.length} unpinned chat{unpinnedChats.length === 1 ? '' : 's'}? Tap again
-          {:else}
-            Delete all non-pinned
-          {/if}
-        </button>
       {/if}
     {/if}
   </div>
@@ -1080,35 +1080,15 @@
     font-size: var(--fs-sm);
     text-align: center;
   }
-  .clear-all {
-    width: 100%;
-    margin-top: var(--sp-2);
-    background: transparent;
-    border: 1px solid transparent;
-    color: var(--muted);
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    padding: 8px;
-    border-radius: var(--r-sm);
-    cursor: pointer;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    transition: color var(--t-fast), background var(--t-fast), border-color var(--t-fast);
-  }
-  .clear-all:hover:not(:disabled) {
+  /* Destructive chip in the toolbar row — subtle until hovered/armed so it
+     reads as secondary to Select/Files/etc, then goes danger-red. */
+  .select-action.clear-all:hover:not(:disabled) {
     color: var(--danger);
     background: color-mix(in srgb, var(--danger) 8%, transparent);
   }
-  .clear-all.armed {
+  .select-action.clear-all.armed {
     color: var(--danger);
-    border-color: color-mix(in srgb, var(--danger) 50%, transparent);
-    background: color-mix(in srgb, var(--danger) 10%, transparent);
-  }
-  .clear-all:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
   }
 
   /* ─── search results (chat title + matching message snippets) ───────── */
