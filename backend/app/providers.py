@@ -30,6 +30,9 @@ from . import db
 SEP = "::"
 CF_BUILTIN_ID = "cf"
 ANTHROPIC_BUILTIN_ID = "anthropic"
+# Credential-only builtin — not a model provider (never in pickers / resolve).
+# Stores the Google Cloud Vision key for the reverse_image_lookup tool.
+GOOGLE_VISION_BUILTIN_ID = "google-vision"
 
 
 # ─── parsing ────────────────────────────────────────────────────────────────

@@ -52,7 +52,7 @@
 </script>
 
 {#snippet credRow(key: string, label: string, hint: string)}
-  {@const info = S.credentials?.[key as 'cf_api_token' | 'anthropic_api_key']}
+  {@const info = S.credentials?.[key as keyof typeof S.credentials]}
   <div class="cred-row">
     <div class="cred-meta">
       <div class="cred-label">{label}</div>
@@ -294,7 +294,8 @@
   () => (S.secProviders = !S.secProviders),
   S.credentials
     ? [S.credentials.cf_api_token?.set ? 'CF ✓' : 'CF —',
-       S.credentials.anthropic_api_key?.set ? 'Claude ✓' : 'Claude —'].join(' · ')
+       S.credentials.anthropic_api_key?.set ? 'Claude ✓' : 'Claude —',
+       S.credentials.google_vision_api_key?.set ? 'Lens ✓' : 'Lens —'].join(' · ')
     : undefined
 )}
 {#if S.secProviders}
@@ -436,6 +437,23 @@
       </div>
     {/if}
     {@render credRow('anthropic_api_key', 'API key', 'Used for the Claude models above (chat, code, vision, research).')}
+  </div>
+</div>
+
+<!-- Google Cloud Vision is a credential-only builtin — it powers the
+     reverse image lookup chat tool, not a model slot, so no model chips. -->
+<div class="provider-card builtin">
+  <div class="provider-head">
+    <div class="provider-name">Google Cloud Vision <span class="tag">builtin</span></div>
+    <div class="provider-sub">
+      Reverse image lookup ("where / what is this?") — landmark + web
+      detection. Free tier: 1,000 lookups/month.
+    </div>
+    <div class="provider-sub">
+      Get a key: console.cloud.google.com → enable "Cloud Vision API" →
+      Credentials → API key.
+    </div>
+    {@render credRow('google_vision_api_key', 'API key', 'Used only by the reverse image lookup tool.')}
   </div>
 </div>
 

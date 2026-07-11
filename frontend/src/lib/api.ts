@@ -495,6 +495,7 @@ export async function getCredentials(): Promise<Credentials> {
 export async function setCredentials(patch: {
   cf_api_token?: string | null;
   anthropic_api_key?: string | null;
+  google_vision_api_key?: string | null;
 }): Promise<Credentials> {
   const j = await http<{ credentials: Credentials }>('/me/credentials', {
     method: 'PUT',

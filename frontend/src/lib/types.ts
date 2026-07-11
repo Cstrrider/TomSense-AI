@@ -284,6 +284,7 @@ export interface CredentialInfo {
 export interface Credentials {
   cf_api_token: CredentialInfo;
   anthropic_api_key: CredentialInfo;
+  google_vision_api_key: CredentialInfo;
 }
 
 export interface Provider {

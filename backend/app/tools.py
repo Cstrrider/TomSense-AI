@@ -1734,18 +1734,24 @@ def _lookup_prepare_image(raw: bytes) -> bytes:
 
 
 async def _google_vision_key(context: dict) -> str:
-    """Per-user secret vault key first (Settings → Secrets →
-    GOOGLE_VISION_API_KEY — works without a server restart), instance env
-    var second."""
+    """Per-user builtin credential first (Settings → Providers → Google
+    Cloud Vision — masked set/rotate/clear like CF/Anthropic), then the
+    legacy secret-vault name (GOOGLE_VISION_API_KEY — kept so keys set
+    before the Providers card existed keep working), instance env last."""
     user_id = (context or {}).get("user_id")
     if user_id:
         try:
-            from . import db
+            from . import db, providers as _providers
+            row = await db.get_builtin_provider(
+                user_id, _providers.GOOGLE_VISION_BUILTIN_ID)
+            key = ((row or {}).get("api_key") or "").strip()
+            if key:
+                return key
             key = (await db.get_secrets_decrypted(user_id)).get("GOOGLE_VISION_API_KEY")
             if key:
                 return key
         except Exception as e:
-            print(f"[tool:lens] vault lookup failed: {e}")
+            print(f"[tool:lens] key lookup failed: {e}")
     return settings.google_vision_api_key
 
 
@@ -1763,12 +1769,12 @@ async def tool_reverse_image_lookup(args: dict, context: dict) -> str:
     key = await _google_vision_key(context)
     if not key:
         return (
-            "Reverse image lookup is not configured on this instance. Tell the "
-            "user: add a Google Cloud Vision API key as a secret named "
-            "GOOGLE_VISION_API_KEY in Settings → Secrets (create one free at "
-            "console.cloud.google.com → APIs & Services → enable 'Cloud Vision "
-            "API' → Credentials → API key; the free tier covers 1,000 lookups "
-            "per month). Meanwhile, answer from what you can see yourself."
+            "Reverse image lookup is not configured. Tell the user: add a "
+            "Google Cloud Vision API key under Settings → Providers → Google "
+            "Cloud Vision (create one free at console.cloud.google.com → APIs "
+            "& Services → enable 'Cloud Vision API' → Credentials → API key; "
+            "the free tier covers 1,000 lookups per month). Meanwhile, answer "
+            "from what you can see yourself."
         )
     try:
         raw = open(srcs[0]["storage_path"], "rb").read()
