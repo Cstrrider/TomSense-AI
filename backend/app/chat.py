@@ -838,6 +838,9 @@ async def run_chat(
     last_call_sig = None  # #7: detect the model repeating the identical tool call
     repeat_count = 0
     empty_round_retried = False  # normal chat: one retry when a round dies with no output
+    same_tool_last = None   # search-spiral guard: same tool, new args, no text
+    same_tool_streak = 0
+    force_no_tools = False  # spiral guard tripped → next round must answer
 
     for round_num in range(rounds):
         # Re-evaluate task hints each round so a hint can fire mid-conversation
@@ -866,7 +869,8 @@ async def run_chat(
         reasoning_flushed = False
 
         async for kind, payload in dispatch_stream_round(
-            (tool_context or {}).get("user_id"), model, msgs, max_tokens, tools=active_specs,
+            (tool_context or {}).get("user_id"), model, msgs, max_tokens,
+            tools=None if force_no_tools else active_specs,
             temperature=(0.3 if code_mode else None),  # #6: deterministic code edits
             reasoning_effort=reasoning_effort,
             fallback_model_str=(tool_context or {}).get("stall_fallback") or None,
@@ -1068,6 +1072,43 @@ async def run_chat(
             if stats_out is not None:
                 stats_out.update(total_usage)
             return
+
+        # Search-spiral guard (normal chat only): the identical-call detector
+        # above misses a model that keeps PARAPHRASING the same failing tool —
+        # observed 2026-07-11: 8 straight web_search rounds ("black web
+        # ceiling concert hall", …) with zero visible text, burning the whole
+        # round budget without answering. Track consecutive same-tool rounds
+        # that produce no text: nudge at 3, and at 5 force a tool-less round
+        # so the model must answer with what it has. Code mode is exempt —
+        # long silent run_bash/edit streaks are legitimate there.
+        if not code_mode:
+            _names = {tc["name"] for tc in tool_calls}
+            if len(_names) == 1 and not (text or "").strip():
+                _tool = next(iter(_names))
+                if _tool == same_tool_last:
+                    same_tool_streak += 1
+                else:
+                    same_tool_last, same_tool_streak = _tool, 1
+            else:
+                same_tool_last, same_tool_streak = None, 0
+            if same_tool_streak == 3:
+                msgs.append({
+                    "role": "user",
+                    "content": f"You've now called {same_tool_last} 3 times in a row "
+                               "without telling me anything. The results so far are "
+                               "what you have to work with — if the next call doesn't "
+                               "clearly succeed, stop and give your best answer, "
+                               "stating what you're unsure about.",
+                })
+            elif same_tool_streak >= 5:
+                print(f"[chat] search-spiral guard: {same_tool_last} x{same_tool_streak} "
+                      "with no text — forcing a tool-less answer round")
+                msgs.append({
+                    "role": "user",
+                    "content": "Stop. No more tool calls — answer NOW from what you've "
+                               "gathered, plainly stating any uncertainty.",
+                })
+                force_no_tools = True
 
         # Append assistant message that contained the tool calls
         msgs.append({
