@@ -295,7 +295,8 @@
   S.credentials
     ? [S.credentials.cf_api_token?.set ? 'CF ✓' : 'CF —',
        S.credentials.anthropic_api_key?.set ? 'Claude ✓' : 'Claude —',
-       S.credentials.google_vision_api_key?.set ? 'Lens ✓' : 'Lens —'].join(' · ')
+       S.credentials.google_vision_api_key?.set ? 'Lens ✓' : 'Lens —',
+       S.credentials.audd_api_key?.set ? 'Song ✓' : 'Song —'].join(' · ')
     : undefined
 )}
 {#if S.secProviders}
@@ -454,6 +455,23 @@
       Credentials → API key.
     </div>
     {@render credRow('google_vision_api_key', 'API key', 'Used only by the reverse image lookup tool.')}
+  </div>
+</div>
+
+<!-- AudD is the second credential-only builtin — Shazam-style song ID on
+     attached audio clips. -->
+<div class="provider-card builtin">
+  <div class="provider-head">
+    <div class="provider-name">AudD Music Recognition <span class="tag">builtin</span></div>
+    <div class="provider-sub">
+      "What song is this?" on an attached audio clip — acoustic
+      fingerprinting with artist, album and streaming links.
+    </div>
+    <div class="provider-sub">
+      Get a token: audd.io → API token (free tokens cover a few hundred
+      recognitions).
+    </div>
+    {@render credRow('audd_api_key', 'API token', 'Used only by the song identification tool.')}
   </div>
 </div>
 

@@ -62,6 +62,35 @@ TOOL_SPECS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "get_weather",
+            "description": (
+                "Current conditions + hourly and daily forecast for a location "
+                "(Open-Meteo — free, no key). ALWAYS use this for weather "
+                "questions instead of web_search; it returns structured data "
+                "(temps, precipitation probability, wind, sunrise/sunset). "
+                "For 'here'/'outside', call get_location first and pass its "
+                "coordinates; otherwise pass a place name."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "place": {
+                        "type": "string",
+                        "description": "City / place name (e.g. 'Pasadena, CA'). Omit when passing coordinates.",
+                    },
+                    "latitude":  {"type": "number", "description": "From get_location, for the user's position."},
+                    "longitude": {"type": "number", "description": "From get_location, for the user's position."},
+                    "days": {
+                        "type": "integer",
+                        "description": "Forecast days 1-7 (default 3). Use 7 for 'this week'.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "generate_image",
             "description": (
                 "Generate a brand-new image from a text description. "
@@ -122,6 +151,22 @@ TOOL_SPECS: list[dict[str, Any]] = [
                     },
                 },
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "identify_song",
+            "description": (
+                "Shazam-style music recognition on the user's attached audio "
+                "clip (acoustic fingerprinting via AudD). Use when the user "
+                "asks WHAT SONG is playing / what track this is and has "
+                "attached a recording or voice note of it. Returns artist, "
+                "title, album, release date and streaming links. Do NOT try "
+                "to identify music from a transcript or description — "
+                "fingerprinting is the only reliable way."
+            ),
+            "parameters": {"type": "object", "properties": {}},
         },
     },
     {
@@ -1840,6 +1885,229 @@ async def tool_reverse_image_lookup(args: dict, context: dict) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# get_weather — Open-Meteo current + forecast (free, keyless)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
+_OPEN_METEO_GEO_URL = "https://geocoding-api.open-meteo.com/v1/search"
+
+# WMO weather interpretation codes → text (per Open-Meteo docs).
+_WMO_CODES = {
+    0: "clear sky", 1: "mostly clear", 2: "partly cloudy", 3: "overcast",
+    45: "fog", 48: "rime fog",
+    51: "light drizzle", 53: "drizzle", 55: "dense drizzle",
+    56: "light freezing drizzle", 57: "freezing drizzle",
+    61: "light rain", 63: "rain", 65: "heavy rain",
+    66: "light freezing rain", 67: "freezing rain",
+    71: "light snow", 73: "snow", 75: "heavy snow", 77: "snow grains",
+    80: "light showers", 81: "showers", 82: "violent showers",
+    85: "light snow showers", 86: "snow showers",
+    95: "thunderstorm", 96: "thunderstorm with light hail",
+    99: "thunderstorm with hail",
+}
+
+
+def _wmo(code) -> str:
+    try:
+        return _WMO_CODES.get(int(code), f"code {code}")
+    except (TypeError, ValueError):
+        return "unknown"
+
+
+async def tool_get_weather(args: dict) -> str:
+    lat, lon = args.get("latitude"), args.get("longitude")
+    place = (args.get("place") or "").strip()
+    label = place
+    try:
+        days = max(1, min(7, int(args.get("days") or 3)))
+    except (TypeError, ValueError):
+        days = 3
+    if lat is None or lon is None:
+        if not place:
+            return ("get_weather needs a location: pass a place name, or call "
+                    "get_location first and pass its latitude/longitude.")
+        try:
+            r = await get_client().get(
+                _OPEN_METEO_GEO_URL,
+                params={"name": place, "count": 1, "format": "json"},
+                timeout=10.0,
+            )
+            r.raise_for_status()
+            hits = (r.json().get("results") or [])
+        except Exception as e:
+            return f"Geocoding error for '{place}': {e}"
+        if not hits:
+            return (f"Could not find a place called '{place}' — try a bigger "
+                    "nearby city or add the country.")
+        hit = hits[0]
+        lat, lon = hit["latitude"], hit["longitude"]
+        label = ", ".join(
+            p for p in (hit.get("name"), hit.get("admin1"), hit.get("country"))
+            if p)
+    print(f"[tool:weather] {label or f'{lat},{lon}'} days={days}")
+    try:
+        r = await get_client().get(
+            _OPEN_METEO_URL,
+            params={
+                "latitude": lat, "longitude": lon,
+                "current": "temperature_2m,apparent_temperature,"
+                           "relative_humidity_2m,precipitation,weather_code,"
+                           "wind_speed_10m,wind_gusts_10m",
+                "hourly": "temperature_2m,precipitation_probability,"
+                          "precipitation,weather_code",
+                "daily": "weather_code,temperature_2m_max,temperature_2m_min,"
+                         "precipitation_probability_max,precipitation_sum,"
+                         "sunrise,sunset,wind_speed_10m_max",
+                "timezone": "auto",
+                "forecast_days": days,
+            },
+            timeout=15.0,
+        )
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        return f"Weather lookup error: {e}"
+
+    cur = data.get("current") or {}
+    out = [f"WEATHER — {label or f'{lat:.3f},{lon:.3f}'} "
+           f"(timezone {data.get('timezone', '?')}; °C, mm, km/h)"]
+    out.append(
+        f"NOW ({cur.get('time', '?')}): {_wmo(cur.get('weather_code'))}, "
+        f"{cur.get('temperature_2m')}° (feels {cur.get('apparent_temperature')}°), "
+        f"humidity {cur.get('relative_humidity_2m')}%, "
+        f"wind {cur.get('wind_speed_10m')} gusting {cur.get('wind_gusts_10m')}, "
+        f"precipitation {cur.get('precipitation')}mm")
+
+    # Hourly: next 12h in 2h steps, starting from the current hour.
+    hourly = data.get("hourly") or {}
+    times = hourly.get("time") or []
+    now_hour = (cur.get("time") or "")[:13]  # YYYY-MM-DDTHH
+    try:
+        start = next(i for i, t in enumerate(times) if t[:13] >= now_hour)
+    except StopIteration:
+        start = 0
+    rows = []
+    for i in range(start, min(start + 13, len(times)), 2):
+        rows.append(
+            f"- {times[i][11:16]}: {hourly['temperature_2m'][i]}°, "
+            f"{_wmo(hourly['weather_code'][i])}, "
+            f"{hourly['precipitation_probability'][i]}% chance of precip "
+            f"({hourly['precipitation'][i]}mm)")
+    if rows:
+        out.append("NEXT 12 HOURS:")
+        out.extend(rows)
+
+    daily = data.get("daily") or {}
+    if daily.get("time"):
+        out.append("DAILY:")
+        for i, d in enumerate(daily["time"]):
+            out.append(
+                f"- {d}: {_wmo(daily['weather_code'][i])}, "
+                f"{daily['temperature_2m_min'][i]}–{daily['temperature_2m_max'][i]}°, "
+                f"precip {daily['precipitation_probability_max'][i]}% "
+                f"(total {daily['precipitation_sum'][i]}mm), "
+                f"wind up to {daily['wind_speed_10m_max'][i]}, "
+                f"sun {daily['sunrise'][i][11:16]}–{daily['sunset'][i][11:16]}")
+    out.append("Present naturally in the user's units; don't dump the raw list.")
+    return "\n".join(out)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# identify_song — AudD acoustic fingerprinting (Shazam-style)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_AUDD_API_URL = "https://api.audd.io/"
+_AUDD_MAX_BYTES = 15 * 1024 * 1024
+
+
+def _all_audio_uploads(context: dict) -> list[dict]:
+    """All audio uploads from the request context, in original order."""
+    uploads = (context or {}).get("uploads") or []
+    return [u for u in uploads if u.get("kind") == "audio" and u.get("storage_path")]
+
+
+async def _audd_key(context: dict) -> str:
+    """Per-user builtin credential first (Settings → Providers → AudD), then
+    the AUDD_API_KEY vault secret, instance env last — same ladder as the
+    Google Vision key."""
+    user_id = (context or {}).get("user_id")
+    if user_id:
+        try:
+            from . import db, providers as _providers
+            row = await db.get_builtin_provider(user_id, _providers.AUDD_BUILTIN_ID)
+            key = ((row or {}).get("api_key") or "").strip()
+            if key:
+                return key
+            key = (await db.get_secrets_decrypted(user_id)).get("AUDD_API_KEY")
+            if key:
+                return key
+        except Exception as e:
+            print(f"[tool:song] key lookup failed: {e}")
+    return settings.audd_api_key
+
+
+async def tool_identify_song(args: dict, context: dict) -> str:
+    srcs = _all_audio_uploads(context)
+    if not srcs:
+        return ("Song identification needs an audio clip — ask the user to "
+                "attach a short recording (5-15 seconds of the music is "
+                "plenty) and try again.")
+    key = await _audd_key(context)
+    if not key:
+        return (
+            "Song identification is not configured. Tell the user: add an "
+            "AudD API token under Settings → Providers → AudD (get one at "
+            "audd.io — free tokens cover a few hundred recognitions). "
+            "Meanwhile, if lyrics were transcribed you may try web-searching "
+            "a distinctive line, but say it's a guess."
+        )
+    src = srcs[-1]  # most recent clip is the one they're asking about
+    try:
+        raw = open(src["storage_path"], "rb").read()
+    except Exception as e:
+        return f"Could not read the attached audio: {e}"
+    if len(raw) > _AUDD_MAX_BYTES:
+        return ("The attached audio is too large to fingerprint (>15MB). Ask "
+                "the user for a short clip — 10 seconds of the song is enough.")
+    print(f"[tool:song] identify ({len(raw) // 1024}KB, {src.get('filename', '?')})")
+    try:
+        r = await get_client().post(
+            _AUDD_API_URL,
+            data={"api_token": key, "return": "apple_music,spotify"},
+            files={"file": (src.get("filename") or "clip", raw)},
+            timeout=30.0,
+        )
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        return f"Song identification error: {e}"
+    if data.get("status") != "success":
+        err = (data.get("error") or {})
+        return (f"Song identification failed: {err.get('error_message') or data} "
+                "(check the AudD token in Settings → Providers).")
+    result = data.get("result")
+    if not result:
+        return ("No match — the clip may be too short, too noisy, or the "
+                "track isn't in the recognition catalog. A cleaner 10-15s "
+                "clip with the music louder than voices works best.")
+    out = ["SONG MATCH:"]
+    for field, label_ in (("artist", "Artist"), ("title", "Title"),
+                          ("album", "Album"), ("release_date", "Released"),
+                          ("label", "Label")):
+        if result.get(field):
+            out.append(f"- {label_}: {result[field]}")
+    if result.get("timecode"):
+        out.append(f"- Matched at: {result['timecode']} into the track")
+    spotify_url = ((result.get("spotify") or {}).get("external_urls") or {}).get("spotify")
+    if spotify_url:
+        out.append(f"- Spotify: {spotify_url}")
+    apple_url = (result.get("apple_music") or {}).get("url")
+    if apple_url:
+        out.append(f"- Apple Music: {apple_url}")
+    return "\n".join(out)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # code_interpreter (Jupyter websocket)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -2447,6 +2715,8 @@ DISPATCH = {
     "generate_image":   tool_generate_image,
     "edit_image":       tool_edit_image,
     "reverse_image_lookup": tool_reverse_image_lookup,
+    "get_weather":      tool_get_weather,
+    "identify_song":    tool_identify_song,
     "code_interpreter": tool_code_interpreter,
     "consult_coder":    tool_consult_coder,
     "deep_research":    tool_deep_research,
@@ -2462,8 +2732,9 @@ DISPATCH.update(CODE_DISPATCH)
 # Tools that need the per-request context (uploads, chat_id, user_id,
 # tool_models, …). Other tools get the plain args dict.
 _CONTEXT_AWARE = {
-    "generate_image", "edit_image", "reverse_image_lookup", "search_docs",
-    "remember", "forget", "consult_coder", "deep_research", "update_artifact",
+    "generate_image", "edit_image", "reverse_image_lookup", "identify_song",
+    "search_docs", "remember", "forget", "consult_coder", "deep_research",
+    "update_artifact",
 }
 
 

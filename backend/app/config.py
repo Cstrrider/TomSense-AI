@@ -81,6 +81,10 @@ class Settings:
     # can instead store a per-user GOOGLE_VISION_API_KEY in the secret vault,
     # which takes precedence; this env var is the instance-wide fallback.
     google_vision_api_key: str = os.getenv("GOOGLE_VISION_API_KEY", "")
+    # AudD music-recognition token — powers the identify_song tool. Per-user
+    # keys on the Providers page take precedence; this is the instance-wide
+    # fallback.
+    audd_api_key: str = os.getenv("AUDD_API_KEY", "")
     # Workers AI paid-tier price per 1k neurons past the free daily allocation
     # — used for the $ spend estimate in the sidebar.
     neuron_price_per_1k: float = float(os.getenv("NEURON_PRICE_PER_1K", "0.011"))

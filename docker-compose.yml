@@ -68,6 +68,9 @@ services:
       # + web detection). Optional — a per-user GOOGLE_VISION_API_KEY secret
       # in the vault also works and needs no restart.
       - GOOGLE_VISION_API_KEY=${GOOGLE_VISION_API_KEY:-}
+      # AudD token for identify_song (Shazam-style music recognition).
+      # Optional — a per-user key on the Providers page also works.
+      - AUDD_API_KEY=${AUDD_API_KEY:-}
       # Fernet master key for at-rest API-key encryption (setup.sh generates).
       - TOMSENSE_ENCRYPTION_KEY=${TOMSENSE_ENCRYPTION_KEY:-}
       # ── Identity / access ──

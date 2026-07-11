@@ -503,7 +503,10 @@ def _mask_key(key: str) -> str:
     return f"{key[:4]}…{key[-4:]}"
 
 
-CREDENTIAL_KEYS = {"cf_api_token", "anthropic_api_key", "google_vision_api_key"}
+CREDENTIAL_KEYS = {
+    "cf_api_token", "anthropic_api_key", "google_vision_api_key",
+    "audd_api_key",
+}
 
 # Mapping from the credential field name (frontend / API contract) to the
 # builtin_id it stores under in the providers table. Lets the API stay
@@ -512,6 +515,7 @@ _CRED_TO_BUILTIN = {
     "cf_api_token": providers.CF_BUILTIN_ID,
     "anthropic_api_key": providers.ANTHROPIC_BUILTIN_ID,
     "google_vision_api_key": providers.GOOGLE_VISION_BUILTIN_ID,
+    "audd_api_key": providers.AUDD_BUILTIN_ID,
 }
 _BUILTIN_DEFAULTS = {
     providers.CF_BUILTIN_ID: {
@@ -524,11 +528,16 @@ _BUILTIN_DEFAULTS = {
         "base_url": "https://api.anthropic.com/v1",
         "kind": "anthropic",
     },
-    # kind "tool" — never listed as a model provider; the reverse_image_lookup
-    # tool reads it via db.get_builtin_provider.
+    # kind "tool" — never listed as a model provider; the owning tool reads
+    # the key via db.get_builtin_provider.
     providers.GOOGLE_VISION_BUILTIN_ID: {
         "name": "Google Cloud Vision",
         "base_url": "https://vision.googleapis.com/v1",
+        "kind": "tool",
+    },
+    providers.AUDD_BUILTIN_ID: {
+        "name": "AudD Music Recognition",
+        "base_url": "https://api.audd.io",
         "kind": "tool",
     },
 }
