@@ -94,6 +94,9 @@
   let selectMode = $state(false);
   let selected = $state<Set<string>>(new Set());
   let deleting = $state(false);
+  // Two-tap arm for "delete all non-pinned" (WebView-friendly, no confirm()).
+  let clearArmed = $state(false);
+  let clearTimer: ReturnType<typeof setTimeout> | null = null;
 
   function toggleSelectMode() {
     selectMode = !selectMode;
@@ -127,6 +130,33 @@
 
   /** Pinned chats (always shown at top) — search has its own result list. */
   let pinnedChats = $derived(app.chats.filter((c) => c.is_pinned));
+  let unpinnedChats = $derived(app.chats.filter((c) => !c.is_pinned));
+
+  /** Delete every non-pinned chat. Two-tap: first tap arms ("Sure?"),
+   *  second within 3s executes. Pinned chats are untouched. */
+  async function deleteAllUnpinned() {
+    const ids = unpinnedChats.map((c) => c.id);
+    if (ids.length === 0) return;
+    if (!clearArmed) {
+      clearArmed = true;
+      if (clearTimer) clearTimeout(clearTimer);
+      clearTimer = setTimeout(() => (clearArmed = false), 3000);
+      return;
+    }
+    if (clearTimer) clearTimeout(clearTimer);
+    clearArmed = false;
+    deleting = true;
+    try {
+      await deleteChats(ids);
+      await app.refreshChats();
+      if (currentId && ids.includes(currentId)) await goto('/');
+      toast.success(`Deleted ${ids.length} chat${ids.length === 1 ? '' : 's'}`);
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      deleting = false;
+    }
+  }
 
   function projectName(id: string): string {
     return app.projects.find((p) => p.id === id)?.name ?? 'Project';
@@ -477,6 +507,22 @@
 
       {#if app.chats.length === 0}
         <div class="empty">No chats yet.</div>
+      {/if}
+
+      {#if unpinnedChats.length > 0}
+        <button
+          class="clear-all"
+          class:armed={clearArmed}
+          disabled={deleting}
+          onclick={deleteAllUnpinned}
+        >
+          <IconTrash size={13} />
+          {#if clearArmed}
+            Delete {unpinnedChats.length} unpinned chat{unpinnedChats.length === 1 ? '' : 's'}? Tap again
+          {:else}
+            Delete all non-pinned
+          {/if}
+        </button>
       {/if}
     {/if}
   </div>
@@ -1033,6 +1079,36 @@
     padding: var(--sp-3) var(--sp-2);
     font-size: var(--fs-sm);
     text-align: center;
+  }
+  .clear-all {
+    width: 100%;
+    margin-top: var(--sp-2);
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--muted);
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    padding: 8px;
+    border-radius: var(--r-sm);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    transition: color var(--t-fast), background var(--t-fast), border-color var(--t-fast);
+  }
+  .clear-all:hover:not(:disabled) {
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 8%, transparent);
+  }
+  .clear-all.armed {
+    color: var(--danger);
+    border-color: color-mix(in srgb, var(--danger) 50%, transparent);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
+  }
+  .clear-all:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   /* ─── search results (chat title + matching message snippets) ───────── */

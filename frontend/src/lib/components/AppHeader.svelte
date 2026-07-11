@@ -2,7 +2,7 @@
   import { app } from '$lib/stores.svelte';
   import { exportChat, updatePrefs } from '$lib/api';
   import { toast } from '$lib/toast.svelte';
-  import { IconMenu, IconSettings, IconLayers, IconDownload, IconWaveform } from '$lib/icons';
+  import { IconMenu, IconSettings, IconLayers, IconDownload, IconWaveform, IconGhost } from '$lib/icons';
   import { Capacitor } from '@capacitor/core';
 
   interface Props {
@@ -99,7 +99,7 @@
         title={isTemp ? 'This chat is temporary — nothing is saved' : 'New temporary chat (not saved)'}
         onclick={ontemp}
       >
-        <span aria-hidden="true">👻</span>
+        <IconGhost size={18} />
       </button>
     {/if}
     {#if onvoice && nativePlatform}
@@ -201,12 +201,10 @@
   .menu-btn {
     display: none;
   }
-  .temp-btn {
-    font-size: 15px;
-  }
   .temp-btn.active {
     background: color-mix(in srgb, var(--accent) 16%, transparent);
     border-color: var(--accent);
+    color: var(--accent);
   }
   .export-wrap {
     position: relative;

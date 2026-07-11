@@ -33,3 +33,4 @@ export { default as IconGitBranch } from './IconGitBranch.svelte';
 export { default as IconMoreVertical } from './IconMoreVertical.svelte';
 export { default as IconDownload } from './IconDownload.svelte';
 export { default as IconKey } from './IconKey.svelte';
+export { default as IconGhost } from './IconGhost.svelte';
