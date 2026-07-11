@@ -19,7 +19,9 @@ so existing chat rows and persona model fields keep working untouched.
 """
 
 import asyncio
+import ast as _ast
 import json
+import re as _re
 from typing import Any, AsyncIterator, Optional
 
 from .cf import get_client, strip_template_tokens
@@ -406,12 +408,18 @@ async def stream_round(
         try:
             args = json.loads(args_str) if args_str else {}
         except json.JSONDecodeError:
-            # The args JSON didn't parse — almost always because the model hit
-            # the response-token cap mid-call (finish_reason == "length") while
-            # writing a huge edit. Flag it so the loop can steer to smaller edits
-            # instead of dispatching a garbage/empty call.
-            args = {}
-            truncated = True
+            # Two distinct causes land here: the model hit the response-token
+            # cap mid-call (huge edit — genuinely truncated), or a small model
+            # emitted sloppy near-JSON (trailing comma, single quotes, fences,
+            # two objects back to back). Try to salvage before giving up, and
+            # log the raw string — silent discard made this undiagnosable.
+            args, truncated = _salvage_tool_args(args_str)
+            if truncated:
+                print(f"[stream_round:{provider.get('name')}] unparseable args "
+                      f"for '{tc['name']}': {args_str[:300]!r}")
+            else:
+                print(f"[stream_round:{provider.get('name')}] salvaged sloppy "
+                      f"args for '{tc['name']}': {args_str[:120]!r}")
         tool_calls_out.append({
             "id": tc["id"] or f"call_{idx}",
             "name": tc["name"],
@@ -425,6 +433,32 @@ async def stream_round(
         "usage": usage,
         "finish_reason": finish_reason,
     })
+
+
+def _salvage_tool_args(args_str: str) -> tuple[dict, bool]:
+    """Best-effort recovery of malformed tool-call argument JSON. Small
+    models (Gemma et al.) emit near-JSON: markdown fences, trailing commas,
+    single quotes, or two objects concatenated. Returns (args, truncated) —
+    truncated=True only when nothing usable could be recovered (i.e. the
+    call really was cut off mid-write)."""
+    s = (args_str or "").strip()
+    if s.startswith("```"):
+        s = _re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", s).strip()
+    # First object even with trailing garbage (concatenated calls, stray text).
+    try:
+        obj, _end = json.JSONDecoder().raw_decode(s)
+        if isinstance(obj, dict):
+            return obj, False
+    except Exception:
+        pass
+    # Python-literal style: single quotes, True/False/None, trailing commas.
+    try:
+        obj = _ast.literal_eval(s)
+        if isinstance(obj, dict):
+            return obj, False
+    except Exception:
+        pass
+    return {}, True
 
 
 # ─── dispatch helpers (parse + resolve + call in one shot) ──────────────────

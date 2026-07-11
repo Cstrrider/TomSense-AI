@@ -1165,17 +1165,19 @@ async def run_chat(
                 print(f"[chat] skipping unknown tool '{tc['name']}'")
                 continue
 
-            # Truncated tool call: the model blew the response-token cap mid-call
-            # (almost always rewriting a whole large file via edit_file/write_file).
-            # The args are garbage, so DON'T dispatch — that wastes a ~2-min round
-            # on a failed edit and can wedge the client. Steer to small edits.
+            # Truncated tool call: the args JSON was unrecoverable. For file
+            # tools that means the model blew the response-token cap rewriting
+            # a whole file — steer to small edits. For everything else it's
+            # malformed output — tell it to retry with valid JSON (the old
+            # one-size 'edit too large' message sent non-code models in
+            # circles: they weren't editing anything).
             if tc.get("truncated"):
-                print(f"[chat] truncated tool call '{tc['name']}' — steering to smaller edits")
-                yield {"type": "chip", "name": tc["name"], "text": tool_chip(tc, "⚠ Edit too large — it exceeded the response limit and was cut off (not applied).")}
-                msgs.append({
-                    "role": "tool",
-                    "tool_call_id": tc["id"],
-                    "content": (
+                is_file_tool = tc["name"] in ("write_file", "edit_file", "apply_patch")
+                print(f"[chat] truncated tool call '{tc['name']}' — "
+                      f"{'steering to smaller edits' if is_file_tool else 'asking for a clean retry'}")
+                if is_file_tool:
+                    chip_note = "⚠ Edit too large — it exceeded the response limit and was cut off (not applied)."
+                    steer = (
                         "Your last tool call was CUT OFF at the response-length "
                         "limit — its arguments were incomplete, so nothing was "
                         "applied. You are trying to write too much at once. Do NOT "
@@ -1183,7 +1185,21 @@ async def run_chat(
                         "apply_patch with just the few hunks that change, or "
                         "edit_file on one specific region. Split large work across "
                         "several small calls."
-                    ),
+                    )
+                else:
+                    chip_note = "⚠ Malformed tool call — arguments didn't parse (not run)."
+                    steer = (
+                        f"Your last {tc['name']} call was NOT run: its arguments "
+                        "were not valid JSON (malformed or cut off). Call the tool "
+                        "again with ONE complete, valid JSON object as arguments — "
+                        "double-quoted keys/strings, no trailing commas, no "
+                        "markdown fences, nothing after the closing brace."
+                    )
+                yield {"type": "chip", "name": tc["name"], "text": tool_chip(tc, chip_note)}
+                msgs.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": steer,
                 })
                 tools_dispatched += 1
                 continue
