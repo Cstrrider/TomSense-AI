@@ -3011,14 +3011,29 @@ async def chat_stream(
             # Capability via the registry (declared caps → CF catalogue →
             # demoted heuristics), so a vision model on ANY provider — including
             # one the user tagged vision on their own OpenRouter/OpenAI entry —
-            # is recognised and NOT needlessly overridden.
+            # is recognised.
             _wr_pid, _wr_mid = providers.parse_model_str(_would_run)
             _wr_provider = await providers.resolve_provider(_wr_pid, user_id=user["id"])
-            if not capabilities.model_sees_images(_wr_provider, _wr_mid):
-                _vision_model = (
-                    (tool_models.get("vision") or "").strip()
-                    or f"{providers.CF_BUILTIN_ID}::{settings.model_vision}"
-                )
+            _wr_sees = capabilities.model_sees_images(_wr_provider, _wr_mid)
+            _user_vision = (tool_models.get("vision") or "").strip()
+            if _user_vision and not (req.model and _wr_sees):
+                # An explicitly SET Vision slot OWNS image turns — even when
+                # the chat model could technically see. Rationale (2026-07-11):
+                # the user picked Gemini for its place/landmark recognition,
+                # attached a photo, and Gemma answered because it was
+                # vision-capable — "the model I chose for images" must beat
+                # "a model that can see". Exception: an explicit per-request
+                # pick that can see images keeps the turn.
+                if _user_vision != requested_model:
+                    requested_model = _user_vision
+                    reasoning_effort = None  # vision slot isn't the think model
+                    vision_notice = (
+                        f"*[image attached — answering with "
+                        f"{short_name(_user_vision)} (your Vision model)]*\n\n"
+                    )
+            elif not _wr_sees:
+                # No Vision slot set: rescue a text-only model with the default.
+                _vision_model = f"{providers.CF_BUILTIN_ID}::{settings.model_vision}"
                 if _vision_model != requested_model:
                     requested_model = _vision_model
                     reasoning_effort = None  # vision default isn't the think model

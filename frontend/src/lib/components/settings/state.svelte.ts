@@ -81,7 +81,7 @@ export const CUSTOM_PREFIX = 'custom:';
 // below are used only if /info hasn't loaded yet.
 const FALLBACK_CATALOG = [
   { key: 'chat', label: 'Chat', chip: 'chat', hint: 'Main model for conversation and tool dispatch.' },
-  { key: 'vision', label: 'Vision', chip: 'vision', hint: 'Handles turns with image attachments. Unset = the Chat model.' },
+  { key: 'vision', label: 'Vision', chip: 'vision', hint: 'Answers every turn with image attachments when set. Unset = the Chat model (if vision-capable).' },
   { key: 'code', label: 'Code Writer', chip: 'writer', hint: '🪄 Single-shot — used by /code → consult_coder.' },
   { key: 'code_mode', label: 'Code Mode', chip: 'agent', hint: '🤖 Agentic — used by code chats.' },
   { key: 'research', label: 'Research', chip: 'research', hint: 'Used by /research → deep_research synthesis.' },

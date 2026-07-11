@@ -25,8 +25,9 @@ TOOL_MODELS_CATALOG: list[dict] = [
         "key": "vision",
         "label": "Vision",
         "chip": "vision",
-        "hint": "Handles turns with image attachments. Unset = the Chat model "
-                "answers them (it must be vision-capable).",
+        "hint": "Answers every turn with image attachments when set — even if "
+                "the Chat model could see them. Unset = the Chat model (if "
+                "vision-capable).",
     },
     {
         "key": "code",
