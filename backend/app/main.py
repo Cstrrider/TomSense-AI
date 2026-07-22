@@ -2647,6 +2647,8 @@ async def _run_generation(
                 int(stats.get("prompt_tokens") or 0),
                 int(stats.get("completion_tokens") or 0),
                 float(stats.get("cost") or 0.0),
+                cache_read=int(stats.get("cache_read_tokens") or 0),
+                cache_write=int(stats.get("cache_creation_tokens") or 0),
             )
         except Exception as e:
             log.warning("usage recording failed: %s", e)

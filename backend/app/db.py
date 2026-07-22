@@ -113,6 +113,11 @@ CREATE TABLE IF NOT EXISTS usage_daily (
     requests INT NOT NULL DEFAULT 0,
     PRIMARY KEY (user_id, day, provider_id)
 );
+-- Cached input tokens (read from / written to the provider prompt cache),
+-- normalized from provider usage in providers._normalize_cache_usage. Lets us
+-- report the real cache-hit ratio: cache_read / tokens_in.
+ALTER TABLE usage_daily ADD COLUMN IF NOT EXISTS cache_read BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE usage_daily ADD COLUMN IF NOT EXISTS cache_write BIGINT NOT NULL DEFAULT 0;
 
 -- Projects: replace the old free-text `folder` grouping. A project groups
 -- chats and carries a shared system prompt prepended on every chat in it.
@@ -1199,13 +1204,19 @@ async def add_tokens(user_id: str, prompt_tokens: int, completion_tokens: int) -
 
 
 async def record_usage(user_id: str, provider_id: str, provider_name: str,
-                       tokens_in: int, tokens_out: int, cost: float) -> None:
-    """Increment today's per-provider usage row (UTC day). Best-effort."""
+                       tokens_in: int, tokens_out: int, cost: float,
+                       cache_read: int = 0, cache_write: int = 0) -> None:
+    """Increment today's per-provider usage row (UTC day). Best-effort.
+
+    cache_read / cache_write are the cached input tokens the provider reported
+    (see providers._normalize_cache_usage); cache_read is a SUBSET of tokens_in,
+    so the hit ratio is cache_read / tokens_in."""
     try:
         uid = uuid.UUID(user_id)
     except (ValueError, TypeError):
         return
     tin, tout = int(tokens_in or 0), int(tokens_out or 0)
+    cread, cwrite = int(cache_read or 0), int(cache_write or 0)
     cost = float(cost or 0.0)
     if tin <= 0 and tout <= 0 and cost <= 0:
         return
@@ -1213,16 +1224,20 @@ async def record_usage(user_id: str, provider_id: str, provider_name: str,
         await conn.execute(
             """
             INSERT INTO usage_daily (user_id, day, provider_id, provider_name,
-                                     tokens_in, tokens_out, cost, requests)
-            VALUES ($1, (now() at time zone 'utc')::date, $2, $3, $4, $5, $6, 1)
+                                     tokens_in, tokens_out, cost, requests,
+                                     cache_read, cache_write)
+            VALUES ($1, (now() at time zone 'utc')::date, $2, $3, $4, $5, $6, 1, $7, $8)
             ON CONFLICT (user_id, day, provider_id) DO UPDATE SET
                 tokens_in = usage_daily.tokens_in + EXCLUDED.tokens_in,
                 tokens_out = usage_daily.tokens_out + EXCLUDED.tokens_out,
                 cost = usage_daily.cost + EXCLUDED.cost,
                 requests = usage_daily.requests + 1,
+                cache_read = usage_daily.cache_read + EXCLUDED.cache_read,
+                cache_write = usage_daily.cache_write + EXCLUDED.cache_write,
                 provider_name = EXCLUDED.provider_name
             """,
             uid, str(provider_id or "?"), provider_name or None, tin, tout, cost,
+            cread, cwrite,
         )
 
 
