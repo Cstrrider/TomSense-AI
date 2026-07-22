@@ -29,6 +29,7 @@
     "@capacitor/core": "^7.0.0",
     "@capacitor/geolocation": "^7.0.0",
     "@capacitor/local-notifications": "^7.0.6",
+    "@capacitor/status-bar": "^7.0.6",
     "highlight.js": "^11.10.0",
     "katex": "^0.16.11",
     "marked": "^14.1.3"

@@ -5,6 +5,9 @@
  *  server round-trip and no first-paint flash — see the inline init in
  *  app.html which applies it before the app boots). */
 
+import { Capacitor } from '@capacitor/core';
+import { StatusBar, Style } from '@capacitor/status-bar';
+
 export type ThemeChoice = 'system' | 'dark' | 'light';
 
 const KEY = 'tomsense-theme';
@@ -33,6 +36,14 @@ export function applyTheme(choice: ThemeChoice): void {
   document.documentElement.dataset.theme = concrete;
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) meta.setAttribute('content', concrete === 'light' ? LIGHT_BAR : DARK_BAR);
+  // The meta tag only affects browsers/PWA. In the Capacitor shell the status
+  // bar is native: tell Android which icon set to use (Style.Light = light
+  // background → dark icons). Guarded so browsers and APKs built before the
+  // plugin shipped are a clean no-op.
+  if (Capacitor.isPluginAvailable('StatusBar')) {
+    StatusBar.setStyle({ style: concrete === 'light' ? Style.Light : Style.Dark })
+      .catch(() => { /* plugin missing at runtime (old APK) — ignore */ });
+  }
 }
 
 export function setThemeChoice(choice: ThemeChoice): void {
