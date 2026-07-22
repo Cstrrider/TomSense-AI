@@ -204,6 +204,51 @@ def _normalize_cache_usage(usage: dict) -> dict:
     return usage
 
 
+# OpenRouter families whose caching is AUTOMATIC need no markers; only these
+# explicit-caching families cache when we mark a breakpoint ourselves. Matched
+# against the OpenRouter model id prefix (e.g. "qwen/qwen3-max", "google/…").
+_OPENROUTER_EXPLICIT_CACHE_PREFIXES = ("qwen/", "google/", "anthropic/")
+
+
+def _inject_openrouter_cache(messages: list[dict], model: str) -> list[dict]:
+    """Mark the system prompt with an Anthropic-style
+    `cache_control: {type: ephemeral}` breakpoint so OpenRouter's explicit-
+    caching providers (Qwen, Gemini, Claude) cache the large static instruction
+    prefix across a chat's rounds.
+
+    Only fires for those model-id prefixes — the automatic-caching families
+    (Moonshot/Kimi, DeepSeek, Z.AI/GLM, Grok, Groq) cache without markers, so
+    we leave their requests untouched. Returns a shallow copy; the caller's
+    list is never mutated. Unchanged when there's no system message."""
+    if not model.lower().startswith(_OPENROUTER_EXPLICIT_CACHE_PREFIXES):
+        return messages
+    # The LAST system message is the full static instruction block (base prompt
+    # + persona + any working-set header are consolidated by the caller).
+    sys_idx = None
+    for i, m in enumerate(messages):
+        if m.get("role") == "system":
+            sys_idx = i
+    if sys_idx is None:
+        return messages
+    sysmsg = dict(messages[sys_idx])
+    content = sysmsg.get("content")
+    if isinstance(content, str) and content:
+        sysmsg["content"] = [{
+            "type": "text", "text": content,
+            "cache_control": {"type": "ephemeral"},
+        }]
+    elif isinstance(content, list) and content:
+        blocks = [dict(b) if isinstance(b, dict) else {"type": "text", "text": str(b)}
+                  for b in content]
+        blocks[-1]["cache_control"] = {"type": "ephemeral"}
+        sysmsg["content"] = blocks
+    else:
+        return messages
+    out = list(messages)
+    out[sys_idx] = sysmsg
+    return out
+
+
 def build_payload(
     model: str, messages: list[dict], max_tokens: int,
     tools: Optional[list[dict]] = None, stream: bool = True,
@@ -257,6 +302,8 @@ async def chat_complete(
     """Non-streaming chat call against any OpenAI-compatible provider."""
     from . import capabilities
     caps = capabilities.model_capabilities(provider, model)
+    if "openrouter.ai" in (provider.get("base_url") or ""):
+        messages = _inject_openrouter_cache(messages, model)
     payload = build_payload(model, messages, max_tokens, tools, stream=False,
                             flatten_vision=provider.get("id") == CF_BUILTIN_ID,
                             is_reasoning=caps["reasoning"], sees_images=caps["vision"])
@@ -330,6 +377,8 @@ async def stream_round(
 
     from . import capabilities
     caps = capabilities.model_capabilities(provider, model)
+    if "openrouter.ai" in (provider.get("base_url") or ""):
+        messages = _inject_openrouter_cache(messages, model)
     payload = build_payload(model, messages, max_tokens, tools, stream=True,
                             temperature=temperature, reasoning_effort=reasoning_effort,
                             is_reasoning=caps["reasoning"], sees_images=caps["vision"])
