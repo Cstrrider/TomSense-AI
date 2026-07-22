@@ -807,7 +807,12 @@ async def run_chat(
 
     start = start_time if start_time is not None else time.monotonic()
     models_used: set = set()
-    total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cost": 0.0}
+    total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cost": 0.0,
+                   "cache_read_tokens": 0, "cache_creation_tokens": 0}
+    # Pin every round of this chat to the same cache-holding upstream instance
+    # (CF x-session-affinity / OpenRouter x-session-id) so the stable system +
+    # history prefix keeps hitting the provider's prompt cache across rounds.
+    _session_id = (tool_context or {}).get("chat_id")
 
     # Code mode: a longer agentic loop, only the coding tools, and a roomier
     # cap on tool output fed back to the model (file reads / build logs).
@@ -886,6 +891,7 @@ async def run_chat(
             temperature=(0.3 if code_mode else None),  # #6: deterministic code edits
             reasoning_effort=reasoning_effort,
             fallback_model_str=(tool_context or {}).get("stall_fallback") or None,
+            session_id=_session_id,
         ):
             if kind == "reasoning":
                 reasoning_buf += payload
@@ -1488,6 +1494,7 @@ async def run_chat(
     async for kind, payload in dispatch_stream_round(
         (tool_context or {}).get("user_id"), model, msgs, max_tokens, tools=None,
         temperature=(0.3 if code_mode else None),  # #6
+        session_id=(tool_context or {}).get("chat_id"),
     ):
         if kind == "reasoning":
             fr_reasoning += payload

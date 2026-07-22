@@ -161,6 +161,49 @@ def _headers(provider: dict) -> dict:
     }
 
 
+def _session_headers(provider: dict, session_id: Optional[str]) -> dict:
+    """Provider-specific "pin this conversation to the cache-holding instance"
+    header, so a multi-round chat keeps landing on the same prefix cache and
+    the cached-input discount actually applies.
+
+      - Cloudflare Workers AI: `x-session-affinity` (lifts hit ratio ~60→80%)
+      - OpenRouter:            `x-session-id`   (sticky provider routing; ≤256 chars)
+
+    Anything else gets nothing — those providers either auto-pin after the
+    first cache hit or don't cache, and an unknown header could upset a strict
+    OpenAI-compat server. No session id → no header."""
+    if not session_id:
+        return {}
+    base = provider.get("base_url") or ""
+    if "openrouter.ai" in base:
+        return {"x-session-id": session_id[:256]}
+    if provider.get("id") == CF_BUILTIN_ID or "cloudflare.com" in base:
+        return {"x-session-affinity": session_id}
+    return {}
+
+
+def _normalize_cache_usage(usage: dict) -> dict:
+    """Fold provider-specific cached-token fields into the canonical
+    `cache_read_tokens` / `cache_creation_tokens` keys — the same ones the
+    Anthropic client emits and that chat.py logs (`cache=R/W`) and accounts
+    for. Covers the OpenAI/OpenRouter/Cloudflare shape (cache reads under
+    `usage.prompt_tokens_details.cached_tokens`, OpenRouter also exposing
+    `cache_write_tokens` there). No-op when nothing is reported, so the log
+    stays quiet on providers without caching."""
+    if not isinstance(usage, dict):
+        return usage
+    details = usage.get("prompt_tokens_details") or {}
+    read = details.get("cached_tokens")
+    if read is None:
+        read = usage.get("cached_tokens")  # some servers report it top-level
+    write = details.get("cache_write_tokens")
+    if read:
+        usage["cache_read_tokens"] = read
+    if write:
+        usage["cache_creation_tokens"] = write
+    return usage
+
+
 def build_payload(
     model: str, messages: list[dict], max_tokens: int,
     tools: Optional[list[dict]] = None, stream: bool = True,
@@ -209,6 +252,7 @@ async def chat_complete(
     messages: list[dict],
     max_tokens: int,
     tools: Optional[list[dict]] = None,
+    session_id: Optional[str] = None,
 ) -> dict:
     """Non-streaming chat call against any OpenAI-compatible provider."""
     from . import capabilities
@@ -222,7 +266,7 @@ async def chat_complete(
     ]
     r = await get_client().post(
         _chat_url(provider),
-        headers=_headers(provider),
+        headers={**_headers(provider), **_session_headers(provider, session_id)},
         json=payload,
         timeout=120.0,
     )
@@ -253,7 +297,7 @@ async def chat_complete(
     return {
         "content": content,
         "tool_calls": tool_calls,
-        "usage": data.get("usage", {}) or {},
+        "usage": _normalize_cache_usage(data.get("usage", {}) or {}),
     }
 
 
@@ -265,11 +309,16 @@ async def stream_round(
     tools: Optional[list[dict]] = None,
     temperature: Optional[float] = None,
     reasoning_effort: Optional[str] = None,
+    session_id: Optional[str] = None,
     _attempt: int = 0,
 ) -> AsyncIterator[tuple[str, Any]]:
     """Streamed chat round. Routes to the Anthropic Messages API when the
     provider's `kind` is "anthropic"; otherwise hits the OpenAI-compatible
-    chat-completions endpoint."""
+    chat-completions endpoint.
+
+    `session_id` (the chat id) pins the conversation to one cache-holding
+    upstream instance so prefix caching keeps hitting across the loop's
+    rounds — see _session_headers."""
     if provider.get("kind") == "anthropic":
         # Imported lazily so the OpenAI-compat path doesn't pay for the
         # additional module on every request. (temperature/reasoning_effort are
@@ -300,7 +349,7 @@ async def stream_round(
         async with get_client().stream(
             "POST",
             _chat_url(provider),
-            headers=_headers(provider),
+            headers={**_headers(provider), **_session_headers(provider, session_id)},
             json=payload,
         ) as r:
             if not r.is_success:
@@ -319,6 +368,7 @@ async def stream_round(
                     print(f"[stream_round:{provider.get('name')}] {model} lacks tool support — retrying without tools")
                     async for ev in stream_round(
                         provider, model, messages, max_tokens, tools=None,
+                        session_id=session_id,
                     ):
                         yield ev
                     return
@@ -339,7 +389,7 @@ async def stream_round(
                     async for ev in stream_round(
                         provider, model, messages, max_tokens, tools,
                         temperature=temperature, reasoning_effort=reasoning_effort,
-                        _attempt=_attempt + 1,
+                        session_id=session_id, _attempt=_attempt + 1,
                     ):
                         yield ev
                     return
@@ -393,7 +443,7 @@ async def stream_round(
                     if cleaned:
                         yield ("text", cleaned)
                 if obj.get("usage"):
-                    usage = obj["usage"]
+                    usage = _normalize_cache_usage(obj["usage"])
     except Exception as e:
         # str() of httpx.ReadTimeout is empty — always include the type so the
         # user-visible note and the log say WHAT failed.
@@ -535,7 +585,7 @@ async def dispatch_stream_round(
     user_id: Optional[str], model_str: str, messages: list[dict],
     max_tokens: int, tools: Optional[list[dict]] = None,
     temperature: Optional[float] = None, reasoning_effort: Optional[str] = None,
-    fallback_model_str: Optional[str] = None,
+    fallback_model_str: Optional[str] = None, session_id: Optional[str] = None,
 ) -> AsyncIterator[tuple[str, Any]]:
     pid, mid = parse_model_str(model_str)
     provider = await resolve_provider(pid, user_id=user_id)
@@ -562,7 +612,8 @@ async def dispatch_stream_round(
     idle_t = settings.stream_idle_timeout_s
 
     gen = stream_round(provider, mid, messages, max_tokens, tools,
-                       temperature=temperature, reasoning_effort=reasoning_effort)
+                       temperature=temperature, reasoning_effort=reasoning_effort,
+                       session_id=session_id)
     text_seen = ""
     timeout = first_t
     while True:
@@ -621,7 +672,8 @@ async def dispatch_stream_round(
                    f"{_model_short(fb_mid)}]*\n\n")
     fb_gen = stream_round(fb_provider, fb_mid, fb_messages, max_tokens, tools,
                           temperature=temperature,
-                          reasoning_effort=reasoning_effort)
+                          reasoning_effort=reasoning_effort,
+                          session_id=session_id)
     fb_text = ""
     timeout = first_t
     while True:
