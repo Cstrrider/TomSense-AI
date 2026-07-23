@@ -637,6 +637,26 @@
       </div>
     </div>
 
+    <label class="field">
+      <span class="field-label">
+        Provider options <span class="muted-strong">(advanced, optional)</span>
+      </span>
+      <textarea
+        class="mono"
+        rows="3"
+        spellcheck="false"
+        autocomplete="off"
+        placeholder={'{"provider": {"sort": "throughput"}}'}
+        bind:value={S.providerForm.extra_body_text}
+      ></textarea>
+      <span class="muted small">
+        Raw JSON merged into every request to this provider. For OpenRouter, pin
+        routing — e.g. <code>{'{"provider":{"only":["fireworks","together"],"sort":"throughput"}}'}</code>
+        for speed, or <code>{'{"provider":{"data_collection":"deny"}}'}</code> for privacy.
+        Leave blank for none.
+      </span>
+    </label>
+
     <div class="actions">
       <button class="btn-text" onclick={cancelProviderForm} disabled={S.providerSaving}>Cancel</button>
       <button class="primary" onclick={saveProviderForm} disabled={S.providerSaving}>

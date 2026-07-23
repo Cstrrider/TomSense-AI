@@ -204,6 +204,21 @@ def _normalize_cache_usage(usage: dict) -> dict:
     return usage
 
 
+def _apply_extra_body(payload: dict, provider: dict) -> None:
+    """Merge a provider's configured extra request-body params into the payload
+    — a vendor-neutral passthrough: the shared path has zero knowledge of what's
+    inside, so an OpenRouter provider can carry
+    `{"provider": {"only": [...], "sort": "throughput"}}` (and a Together one
+    something else) without any vendor-specific branch here. Reserved keys can't
+    be clobbered. No-op when unset."""
+    extra = provider.get("extra_body")
+    if not isinstance(extra, dict):
+        return
+    for k, v in extra.items():
+        if k not in ("model", "messages", "stream", "max_tokens"):
+            payload[k] = v
+
+
 # OpenRouter families whose caching is AUTOMATIC need no markers; only these
 # explicit-caching families cache when we mark a breakpoint ourselves. Matched
 # against the OpenRouter model id prefix (e.g. "qwen/qwen3-max", "google/…").
@@ -307,6 +322,7 @@ async def chat_complete(
     payload = build_payload(model, messages, max_tokens, tools, stream=False,
                             flatten_vision=provider.get("id") == CF_BUILTIN_ID,
                             is_reasoning=caps["reasoning"], sees_images=caps["vision"])
+    _apply_extra_body(payload, provider)
     payload["stop"] = [
         "<|end|>", "<|start|>", "<|endoftext|>", "<eot_id>",
         "<|im_end|>", "<|assistant|>", "<|channel|>",
@@ -382,6 +398,7 @@ async def stream_round(
     payload = build_payload(model, messages, max_tokens, tools, stream=True,
                             temperature=temperature, reasoning_effort=reasoning_effort,
                             is_reasoning=caps["reasoning"], sees_images=caps["vision"])
+    _apply_extra_body(payload, provider)
 
     accumulated_text = ""
     accumulated_tools: dict[int, dict] = {}

@@ -223,7 +223,7 @@ export const S = $state({
   // Add/edit-provider form state. editingProviderId === null → creating new.
   providerFormOpen: false,
   editingProviderId: null as string | null,
-  providerForm: { name: '', base_url: '', api_key: '', models: [] as ProviderModel[] },
+  providerForm: { name: '', base_url: '', api_key: '', models: [] as ProviderModel[], extra_body_text: '' },
   providerSaving: false,
   providerTesting: null as string | null,
   providerTestResult: {} as Record<string, string>,
@@ -566,7 +566,7 @@ export async function discoverModels() {
 
 export function startCreateProvider() {
   S.editingProviderId = null;
-  S.providerForm = { name: '', base_url: '', api_key: '', models: [] };
+  S.providerForm = { name: '', base_url: '', api_key: '', models: [], extra_body_text: '' };
   S.discoveredModels = [];
   S.providerFormOpen = true;
 }
@@ -579,7 +579,8 @@ export function startEditProvider(p: Provider) {
     // Leave api_key blank — the user only types it when rotating. Empty
     // values are skipped server-side, preserving the existing key.
     api_key: '',
-    models: (p.models || []).map((m) => ({ ...m, tools: [...(m.tools || [])] }))
+    models: (p.models || []).map((m) => ({ ...m, tools: [...(m.tools || [])] })),
+    extra_body_text: p.extra_body ? JSON.stringify(p.extra_body, null, 2) : ''
   };
   S.discoveredModels = [];
   S.providerFormOpen = true;
@@ -647,15 +648,31 @@ export async function saveProviderForm() {
       ...(m.reasoning ? { reasoning: true } : {})
     }))
     .filter((m) => m.id && m.tools.length > 0);
+  // Parse the optional extra-request-body JSON. Empty = clear (null).
+  let extra_body: Record<string, unknown> | null = null;
+  const ebText = (S.providerForm.extra_body_text || '').trim();
+  if (ebText) {
+    try {
+      const parsed = JSON.parse(ebText);
+      if (typeof parsed !== 'object' || Array.isArray(parsed) || parsed === null) {
+        toast.error('Provider options must be a JSON object');
+        return;
+      }
+      extra_body = parsed;
+    } catch {
+      toast.error('Provider options: invalid JSON');
+      return;
+    }
+  }
   S.providerSaving = true;
   try {
     if (S.editingProviderId) {
-      const patch: any = { name, base_url, models };
+      const patch: any = { name, base_url, models, extra_body };
       if (api_key) patch.api_key = api_key;
       await updateProvider(S.editingProviderId, patch);
       toast.success('Provider updated');
     } else {
-      await createProvider({ name, base_url, api_key, models });
+      await createProvider({ name, base_url, api_key, models, extra_body });
       toast.success('Provider added');
     }
     S.providerFormOpen = false;

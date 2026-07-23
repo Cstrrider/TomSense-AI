@@ -432,6 +432,7 @@ export async function createProvider(p: {
   base_url: string;
   api_key: string;
   models?: Provider['models'];
+  extra_body?: Record<string, unknown> | null;
 }): Promise<Provider> {
   return http<Provider>('/me/providers', {
     method: 'POST',
@@ -441,7 +442,7 @@ export async function createProvider(p: {
 
 export async function updateProvider(
   id: string,
-  patch: Partial<Pick<Provider, 'name' | 'base_url' | 'api_key' | 'models'>>
+  patch: Partial<Pick<Provider, 'name' | 'base_url' | 'api_key' | 'models' | 'extra_body'>>
 ): Promise<Provider> {
   return http<Provider>(`/me/providers/${id}`, {
     method: 'PATCH',

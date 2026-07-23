@@ -94,6 +94,10 @@ CREATE TABLE IF NOT EXISTS providers (
 -- builtin objects in providers.py become a fallback for users without rows.
 ALTER TABLE providers ADD COLUMN IF NOT EXISTS is_builtin BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE providers ADD COLUMN IF NOT EXISTS builtin_id TEXT;
+-- Extra request-body params merged into every call to this provider (vendor-
+-- neutral passthrough). e.g. OpenRouter provider routing:
+--   {"provider": {"only": ["fireworks","together"], "sort": "throughput"}}
+ALTER TABLE providers ADD COLUMN IF NOT EXISTS extra_body JSONB;
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_user_builtin
     ON providers(user_id, builtin_id) WHERE is_builtin = true;
 CREATE INDEX IF NOT EXISTS idx_providers_user ON providers(user_id, name);
@@ -1906,9 +1910,25 @@ def _row_to_provider(r: asyncpg.Record) -> dict:
         "api_key": _crypto.decrypt(r["api_key"] or ""),
         "kind": r["kind"],
         "models": models or [],
+        # Vendor-neutral extra request-body params (r.get → None when a SELECT
+        # doesn't fetch the column, e.g. builtin lookups).
+        "extra_body": _coerce_json(r.get("extra_body")),
         "created_at": r["created_at"].isoformat(),
         "updated_at": r["updated_at"].isoformat(),
     }
+
+
+def _coerce_json(v):
+    """JSONB comes back as dict or (occasionally) a JSON string; normalize to
+    a dict, or None."""
+    if v is None:
+        return None
+    if isinstance(v, str):
+        try:
+            return json.loads(v)
+        except json.JSONDecodeError:
+            return None
+    return v
 
 
 async def list_providers(user_id: str, include_builtin: bool = False) -> list[dict]:
@@ -1925,7 +1945,7 @@ async def list_providers(user_id: str, include_builtin: bool = False) -> list[di
     async with _pool_or_raise().acquire() as conn:
         rows = await conn.fetch(
             "SELECT id, name, base_url, api_key, kind, models, "
-            "       is_builtin, builtin_id, created_at, updated_at "
+            "       is_builtin, builtin_id, extra_body, created_at, updated_at "
             f"FROM providers {where} ORDER BY name ASC",
             uid,
         )
@@ -1944,13 +1964,13 @@ async def get_provider(provider_id: str, user_id: Optional[str] = None) -> Optio
             except (ValueError, TypeError):
                 return None
             row = await conn.fetchrow(
-                "SELECT id, name, base_url, api_key, kind, models, created_at, updated_at "
+                "SELECT id, name, base_url, api_key, kind, models, extra_body, created_at, updated_at "
                 "FROM providers WHERE id = $1 AND user_id = $2",
                 pid, uid,
             )
         else:
             row = await conn.fetchrow(
-                "SELECT id, name, base_url, api_key, kind, models, created_at, updated_at "
+                "SELECT id, name, base_url, api_key, kind, models, extra_body, created_at, updated_at "
                 "FROM providers WHERE id = $1",
                 pid,
             )
@@ -1960,6 +1980,7 @@ async def get_provider(provider_id: str, user_id: Optional[str] = None) -> Optio
 async def create_provider(
     user_id: str, name: str, base_url: str, api_key: str,
     kind: str = "openai-compat", models: Optional[list[dict]] = None,
+    extra_body: Optional[dict] = None,
 ) -> Optional[dict]:
     try:
         uid = uuid.UUID(user_id)
@@ -1968,10 +1989,11 @@ async def create_provider(
     pid = uuid.uuid4()
     async with _pool_or_raise().acquire() as conn:
         row = await conn.fetchrow(
-            "INSERT INTO providers (id, user_id, name, base_url, api_key, kind, models) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb) "
-            "RETURNING id, name, base_url, api_key, kind, models, created_at, updated_at",
+            "INSERT INTO providers (id, user_id, name, base_url, api_key, kind, models, extra_body) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb) "
+            "RETURNING id, name, base_url, api_key, kind, models, extra_body, created_at, updated_at",
             pid, uid, name, base_url, _crypto.encrypt(api_key), kind, json.dumps(models or []),
+            json.dumps(extra_body) if extra_body else None,
         )
     return _row_to_provider(row) if row else None
 
@@ -1987,7 +2009,7 @@ async def get_builtin_provider(user_id: str, builtin_id: str) -> Optional[dict]:
     async with _pool_or_raise().acquire() as conn:
         row = await conn.fetchrow(
             "SELECT id, name, base_url, api_key, kind, models, "
-            "       is_builtin, builtin_id, created_at, updated_at "
+            "       is_builtin, builtin_id, extra_body, created_at, updated_at "
             "FROM providers WHERE user_id = $1 AND builtin_id = $2 AND is_builtin = true",
             uid, builtin_id,
         )
@@ -2063,6 +2085,13 @@ async def update_provider(
         sets.append(f"models = ${i}::jsonb")
         args.append(json.dumps(patch["models"]))
         i += 1
+    # extra_body: presence of the key = intent to set (null clears it), so the
+    # user can remove provider options, not just change them.
+    if "extra_body" in patch:
+        sets.append(f"extra_body = ${i}::jsonb")
+        eb = patch["extra_body"]
+        args.append(json.dumps(eb) if eb else None)
+        i += 1
     if not sets:
         return await get_provider(provider_id, user_id)
     sets.append("updated_at = now()")
@@ -2070,7 +2099,7 @@ async def update_provider(
     sql = (
         f"UPDATE providers SET {', '.join(sets)} "
         f"WHERE id = ${i} AND user_id = ${i+1} "
-        "RETURNING id, name, base_url, api_key, kind, models, created_at, updated_at"
+        "RETURNING id, name, base_url, api_key, kind, models, extra_body, created_at, updated_at"
     )
     async with _pool_or_raise().acquire() as conn:
         row = await conn.fetchrow(sql, *args)

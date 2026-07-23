@@ -301,6 +301,7 @@ export interface Provider {
   api_key: string;            // masked on the wire (e.g. "sk-a…b3c2")
   kind: string;               // "openai-compat"
   models: ProviderModel[];
+  extra_body?: Record<string, unknown> | null;  // merged into every request
   builtin?: boolean;          // true for the synthetic Cloudflare provider
   created_at?: string;
   updated_at?: string;

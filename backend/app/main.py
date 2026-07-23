@@ -811,9 +811,12 @@ async def me_providers_create(request: Request, user: dict = Depends(current_use
     models = body.get("models") or []
     if not isinstance(models, list):
         raise HTTPException(status_code=400, detail="models must be a list")
+    extra_body = body.get("extra_body")
+    if extra_body is not None and not isinstance(extra_body, dict):
+        raise HTTPException(status_code=400, detail="extra_body must be an object")
     p = await db.create_provider(
         user["id"], name=name, base_url=base_url, api_key=api_key,
-        kind=kind, models=models,
+        kind=kind, models=models, extra_body=extra_body or None,
     )
     if not p:
         raise HTTPException(status_code=500, detail="could not create provider")
@@ -855,6 +858,11 @@ async def me_providers_update(
         if not isinstance(body["models"], list):
             raise HTTPException(status_code=400, detail="models must be a list")
         patch["models"] = body["models"]
+    if "extra_body" in body:
+        eb = body["extra_body"]
+        if eb is not None and not isinstance(eb, dict):
+            raise HTTPException(status_code=400, detail="extra_body must be an object or null")
+        patch["extra_body"] = eb or None  # {} or null both clear it
     if not patch:
         raise HTTPException(status_code=400, detail="no valid fields to patch")
     p = await db.update_provider(provider_id, user["id"], patch)
