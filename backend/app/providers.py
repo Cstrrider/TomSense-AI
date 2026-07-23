@@ -465,7 +465,8 @@ async def stream_round(
                     reasoning = delta.get("reasoning") or delta.get("reasoning_content")
                     if reasoning and isinstance(reasoning, str):
                         yield ("reasoning", reasoning)
-                    for tc_chunk in (delta.get("tool_calls") or []):
+                    tc_chunks = delta.get("tool_calls") or []
+                    for tc_chunk in tc_chunks:
                         idx = tc_chunk.get("index", 0)
                         slot = accumulated_tools.setdefault(
                             idx, {"id": "", "name": "", "arguments": ""}
@@ -482,6 +483,15 @@ async def stream_round(
                             slot["arguments"] += args_frag
                         else:
                             slot["arguments"] = json.dumps(args_frag)
+                    if tc_chunks:
+                        # A tool call's arguments (e.g. a large write_file body)
+                        # stream as tool_call deltas, NOT visible content — so a
+                        # 1-2 min file write looks "silent" to the dispatcher's
+                        # stall-guard and gets falsely killed. Emit a heartbeat
+                        # so it sees the model is still producing tokens. The
+                        # dispatcher swallows it (resets the watchdog, forwards
+                        # nothing to the UI).
+                        yield ("heartbeat", None)
                     content = delta.get("content")
                     if content is None or content == "":
                         continue
@@ -677,6 +687,11 @@ async def dispatch_stream_round(
             await gen.aclose()
             break
         timeout = idle_t
+        # Heartbeat = the model is streaming tool-call arguments (e.g. a big
+        # file write). It already reset the watchdog above; swallow it so the
+        # long write isn't mistaken for a stall and nothing leaks to the UI.
+        if ev[0] == "heartbeat":
+            continue
         if ev[0] == "text":
             text_seen += ev[1]
         if ev[0] == "done":
@@ -743,6 +758,8 @@ async def dispatch_stream_round(
                             "model": _fb_str})
             return
         timeout = idle_t
+        if ev[0] == "heartbeat":
+            continue
         if ev[0] == "text":
             fb_text += ev[1]
         if ev[0] == "done":
