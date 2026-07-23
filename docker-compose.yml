@@ -132,6 +132,11 @@ services:
       # The compose dir, so the backend can read/write .mounts.json,
       # docker-compose.override.yml (project mounts) and deploy-targets.json.
       - ${TOMSENSE_HOST_COMPOSE_DIR:-.}:/host-compose:rw
+      # Shared folder — same host dir the sandbox writes to at /workspace/shared,
+      # so the backend can list/stream those files for the /files download UI.
+      # `z` = shared SELinux relabel (required on enforcing hosts, matches the
+      # project-mount convention in docker-compose.override.yml).
+      - ${TOMSENSE_SHARE_DIR:-./shared}:/shared:rw,z
     depends_on:
       tomsense-postgres:
         condition: service_healthy
@@ -192,6 +197,11 @@ services:
     # docker-compose.override.yml — manage them in Settings → Files → Mounts.
     volumes:
       - workspace:/workspace
+      # Shared folder — a real host dir so deliverables the agent writes to
+      # /workspace/shared land on the host (and in the /files download UI),
+      # instead of being trapped in the `workspace` named volume. `z` = shared
+      # SELinux relabel, matching the project mounts in the override file.
+      - ${TOMSENSE_SHARE_DIR:-./shared}:/workspace/shared:rw,z
     deploy:
       resources:
         limits:

@@ -94,6 +94,12 @@ export interface SandboxListing {
   entries: SandboxEntry[];
 }
 
+export interface SharedFile {
+  path: string;
+  size: number;
+  mtime: number;
+}
+
 export interface SandboxFileContent {
   path: string;
   content: string;

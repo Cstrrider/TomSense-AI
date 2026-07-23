@@ -19,6 +19,7 @@ import type {
   ProjectMount,
   SandboxFileContent,
   SandboxListing,
+  SharedFile,
   UploadResponse,
   UserArtifact,
   UserPrefs,
@@ -269,6 +270,25 @@ export async function setChatModel(chatId: string, model: string): Promise<Chat>
     method: 'PUT',
     body: JSON.stringify({ model })
   });
+}
+
+export async function listShared(): Promise<{ files: SharedFile[] }> {
+  return http<{ files: SharedFile[] }>('/me/shared');
+}
+
+/** Download one file from the shared folder (cookie-auth, streamed). */
+export async function downloadShared(path: string): Promise<void> {
+  const r = await fetch(`/me/shared/download?path=${encodeURIComponent(path)}`);
+  if (!r.ok) throw new Error(`download failed: ${r.status}`);
+  const blob = await r.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = path.split('/').pop() ?? 'download';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 export async function exportChat(chatId: string, format: 'md' | 'json'): Promise<void> {

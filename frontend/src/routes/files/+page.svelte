@@ -18,6 +18,8 @@
     sandboxRename,
     sandboxDelete,
     sandboxMkdir,
+    listShared,
+    downloadShared,
     listMounts,
     addMount,
     deleteMount,
@@ -29,6 +31,7 @@
   import {
     IconCheck,
     IconCopy,
+    IconDownload,
     IconEdit,
     IconFile,
     IconFileText,
@@ -46,12 +49,35 @@
     Project,
     ProjectMount,
     SandboxEntry,
+    SharedFile,
     UserArtifact,
     UserUpload,
   } from '$lib/types';
 
-  type Tab = 'uploads' | 'artifacts' | 'sandbox' | 'mounts';
+  type Tab = 'uploads' | 'artifacts' | 'sandbox' | 'shared' | 'mounts';
   let tab = $state<Tab>('uploads');
+
+  // ─── Shared folder (host-backed; code mode drops deliverables here) ──────
+  let sharedFiles = $state<SharedFile[]>([]);
+  let sharedLoading = $state(false);
+  async function refreshShared() {
+    sharedLoading = true;
+    try {
+      const r = await listShared();
+      sharedFiles = r.files;
+    } catch (e) {
+      toast.error(`Shared: ${(e as Error).message}`);
+    } finally {
+      sharedLoading = false;
+    }
+  }
+  async function onSharedDownload(f: SharedFile) {
+    try {
+      await downloadShared(f.path);
+    } catch (e) {
+      toast.error(`Download failed: ${(e as Error).message}`);
+    }
+  }
 
   // ─── Multi-select ───────────────────────────────────────────────────────
   // One mode toggle, three per-tab selection sets. Cancelling clears all
@@ -550,6 +576,7 @@
     loadedTabs = new Set([...loadedTabs, tab]);
     if (tab === 'artifacts') refreshArtifacts();
     else if (tab === 'sandbox') refreshSandbox('.');
+    else if (tab === 'shared') refreshShared();
     else if (tab === 'mounts') refreshMounts();
   });
 
@@ -609,6 +636,16 @@
       onclick={() => (tab = 'sandbox')}
     >
       <IconFolder size={14} /> Sandbox
+    </button>
+    <button
+      class="tab"
+      class:active={tab === 'shared'}
+      role="tab"
+      aria-selected={tab === 'shared'}
+      onclick={() => (tab = 'shared')}
+    >
+      <IconLayers size={14} /> Shared
+      {#if sharedFiles.length > 0}<span class="count">{sharedFiles.length}</span>{/if}
     </button>
     <button
       class="tab"
@@ -1029,6 +1066,58 @@
             {/if}
           </ul>
         {/if}
+      {/if}
+    </div>
+  {/if}
+
+  <!-- ──────── SHARED ──────── -->
+  {#if tab === 'shared'}
+    <div class="pane">
+      <div class="pane-head">
+        <div class="path">
+          <IconLayers size={14} />
+          <span class="mono">/workspace/shared</span>
+        </div>
+        <div class="row-actions">
+          <button class="icon-btn" onclick={refreshShared} title="Refresh" aria-label="Refresh">
+            <IconRefresh size={14} />
+          </button>
+        </div>
+      </div>
+      <p class="muted">
+        Files code mode saves to <code class="mono">/workspace/shared/</code> — a
+        host-backed folder, so deliverables persist and download here without
+        anyone pulling them from the container by hand.
+      </p>
+      {#if sharedLoading && sharedFiles.length === 0}
+        <p class="muted">Loading…</p>
+      {:else if sharedFiles.length === 0}
+        <p class="muted">
+          Nothing here yet. Ask a code chat to write its output to
+          <code class="mono">/workspace/shared/</code>.
+        </p>
+      {:else}
+        <ul class="rows">
+          {#each sharedFiles as f (f.path)}
+            <li>
+              <span class="row-icon"><IconFile size={18} /></span>
+              <div class="row-meta">
+                <span class="row-title mono">{f.path}</span>
+                <div class="row-sub dim">{formatSize(f.size)}</div>
+              </div>
+              <div class="row-actions">
+                <button
+                  class="icon-btn"
+                  title="Download"
+                  aria-label="Download"
+                  onclick={() => onSharedDownload(f)}
+                >
+                  <IconDownload size={14} />
+                </button>
+              </div>
+            </li>
+          {/each}
+        </ul>
       {/if}
     </div>
   {/if}

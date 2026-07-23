@@ -1584,6 +1584,53 @@ async def me_artifacts(user: dict = Depends(current_user)):
     return {"artifacts": await db.list_user_artifacts(user["id"])}
 
 
+# ─── Shared folder ──────────────────────────────────────────────────────────
+# Host-backed dir bind-mounted into the sandbox at /workspace/shared and into
+# this backend at /shared. Code mode drops deliverables there; the /files UI
+# lists + downloads them so nothing has to be pulled from the container by hand.
+_SHARE_DIR = "/shared"
+
+
+@app.get("/me/shared")
+async def me_shared(user: dict = Depends(current_user)):
+    """List every regular file in the shared folder (recursively), newest first."""
+    base = os.path.realpath(_SHARE_DIR)
+    out = []
+    try:
+        for root, _dirs, files in os.walk(base):
+            for name in files:
+                fp = os.path.join(root, name)
+                try:
+                    st = os.stat(fp)
+                except OSError:
+                    continue
+                out.append({
+                    "path": os.path.relpath(fp, base),
+                    "size": st.st_size,
+                    "mtime": st.st_mtime,
+                })
+    except FileNotFoundError:
+        pass
+    out.sort(key=lambda f: f["mtime"], reverse=True)
+    return {"files": out}
+
+
+@app.get("/me/shared/download")
+async def me_shared_download(path: str, user: dict = Depends(current_user)):
+    """Stream one file from the shared folder. Traversal-guarded: the resolved
+    real path must stay inside /shared (blocks ../ and symlink escapes)."""
+    base = os.path.realpath(_SHARE_DIR)
+    fp = os.path.realpath(os.path.join(base, path))
+    if fp != base and not fp.startswith(base + os.sep):
+        raise HTTPException(status_code=400, detail="invalid path")
+    if not os.path.isfile(fp):
+        raise HTTPException(status_code=404, detail="not found")
+    return FileResponse(
+        fp, filename=os.path.basename(fp),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @app.get("/artifacts/{artifact_id}")
 async def artifact_get(artifact_id: int, user: dict = Depends(current_user)):
     a = await db.get_user_artifact(user["id"], artifact_id)
