@@ -1173,7 +1173,12 @@ async def run_chat(
 
         # Dispatch each tool and yield a chip
         for tc in tool_calls:
-            if tc["name"] not in ALLOWED_TOOL_NAMES:
+            # Remote MCP tools are named mcp__<server>__<tool> and resolved
+            # dynamically per user (not in the static allowlist) — let them
+            # through to dispatch(), which proxies them over JSON-RPC. Without
+            # this they were advertised to the model but silently skipped, so
+            # the model would hallucinate results instead of calling the server.
+            if tc["name"] not in ALLOWED_TOOL_NAMES and not tc["name"].startswith("mcp__"):
                 print(f"[chat] skipping unknown tool '{tc['name']}'")
                 continue
 
