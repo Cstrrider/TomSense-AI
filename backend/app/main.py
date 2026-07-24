@@ -1423,9 +1423,15 @@ async def chats_create(
             model = None
     # Fall back to the env default for the appropriate kind.
     model = model or (settings.model_coder if body.code else settings.model_chat)
-    return await db.create_chat(
+    chat = await db.create_chat(
         user_id=user["id"], model=model, title=body.title, is_code=body.code,
     )
+    # Optionally file it under a project straight away (new-chat-in-project).
+    if body.project_id and chat:
+        updated = await db.set_chat_project(chat["id"], user["id"], body.project_id)
+        if updated:
+            chat = updated
+    return chat
 
 
 @app.get("/chats/search")

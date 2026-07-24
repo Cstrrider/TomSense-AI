@@ -47,6 +47,8 @@ class CreateChatRequest(BaseModel):
     model: Optional[str] = None
     # Create a code-mode chat — the coding agent with file/bash tools.
     code: bool = False
+    # Assign the new chat to a project on creation (from "new chat in project").
+    project_id: Optional[str] = None
 
 
 class RenameChatRequest(BaseModel):

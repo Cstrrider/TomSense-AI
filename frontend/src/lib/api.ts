@@ -137,10 +137,13 @@ export async function listChats(): Promise<Chat[]> {
   return j.chats;
 }
 
-export async function createChat(code = false, model?: string): Promise<Chat> {
+export async function createChat(
+  code = false, model?: string, projectId?: string | null
+): Promise<Chat> {
   const body: Record<string, unknown> = {};
   if (code) body.code = true;
   if (model) body.model = model;
+  if (projectId) body.project_id = projectId;
   return http<Chat>('/chats', {
     method: 'POST',
     body: JSON.stringify(body)

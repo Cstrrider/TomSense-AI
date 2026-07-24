@@ -171,14 +171,16 @@
       if (!groups[p]) groups[p] = [];
       groups[p].push(c);
     }
-    // Real projects alphabetical first, then ungrouped chats last
-    const named = Object.keys(groups)
-      .filter((k) => k !== '')
-      .sort((a, b) => projectName(a).localeCompare(projectName(b)));
-    const order: string[] = [...named, ''];
-    return order
-      .map((k) => ({ id: k, name: k ? projectName(k) : '', chats: groups[k] || [] }))
-      .filter((g) => g.chats.length);
+    // EVERY project shows (even with no chats yet) so a freshly-created one is
+    // visible + you can start a chat in it; alphabetical. Ungrouped chats last.
+    const named = app.projects
+      .slice()
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((p) => ({ id: p.id, name: p.name, chats: groups[p.id] || [] }));
+    const ungrouped = (groups[''] || []).length
+      ? [{ id: '', name: '', chats: groups[''] }]
+      : [];
+    return [...named, ...ungrouped];
   });
 
   /** Which project sections are collapsed (default open), keyed by project id */
@@ -349,6 +351,13 @@
     goto('/');
   }
 
+  // Start a new chat pre-assigned to a project — the welcome screen reads
+  // ?project=<id> and tags the chat when it's created on first message.
+  function newChatInProject(projectId: string) {
+    app.sidebarOpen = false;
+    goto('/?project=' + encodeURIComponent(projectId));
+  }
+
   // Code chat: the welcome screen reads ?code=1 and creates a code-mode chat.
   function newCodeChat() {
     app.sidebarOpen = false;
@@ -499,6 +508,14 @@
               <IconLayers size={12} />
               <span>{group.name}</span>
               <span class="count">{group.chats.length}</span>
+            </button>
+            <button
+              class="project-edit"
+              title="New chat in this project"
+              aria-label="New chat in this project"
+              onclick={() => newChatInProject(group.id)}
+            >
+              <IconPlus size={12} />
             </button>
             {#if app.projects.some((p) => p.id === group.id)}
               <button

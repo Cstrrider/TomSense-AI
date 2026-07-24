@@ -19,6 +19,8 @@
   // Code mode: ?code=1 (from the sidebar's "Code chat" button) creates the
   // next chat as a coding-agent chat.
   let codeMode = $state(false);
+  // ?project=<id> — new chat pre-assigned to a project (sidebar "+ new chat").
+  let projectId = $state<string | null>(null);
   // Which model code chats will use — the Settings → Models → Code Mode row
   // (prefs.tool_models.code_mode) is the single source of truth; chats are
   // created UNPINNED so they keep following that setting. Shown here as a
@@ -38,7 +40,9 @@
   // when the new-chat page is already open. (onMount fires once and missed a
   // same-route /?code=1 navigation, so the button looked dead.)
   afterNavigate(() => {
-    codeMode = new URLSearchParams(location.search).get('code') === '1';
+    const qs = new URLSearchParams(location.search);
+    codeMode = qs.get('code') === '1';
+    projectId = qs.get('project');
   });
 
   // "Share to TomSense": MainActivity stashes the shared payload and opens
@@ -96,7 +100,7 @@
   async function send(text: string, uploads: UploadResponse[] = []) {
     busy = true;
     try {
-      const chat = await createChat(codeMode);
+      const chat = await createChat(codeMode, undefined, projectId);
       await app.refreshChats();
       const pendingPersona = sessionStorage.getItem('pending-persona');
       if (pendingPersona) {
