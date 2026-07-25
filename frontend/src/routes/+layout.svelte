@@ -3,6 +3,7 @@
   import { onMount } from 'svelte';
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
+  import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
   import Sidebar from '$lib/components/Sidebar.svelte';
   import Toaster from '$lib/components/Toaster.svelte';
   import { app } from '$lib/stores.svelte';
@@ -97,6 +98,7 @@
 {/if}
 
 <Toaster />
+<ConfirmDialog />
 
 <style>
   .shell {

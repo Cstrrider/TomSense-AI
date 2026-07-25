@@ -882,6 +882,11 @@ async def tool_fetch_page(args: dict) -> str:
                 url = str(r.next_request.url) if r.next_request else r.headers["location"]
                 continue
             break
+        else:
+            # Loop ran all 5 hops still redirecting. `r` is a 3xx, and httpx
+            # only raises on 4xx/5xx — so without this it fell through to the
+            # content-type check and reported the misleading "Not HTML content".
+            return f"Fetch failed: too many redirects (5 hops, still redirecting at {url})"
         r.raise_for_status()
         if "text/html" not in r.headers.get("content-type", ""):
             return f"Not HTML content at {url}"

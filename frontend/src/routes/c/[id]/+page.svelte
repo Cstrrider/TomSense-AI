@@ -17,9 +17,11 @@
     getLiveRun,
     listArtifacts,
     regenerateLast,
+    stopChatRun,
     streamChat,
     truncateFrom,
-    type ApproveEdit
+    type ApproveEdit,
+    type StreamEvent
   } from '$lib/api';
   import { toast } from '$lib/toast.svelte';
   import type { Message as Msg, UploadRef, UploadResponse } from '$lib/types';
@@ -143,15 +145,7 @@
       const chat = await getChat(id);
       title = chat.title;
       followups = [];
-      messages = (chat.messages ?? [])
-        .filter((m) => m.role === 'user' || m.role === 'assistant')
-        .map((m) => ({
-          role: m.role,
-          content: m.content,
-          uploads: m.uploads ?? [],
-          dbId: m.id,
-          meta: m.meta ?? null
-        }));
+      messages = toLocalMessages(chat.messages);
       // A reply is still generating — drop any trailing assistant turn the
       // fetch happened to catch; the run re-streams it in full below.
       if (
@@ -162,7 +156,7 @@
         messages = messages.slice(0, -1);
       }
       await tick();
-      scrollToBottom();
+      stickToBottom();
 
       // Arrived from chat search (/c/{id}?m={messageId}) — jump to that message.
       const jumpParam = new URLSearchParams(location.search).get('m');
@@ -254,8 +248,53 @@
     history.replaceState(null, '', location.pathname);
   }
 
-  function scrollToBottom() {
-    if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
+  // Scrolling is driven per streamed token, and reading scrollHeight forces a
+  // synchronous layout flush — thousands of them over a long code run. Coalesce
+  // to one per animation frame, and DON'T yank the view back down if the user
+  // has scrolled up to read: that made earlier output unreadable while a long
+  // run streamed.
+  let scrollPending = false;
+  let userScrolledUp = $state(false);
+  const AT_BOTTOM_SLACK = 80; // px of tolerance for "still at the bottom"
+
+  function onScrollContainer() {
+    if (!scrollEl) return;
+    const distance = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight;
+    userScrolledUp = distance > AT_BOTTOM_SLACK;
+  }
+
+  function scrollToBottom(force = false) {
+    if (!scrollEl) return;
+    if (userScrolledUp && !force) return;
+    if (scrollPending) return;
+    scrollPending = true;
+    requestAnimationFrame(() => {
+      scrollPending = false;
+      if (!scrollEl) return;
+      if (userScrolledUp && !force) return;
+      scrollEl.scrollTop = scrollEl.scrollHeight;
+    });
+  }
+
+  /** Jump back to the live edge — used by the "scroll to bottom" affordance
+   *  and after the user sends, where following the reply is always intended. */
+  function stickToBottom() {
+    userScrolledUp = false;
+    scrollToBottom(true);
+  }
+
+  /** Server chat messages → the local render shape. Shared by load() and
+   *  refreshFromServer(), which had identical copies. */
+  function toLocalMessages(raw: Awaited<ReturnType<typeof getChat>>['messages'] | undefined): Msg[] {
+    return (raw ?? [])
+      .filter((m) => m.role === 'user' || m.role === 'assistant')
+      .map((m) => ({
+        role: m.role,
+        content: m.content,
+        uploads: m.uploads ?? [],
+        dbId: m.id,
+        meta: m.meta ?? null
+      }));
   }
 
   /**
@@ -267,15 +306,7 @@
     try {
       const chat = await getChat(chatId);
       title = chat.title;
-      messages = (chat.messages ?? [])
-        .filter((m) => m.role === 'user' || m.role === 'assistant')
-        .map((m) => ({
-          role: m.role,
-          content: m.content,
-          uploads: m.uploads ?? [],
-          dbId: m.id,
-          meta: m.meta ?? null
-        }));
+      messages = toLocalMessages(chat.messages);
     } catch (e) {
       console.warn('refresh failed', e);
     }
@@ -287,7 +318,13 @@
    *  Returns true if it recovered (caller then skips the error text). */
   async function recoverDroppedStream(): Promise<boolean> {
     if (!chatId) return false;
-    for (let i = 0; i < 12; i++) {
+    // A code run routinely goes 10+ minutes. The old fixed 12 × 2s gave up
+    // after 24 SECONDS, rendered a stale message, and left the run generating
+    // invisibly. Back off 2s → 15s and keep watching for ~20 minutes.
+    const DEADLINE = Date.now() + 20 * 60 * 1000;
+    let delay = 2000;
+    let lastRunId: string | null = null;
+    while (Date.now() < DEADLINE) {
       let runId: string | null;
       try {
         runId = await getLiveRun(chatId);
@@ -298,34 +335,29 @@
         await refreshFromServer(); // run finished → persisted reply is authoritative
         return true;
       }
-      await new Promise((r) => setTimeout(r, 2000)); // still generating — wait
+      lastRunId = runId;
+      await new Promise((r) => setTimeout(r, delay)); // still generating — wait
+      delay = Math.min(delay * 1.5, 15000);
     }
     await refreshFromServer();
+    // Still alive at the deadline: rejoin the live stream rather than leaving
+    // a half-finished reply on screen.
+    if (lastRunId) void attachRound(lastRunId);
     return true;
   }
 
-  /** Core streaming pass. Assumes the local messages array already contains
-   *  the new user message at index N and an empty assistant placeholder at
-   *  index N+1. Streams into the placeholder. */
-  async function streamRound(uploadIds: string[] | null) {
-    const assistantIdx = messages.length - 1;
-    busy = true;
-    abortController = new AbortController();
+  /** Consume a reply stream into `messages[assistantIdx]`.
+   *
+   *  Shared by streamRound (a new turn) and attachRound (reconnecting to a run
+   *  already in flight) — these were two copies that drifted apart, so a
+   *  reconnected reply skipped the counter refreshes entirely. */
+  async function consumeStream(
+    gen: AsyncGenerator<StreamEvent, void, void>,
+    assistantIdx: number
+  ) {
     let acc = '';
     try {
-      const history = messages.slice(0, -1).map((m) => ({
-        role: m.role,
-        content: m.content
-      }));
-      for await (const ev of streamChat(
-        history,
-        chatId,
-        uploadIds && uploadIds.length ? uploadIds : null,
-        abortController.signal,
-        undefined,
-        onApprove,
-        { think: thinkMode }
-      )) {
+      for await (const ev of gen) {
         if (
           (ev.type === 'text' || ev.type === 'reasoning' || ev.type === 'chip' ||
             ev.type === 'notice') && ev.text
@@ -364,29 +396,63 @@
           messages[assistantIdx] = { role: 'assistant', content: acc };
         }
       }
+    }
+  }
+
+  /** Teardown + refreshes common to every finished round. Token/neuron/usage
+   *  counters are refreshed here for BOTH paths: a reply you reconnected to
+   *  spends exactly the same budget as one you watched from the start. */
+  function finishRound() {
+    // A turn that ended/errored while an approval card was open: drop it.
+    pendingApproval?.resolve('reject');
+    toolStatus = '';
+    busy = false;
+    abortController = null;
+    artifactsRefreshKey++;
+    if (chatId) void refreshArtifactCount(chatId);
+    setTimeout(() => loadFollowups(), 900);
+    app.refreshMe();
+    app.refreshNeurons();
+    app.refreshUsage();
+    setTimeout(() => app.refreshNeurons(), 4000);
+    setTimeout(() => app.refreshUsage(), 4000);
+    setTimeout(() => {
+      app.refreshChats().then(() => {
+        const c = app.chats.find((c) => c.id === chatId);
+        if (c) title = c.title;
+      });
+    }, 1800);
+    // Pick up the saved dbId for this assistant message so the user can
+    // immediately edit prior turns without a manual reload.
+    setTimeout(() => refreshFromServer(), 600);
+  }
+
+  /** Core streaming pass. Assumes the local messages array already contains
+   *  the new user message at index N and an empty assistant placeholder at
+   *  index N+1. Streams into the placeholder. */
+  async function streamRound(uploadIds: string[] | null) {
+    const assistantIdx = messages.length - 1;
+    busy = true;
+    abortController = new AbortController();
+    try {
+      const history = messages.slice(0, -1).map((m) => ({
+        role: m.role,
+        content: m.content
+      }));
+      await consumeStream(
+        streamChat(
+          history,
+          chatId,
+          uploadIds && uploadIds.length ? uploadIds : null,
+          abortController.signal,
+          undefined,
+          onApprove,
+          { think: thinkMode }
+        ),
+        assistantIdx
+      );
     } finally {
-      // A turn that ended/errored while an approval card was open: drop it.
-      pendingApproval?.resolve('reject');
-      toolStatus = '';
-      busy = false;
-      abortController = null;
-      artifactsRefreshKey++;
-      if (chatId) void refreshArtifactCount(chatId);
-      setTimeout(() => loadFollowups(), 900);
-      app.refreshMe();
-      app.refreshNeurons();
-      app.refreshUsage();
-      setTimeout(() => app.refreshNeurons(), 4000);
-      setTimeout(() => app.refreshUsage(), 4000);
-      setTimeout(() => {
-        app.refreshChats().then(() => {
-          const c = app.chats.find((c) => c.id === chatId);
-          if (c) title = c.title;
-        });
-      }, 1800);
-      // Pick up the saved dbId for this assistant message so the user can
-      // immediately edit prior turns without a manual reload.
-      setTimeout(() => refreshFromServer(), 600);
+      finishRound();
     }
   }
 
@@ -398,56 +464,13 @@
     const assistantIdx = messages.length - 1;
     busy = true;
     abortController = new AbortController();
-    let acc = '';
     try {
-      for await (const ev of attachToRun(runId, abortController.signal, onApprove)) {
-        if (
-          (ev.type === 'text' || ev.type === 'reasoning' || ev.type === 'chip' ||
-            ev.type === 'notice') && ev.text
-        ) {
-          acc += ev.text;
-          streamActivityAt = Date.now();
-          messages[assistantIdx] = { ...messages[assistantIdx], role: 'assistant', content: acc };
-          scrollToBottom();
-        } else if (ev.type === 'stats') {
-          // Terminal per-reply stats (P6) — out-of-band, rendered as a footer.
-          messages[assistantIdx] = {
-            ...messages[assistantIdx],
-            role: 'assistant',
-            content: acc,
-            meta: {
-              stats_text: (ev.text ?? '').replace(/^\n\n---\n/, '').trim(),
-              stats: ev.data
-            }
-          };
-        } else if (ev.type === 'tool_status') {
-          toolStatus = ev.text ?? '';
-          streamActivityAt = Date.now();
-          if (toolStatus) scrollToBottom();
-        } else if (ev.type === 'error' && ev.error) {
-          acc += `\n\n*[error: ${ev.error}]*`;
-          messages[assistantIdx] = { role: 'assistant', content: acc };
-        }
-      }
-    } catch (e) {
-      if ((e as Error).name !== 'AbortError') {
-        // A dropped connection isn't a lost reply — try to recover the
-        // detached run's persisted result before surfacing an error.
-        const recovered = await recoverDroppedStream();
-        if (!recovered) {
-          acc += `\n\n*[stream error: ${(e as Error).message}]*`;
-          messages[assistantIdx] = { role: 'assistant', content: acc };
-        }
-      }
+      await consumeStream(
+        attachToRun(runId, abortController.signal, onApprove),
+        assistantIdx
+      );
     } finally {
-      pendingApproval?.resolve('reject');
-      toolStatus = '';
-      busy = false;
-      abortController = null;
-      artifactsRefreshKey++;
-      if (chatId) void refreshArtifactCount(chatId);
-      setTimeout(() => loadFollowups(), 900);
-      setTimeout(() => refreshFromServer(), 600);
+      finishRound();
     }
   }
 
@@ -456,7 +479,7 @@
     messages = [...messages, { role: 'user', content: text, uploads: uploadsForRender }];
     messages = [...messages, { role: 'assistant', content: '' }];
     await tick();
-    scrollToBottom();
+    stickToBottom();
     await streamRound(uploadIds);
   }
 
@@ -477,7 +500,7 @@
     messages = messages.slice(0, lastIdx);
     messages = [...messages, { role: 'assistant', content: '' }];
     await tick();
-    scrollToBottom();
+    stickToBottom();
     await streamRound(null);
   }
 
@@ -515,6 +538,9 @@
   function onStop() {
     pendingApproval?.resolve('reject');
     abortController?.abort();
+    // Aborting only ends OUR stream — the run is detached and would keep
+    // generating (and persist its reply) regardless. Tell the server too.
+    if (chatId) void stopChatRun(chatId);
   }
 
   function onComposerSend(text: string, uploads: UploadResponse[]) {
@@ -572,8 +598,13 @@
   onclose={() => (artifactsOpen = false)}
 />
 
-<div class="chat" bind:this={scrollEl}>
-  {#each messages as msg, i (i)}
+<div class="chat" bind:this={scrollEl} onscroll={onScrollContainer}>
+  <!-- Keyed by dbId, not index: onEditMessage/onRegenerate slice the array, so
+       an index key let Svelte reuse a Message instance for a DIFFERENT message
+       and its internal state (edit mode, open actions, expanded <details>)
+       leaked onto the wrong turn. Streaming placeholders have no dbId yet and
+       fall back to the index. -->
+  {#each messages as msg, i (msg.dbId ?? `idx:${i}`)}
     <Message
       role={msg.role}
       content={msg.content}

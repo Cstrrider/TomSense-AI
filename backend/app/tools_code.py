@@ -12,6 +12,7 @@ import shlex
 
 import httpx
 
+from .cf import get_client
 from .config import settings
 
 # Per-request secret vault, set by run_chat for the current user. Values are
@@ -66,10 +67,17 @@ async def _call(path: str, payload: dict) -> dict:
         env = get_secret_env()
         if env:
             payload = {**payload, "env": {**env, **(payload.get("env") or {})}}
-    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        r = await client.post(
-            f"{settings.sandbox_url}{path}", json=payload, headers=_headers()
-        )
+    # Shared pooled client (as everywhere else in the codebase) rather than a
+    # fresh AsyncClient per call: a 40-round code run makes hundreds of these,
+    # and building/tearing down a connection pool each time paid full TCP
+    # setup on every read_file/grep/run_bash. The timeout is passed per-request
+    # because the sandbox's is much longer than the shared client's default.
+    r = await get_client().post(
+        f"{settings.sandbox_url}{path}",
+        json=payload,
+        headers=_headers(),
+        timeout=_TIMEOUT,
+    )
     if r.status_code >= 400:
         try:
             detail = r.json().get("detail")

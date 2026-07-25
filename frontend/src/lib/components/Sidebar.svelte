@@ -12,6 +12,7 @@
     updateProject,
     deleteProject
   } from '$lib/api';
+  import { confirmDialog } from '$lib/confirm.svelte';
   import { toast } from '$lib/toast.svelte';
   import {
     IconPlus,
@@ -112,7 +113,13 @@
   async function deleteSelected() {
     const ids = [...selected];
     if (ids.length === 0) return;
-    if (!confirm(`Delete ${ids.length} chat${ids.length === 1 ? '' : 's'}? This cannot be undone.`)) return;
+    const ok = await confirmDialog({
+      message: `Delete ${ids.length} chat${ids.length === 1 ? '' : 's'}?`,
+      detail: 'This cannot be undone.',
+      confirmLabel: 'Delete',
+      danger: true
+    });
+    if (!ok) return;
     deleting = true;
     try {
       await deleteChats(ids);
@@ -319,7 +326,13 @@
   async function removeProject() {
     const p = projEditor?.editing;
     if (!p) return;
-    if (!confirm(`Delete project "${p.name}"? Chats inside it are kept and become ungrouped.`)) return;
+    const ok = await confirmDialog({
+      message: `Delete project "${p.name}"?`,
+      detail: 'Chats inside it are kept and become ungrouped.',
+      confirmLabel: 'Delete',
+      danger: true
+    });
+    if (!ok) return;
     projSaving = true;
     try {
       await deleteProject(p.id);
@@ -336,7 +349,13 @@
   async function onDelete(c: Chat, e: MouseEvent) {
     e.stopPropagation();
     menuFor = null;
-    if (!confirm('Delete this chat? This cannot be undone.')) return;
+    const ok = await confirmDialog({
+      message: 'Delete this chat?',
+      detail: 'This cannot be undone.',
+      confirmLabel: 'Delete',
+      danger: true
+    });
+    if (!ok) return;
     try {
       await deleteChat(c.id);
       await app.refreshChats();

@@ -12,6 +12,9 @@ so an in-memory dict of pending futures is sufficient; the SSE request and the
 """
 
 import asyncio
+import uuid
+from dataclasses import dataclass
+from typing import Optional
 
 # Tools the model may call but the SERVER never executes — they are fulfilled
 # by the device. Kept here (not tools.py DISPATCH) so chat.py can intercept
@@ -26,23 +29,48 @@ CLIENT_TOOL_NAMES = frozenset({
     "get_device_status", "play_music",
 })
 
-# call_id -> Future awaiting the device's result.
-_PENDING: dict[str, asyncio.Future] = {}
+@dataclass
+class _Pending:
+    future: asyncio.Future
+    # Who is allowed to answer this call. The approve_edit / deploy_project
+    # gates ride the same rendezvous, so answering someone else's call means
+    # approving their live rebuild — the ticket must be owner-bound.
+    user_id: Optional[str]
+    run_id: Optional[str]
 
 
-async def request_client_tool(call_id: str, timeout: float = 120.0) -> str:
-    """Register a pending client-tool call and block until the device POSTs
-    its result to /chat/tool_result, or the timeout elapses.
+# ticket -> pending call. The ticket is minted HERE, server-side, and is the
+# only id the device ever sees. Deliberately NOT the model-supplied tool-call
+# id: those are `call_0`, `call_1`, `recovered_write_file`, … so two concurrent
+# runs collide and one turn's approval resolves the other's pending edit.
+_PENDING: dict[str, _Pending] = {}
+
+
+def open_client_call(user_id: Optional[str] = None, run_id: Optional[str] = None) -> str:
+    """Register a pending client-tool call and return its ticket.
+
+    Split from the await so the caller can put the ticket into the SSE event
+    before blocking on the answer, with no window where the device could reply
+    to an unregistered ticket.
+    """
+    loop = asyncio.get_running_loop()
+    ticket = uuid.uuid4().hex
+    _PENDING[ticket] = _Pending(loop.create_future(), user_id, run_id)
+    return ticket
+
+
+async def await_client_call(ticket: str, timeout: float = 120.0) -> str:
+    """Block until the device POSTs a result for `ticket`, or time out.
 
     Always returns a string (the tool result the model reads) — on timeout or
     cancellation it returns an explanatory message so the model can react
     gracefully rather than the turn erroring out.
     """
-    loop = asyncio.get_running_loop()
-    fut: asyncio.Future = loop.create_future()
-    _PENDING[call_id] = fut
+    pending = _PENDING.get(ticket)
+    if pending is None:
+        return "(Internal error: this tool call was never registered.)"
     try:
-        return await asyncio.wait_for(fut, timeout=timeout)
+        return await asyncio.wait_for(pending.future, timeout=timeout)
     except asyncio.TimeoutError:
         return (
             "(No response from the user's device — this tool is unavailable "
@@ -53,17 +81,23 @@ async def request_client_tool(call_id: str, timeout: float = 120.0) -> str:
         # SSE connection dropped before the device answered.
         return "(The request was cancelled before the device responded.)"
     finally:
-        _PENDING.pop(call_id, None)
+        _PENDING.pop(ticket, None)
 
 
-def resolve_client_tool(call_id: str, result: str) -> bool:
+def resolve_client_tool(
+    ticket: str, result: str, user_id: Optional[str] = None
+) -> bool:
     """Called by POST /chat/tool_result — wakes the awaiting run_chat.
 
-    Returns False when no call is pending for that id (already resolved,
-    timed out, or never existed).
+    Returns False when no call is pending for that ticket (already resolved,
+    timed out, never existed) or when `user_id` isn't the caller who opened
+    it. A mismatch is reported as "not pending" rather than "forbidden" so a
+    guessed ticket can't be distinguished from an expired one.
     """
-    fut = _PENDING.get(call_id)
-    if fut is None or fut.done():
+    pending = _PENDING.get(ticket)
+    if pending is None or pending.future.done():
         return False
-    fut.set_result(result)
+    if pending.user_id is not None and user_id != pending.user_id:
+        return False
+    pending.future.set_result(result)
     return True

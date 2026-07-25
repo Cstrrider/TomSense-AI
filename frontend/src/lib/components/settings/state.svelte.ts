@@ -54,6 +54,7 @@ import { getCodeModeModels } from '$lib/codeModels';
 import { buildToolOptions } from '$lib/modelOptions';
 import { getInstanceUrl, setInstanceUrl } from '$lib/clienttools';
 import { setThemeChoice, type ThemeChoice } from '$lib/theme';
+import { confirmDialog } from '$lib/confirm.svelte';
 import { toast } from '$lib/toast.svelte';
 import type {
   Credentials,
@@ -1182,7 +1183,13 @@ export async function loadUploads() {
 }
 
 export async function onDeleteUpload(u: UserUpload) {
-  if (!confirm(`Delete ${u.filename}?\nThis removes the ${u.indexed ? 'document AND its RAG index' : 'file'}.`)) return;
+  const ok = await confirmDialog({
+    message: `Delete ${u.filename}?`,
+    detail: `This removes the ${u.indexed ? 'document AND its RAG index' : 'file'}.`,
+    confirmLabel: 'Delete',
+    danger: true
+  });
+  if (!ok) return;
   try {
     await deleteUserUpload(u.id);
     S.uploads = S.uploads.filter((x) => x.id !== u.id);

@@ -28,6 +28,10 @@ class LiveRun:
         # Owner of the run — reconnects must present the same user. Set for
         # every run (ephemeral chats have no chat_id to check ownership via).
         self.user_id = user_id
+        # The detached task driving this run. Held so the generation can
+        # actually be STOPPED: aborting the client's SSE only ends the
+        # streaming, the server-side run carries on and persists its reply.
+        self.task: Optional[asyncio.Task] = None
         # Ordered log of everything run_chat yielded: str text or dict events.
         self.chunks: list = []
         self.done = False
@@ -100,6 +104,27 @@ def live_run_for_chat(chat_id: str) -> Optional[LiveRun]:
     """The chat's current run — only while it's still streaming."""
     run = _RUNS.get(_RUN_BY_CHAT.get(chat_id, ""))
     return run if (run is not None and not run.done) else None
+
+
+async def cancel_run(run: LiveRun, timeout: float = 5.0) -> bool:
+    """Cancel a run's detached task and wait for it to unwind.
+
+    Returns True if a task was actually cancelled. `_run_generation` has a
+    `finally` that calls finish()+retire_run(), so the run is marked done and
+    evicted either way; a cancelled run does NOT persist its partial reply,
+    which is the intended meaning of "stop" / "superseded".
+    """
+    task = run.task
+    if task is None or task.done():
+        return False
+    task.cancel()
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+    except (asyncio.CancelledError, asyncio.TimeoutError):
+        pass
+    except Exception:
+        pass
+    return True
 
 
 def retire_run(run: LiveRun) -> None:

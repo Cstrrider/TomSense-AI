@@ -161,6 +161,17 @@ def _headers(provider: dict) -> dict:
     }
 
 
+# Chat-template control tokens some open-weight models emit verbatim when the
+# server doesn't strip them. Sent as `stop` on BOTH the streaming and
+# non-streaming paths — the streaming path used to rely entirely on
+# strip_template_tokens after the fact, which is why leaked tokens kept
+# surfacing mid-stream (they're only removed once the chunk is already sent).
+STOP_SEQUENCES: tuple[str, ...] = (
+    "<|end|>", "<|start|>", "<|endoftext|>", "<eot_id>",
+    "<|im_end|>", "<|assistant|>", "<|channel|>",
+)
+
+
 def _session_headers(provider: dict, session_id: Optional[str]) -> dict:
     """Provider-specific "pin this conversation to the cache-holding instance"
     header, so a multi-round chat keeps landing on the same prefix cache and
@@ -323,10 +334,7 @@ async def chat_complete(
                             flatten_vision=provider.get("id") == CF_BUILTIN_ID,
                             is_reasoning=caps["reasoning"], sees_images=caps["vision"])
     _apply_extra_body(payload, provider)
-    payload["stop"] = [
-        "<|end|>", "<|start|>", "<|endoftext|>", "<eot_id>",
-        "<|im_end|>", "<|assistant|>", "<|channel|>",
-    ]
+    payload["stop"] = list(STOP_SEQUENCES)
     r = await get_client().post(
         _chat_url(provider),
         headers={**_headers(provider), **_session_headers(provider, session_id)},
@@ -399,6 +407,7 @@ async def stream_round(
                             temperature=temperature, reasoning_effort=reasoning_effort,
                             is_reasoning=caps["reasoning"], sees_images=caps["vision"])
     _apply_extra_body(payload, provider)
+    payload["stop"] = list(STOP_SEQUENCES)
 
     accumulated_text = ""
     accumulated_tools: dict[int, dict] = {}
@@ -434,7 +443,8 @@ async def stream_round(
                     print(f"[stream_round:{provider.get('name')}] {model} lacks tool support — retrying without tools")
                     async for ev in stream_round(
                         provider, model, messages, max_tokens, tools=None,
-                        session_id=session_id,
+                        temperature=temperature, reasoning_effort=reasoning_effort,
+                        session_id=session_id, _attempt=_attempt,
                     ):
                         yield ev
                     return
@@ -593,22 +603,29 @@ async def dispatch_chat_complete(
     user_id: Optional[str], model_str: str, messages: list[dict],
     max_tokens: int, tools: Optional[list[dict]] = None,
     fallback_model_str: Optional[str] = None,
+    session_id: Optional[str] = None,
 ) -> dict:
     """One-shot completion. When `fallback_model_str` is given, a call that
     errors, raises, or returns nothing usable (no content AND no tool calls)
     is retried once on the fallback — the non-streaming twin of the
     dispatch_stream_round stall guard. Without a fallback, semantics are
-    unchanged (exceptions propagate)."""
+    unchanged (exceptions propagate).
+
+    `session_id` becomes the provider's cache-affinity header. It matters most
+    here: title / summary / auto-memory / classifier calls are the small,
+    high-frequency, near-identical-prefix ones that cache best."""
     pid, mid = parse_model_str(model_str)
     provider = await resolve_provider(pid, user_id=user_id)
     if not provider:
         result = {"content": "", "tool_calls": [], "usage": {},
                   "error": f"unknown provider {pid!r}"}
     elif not fallback_model_str:
-        return await chat_complete(provider, mid, messages, max_tokens, tools)
+        return await chat_complete(provider, mid, messages, max_tokens, tools,
+                                   session_id=session_id)
     else:
         try:
-            result = await chat_complete(provider, mid, messages, max_tokens, tools)
+            result = await chat_complete(provider, mid, messages, max_tokens, tools,
+                                         session_id=session_id)
         except Exception as e:
             result = {"content": "", "tool_calls": [], "usage": {},
                       "error": f"{type(e).__name__}: {e}"}
@@ -635,7 +652,7 @@ async def dispatch_chat_complete(
             fb_messages = flatten_for_text_model(messages)
     try:
         fb_result = await chat_complete(fb_provider, fb_mid, fb_messages,
-                                        max_tokens, tools)
+                                        max_tokens, tools, session_id=session_id)
     except Exception as e:
         print(f"[fallback] {fb_mid} also failed: {type(e).__name__}: {e}")
         return result

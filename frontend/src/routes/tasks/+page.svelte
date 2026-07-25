@@ -10,6 +10,7 @@
     deleteSchedule,
     type Schedule,
   } from '$lib/api';
+  import { confirmDialog } from '$lib/confirm.svelte';
   import { toast } from '$lib/toast.svelte';
   import { syncScheduleNotifications } from '$lib/notifications';
   import { IconPlus, IconTrash, IconCheck, IconX } from '$lib/icons';
@@ -88,7 +89,12 @@
   }
 
   async function remove(s: Schedule) {
-    if (!confirm(`Delete "${s.title}"?`)) return;
+    const ok = await confirmDialog({
+      message: `Delete "${s.title}"?`,
+      confirmLabel: 'Delete',
+      danger: true
+    });
+    if (!ok) return;
     try {
       await deleteSchedule(s.id);
       schedules = schedules.filter((x) => x.id !== s.id);

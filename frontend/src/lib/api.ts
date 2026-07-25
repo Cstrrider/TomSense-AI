@@ -38,6 +38,26 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
   return (await r.json()) as T;
 }
 
+/**
+ * Like `http()` but for endpoints with no meaningful response body — DELETEs,
+ * mostly. Tolerates an empty body (a 204 makes `http()` throw on r.json()).
+ *
+ * Exists so every mutation surfaces the SAME error string to toast.error():
+ * these used to be hand-rolled `fetch` calls each with its own bespoke message
+ * ("delete failed: 404", "revoke failed: 500", …), so the UI reported the same
+ * class of failure differently depending on which button you pressed.
+ */
+async function httpVoid(path: string, init?: RequestInit): Promise<void> {
+  const r = await fetch(path, {
+    headers: { 'Content-Type': 'application/json' },
+    ...init
+  });
+  if (!r.ok) {
+    const text = await r.text().catch(() => '');
+    throw new Error(`${r.status} ${r.statusText}: ${text}`);
+  }
+}
+
 export async function getInfo(): Promise<InfoResponse> {
   return http<InfoResponse>('/info');
 }
@@ -93,7 +113,7 @@ export async function updateSchedule(
 }
 
 export async function deleteSchedule(id: string): Promise<void> {
-  await http(`/me/schedules/${id}`, { method: 'DELETE' });
+  await httpVoid(`/me/schedules/${id}`, { method: 'DELETE' });
 }
 
 // ─── projects ────────────────────────────────────────────────────────────────
@@ -121,8 +141,7 @@ export async function updateProject(
 }
 
 export async function deleteProject(id: string): Promise<void> {
-  const r = await fetch(`/me/projects/${id}`, { method: 'DELETE' });
-  if (!r.ok) throw new Error(`delete failed: ${r.status}`);
+  await httpVoid(`/me/projects/${id}`, { method: 'DELETE' });
 }
 
 export async function setChatProject(chatId: string, projectId: string | null): Promise<Chat> {
@@ -162,8 +181,7 @@ export async function renameChat(id: string, title: string): Promise<Chat> {
 }
 
 export async function deleteChat(id: string): Promise<void> {
-  const r = await fetch(`/chats/${id}`, { method: 'DELETE' });
-  if (!r.ok) throw new Error(`delete failed: ${r.status}`);
+  await httpVoid(`/chats/${id}`, { method: 'DELETE' });
 }
 
 export async function setSystemPrompt(id: string, system_prompt: string | null): Promise<Chat> {
@@ -180,8 +198,23 @@ export async function createShare(id: string): Promise<{ share_token: string; ch
 }
 
 export async function revokeShare(id: string): Promise<void> {
-  const r = await fetch(`/chats/${id}/share`, { method: 'DELETE' });
-  if (!r.ok) throw new Error(`revoke failed: ${r.status}`);
+  await httpVoid(`/chats/${id}/share`, { method: 'DELETE' });
+}
+
+/**
+ * Stop the chat's in-flight generation server-side.
+ *
+ * Aborting the SSE only stops the *streaming*: the run is detached, so it kept
+ * generating, kept spending tokens, and still persisted its reply. Best-effort
+ * — a failure here shouldn't block the local abort.
+ */
+export async function stopChatRun(chatId: string): Promise<boolean> {
+  try {
+    const j = await http<{ stopped: boolean }>(`/chat/${chatId}/stop`, { method: 'POST' });
+    return j.stopped;
+  } catch {
+    return false;
+  }
 }
 
 export async function getSharedChat(token: string): Promise<ChatWithMessages> {
@@ -220,7 +253,7 @@ export async function updateMcpServer(
 }
 
 export async function deleteMcpServer(id: string): Promise<void> {
-  await http(`/me/mcp/${id}`, { method: 'DELETE' });
+  await httpVoid(`/me/mcp/${id}`, { method: 'DELETE' });
 }
 
 export async function testMcpServer(id: string): Promise<{ ok: boolean; tools: string[] }> {
@@ -363,8 +396,7 @@ export async function updatePersona(
 }
 
 export async function deletePersona(id: string): Promise<void> {
-  const r = await fetch(`/me/personas/${id}`, { method: 'DELETE' });
-  if (!r.ok) throw new Error(`delete failed: ${r.status}`);
+  await httpVoid(`/me/personas/${id}`, { method: 'DELETE' });
 }
 
 export async function getMe(): Promise<MeResponse> {
@@ -454,8 +486,7 @@ export async function updateProvider(
 }
 
 export async function deleteProvider(id: string): Promise<void> {
-  const r = await fetch(`/me/providers/${id}`, { method: 'DELETE' });
-  if (!r.ok) throw new Error(`delete failed: ${r.status}`);
+  await httpVoid(`/me/providers/${id}`, { method: 'DELETE' });
 }
 
 export async function testProvider(id: string): Promise<ProviderTestResult> {
@@ -487,8 +518,7 @@ export async function addMemory(content: string): Promise<Memory> {
 }
 
 export async function deleteMemory(id: number): Promise<void> {
-  const r = await fetch(`/me/memories/${id}`, { method: 'DELETE' });
-  if (!r.ok) throw new Error(`delete failed: ${r.status}`);
+  await httpVoid(`/me/memories/${id}`, { method: 'DELETE' });
 }
 
 export async function listUserUploads(): Promise<UserUpload[]> {
@@ -497,8 +527,7 @@ export async function listUserUploads(): Promise<UserUpload[]> {
 }
 
 export async function deleteUserUpload(id: string): Promise<void> {
-  const r = await fetch(`/me/uploads/${id}`, { method: 'DELETE' });
-  if (!r.ok) throw new Error(`delete failed: ${r.status}`);
+  await httpVoid(`/me/uploads/${id}`, { method: 'DELETE' });
 }
 
 export async function reindexUpload(id: string): Promise<{ chunks: number }> {
@@ -553,7 +582,7 @@ export async function setSecret(name: string, value: string): Promise<void> {
 }
 
 export async function deleteSecret(name: string): Promise<void> {
-  await http(`/me/secrets/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  await httpVoid(`/me/secrets/${encodeURIComponent(name)}`, { method: 'DELETE' });
 }
 
 // ─── cross-chat artifacts (file manager) ──────────────────────────────────
@@ -571,8 +600,7 @@ export async function getArtifact(id: number): Promise<Artifact & {
 }
 
 export async function deleteArtifact(id: number): Promise<void> {
-  const r = await fetch(`/artifacts/${id}`, { method: 'DELETE' });
-  if (!r.ok) throw new Error(`delete failed: ${r.status}`);
+  await httpVoid(`/artifacts/${id}`, { method: 'DELETE' });
 }
 
 // ─── sandbox project mounts (host dir → /workspace/projects/<name>/) ─────
@@ -764,9 +792,14 @@ export async function* streamChat(
 ): AsyncGenerator<StreamEvent, void, void> {
   let runId: string | null = existingRunId ?? null;
   let chunkIndex = 0; // run chunks (text + client_tool) already consumed
+  // Reconnect budget. Reset whenever a connection actually delivers new run
+  // chunks — otherwise it's a budget for the WHOLE reply, and a 20-minute code
+  // run on mobile (which drops far more than 6 times over its lifetime) gives
+  // up partway through even though every reconnect was succeeding.
   let attempts = 0;
 
   while (true) {
+    const indexAtConnect = chunkIndex;
     let res: Response;
     try {
       if (runId === null) {
@@ -865,8 +898,9 @@ export async function* streamChat(
             // SSE drop during that wait triggers a reconnect from `chunkIndex`.
             // If we'd already consumed this event, the reconnect would replay
             // PAST it, the card would never re-appear, and the backend would
-            // hang until its 15-min timeout. Leaving chunkIndex on the event
-            // means a reconnect REPLAYS approve_edit and re-shows the card.
+            // hang until CODE_REVIEW_TIMEOUT (default 30 min). Leaving
+            // chunkIndex on the event means a reconnect REPLAYS approve_edit
+            // and re-shows the card.
             let decision = 'reject';
             if (onApprove) {
               try {
@@ -906,6 +940,10 @@ export async function* streamChat(
     }
     if (!dropped || signal?.aborted) return;
     if (runId === null) throw new Error('connection lost before the reply started');
+    // Forward progress since this connection opened → the reconnect machinery
+    // is working, so the budget starts over. Only a run that keeps dropping
+    // WITHOUT producing anything burns through it.
+    if (chunkIndex > indexAtConnect) attempts = 0;
     if (++attempts > 6) {
       yield { type: 'error', error: 'lost connection to the reply' };
       return;

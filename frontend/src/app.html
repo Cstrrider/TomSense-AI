@@ -3,19 +3,11 @@
 <head>
   <meta charset="utf-8" />
   <!-- Apply the saved theme before first paint to avoid a light/dark flash.
-       Mirrors lib/theme.ts (kept tiny + inline on purpose). -->
-  <script>
-    (function () {
-      try {
-        var c = localStorage.getItem('tomsense-theme') || 'system';
-        var light = c === 'light' || (c === 'system' &&
-          window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches);
-        document.documentElement.dataset.theme = light ? 'light' : 'dark';
-      } catch (e) {
-        document.documentElement.dataset.theme = 'dark';
-      }
-    })();
-  </script>
+       Mirrors lib/theme.ts. Kept as an external blocking script rather than an
+       inline one so the CSP in svelte.config.js can stay at script-src 'self'
+       with no 'unsafe-inline' and no hand-maintained hash. Blocking in <head>
+       means it still runs before the first paint. -->
+  <script src="%sveltekit.assets%/theme-init.js"></script>
   <!-- interactive-widget=resizes-content: when the on-screen keyboard opens,
        shrink the layout viewport instead of letting the page scroll — keeps
        the top bar pinned and the composer just above the keyboard. -->
@@ -38,20 +30,8 @@
 
   <title>TomSense</title>
   %sveltekit.head%
-  <script>
-    if ('serviceWorker' in navigator) {
-      window.addEventListener('load', () => {
-        navigator.serviceWorker
-          .register('/service-worker.js')
-          .then((reg) => {
-            console.info('[sw] registered', reg.scope);
-          })
-          .catch((err) => {
-            console.warn('[sw] registration failed:', err);
-          });
-      });
-    }
-  </script>
+  <!-- External for the same CSP reason as theme-init.js above. -->
+  <script src="%sveltekit.assets%/sw-register.js" defer></script>
 </head>
 <body data-sveltekit-preload-data="hover">
   <div style="display: contents">%sveltekit.body%</div>

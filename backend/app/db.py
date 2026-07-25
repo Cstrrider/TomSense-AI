@@ -1844,34 +1844,61 @@ async def first_user_message(chat_id: str) -> Optional[str]:
 
 # ─── summary cache (incremental auto-summarization) ─────────────────────────
 
-async def get_chat_summary(chat_id: str) -> tuple[Optional[str], int]:
+async def get_chat_summary(
+    chat_id: str, user_id: Optional[str] = None
+) -> tuple[Optional[str], int]:
     """Return (summary_text, summary_up_to_idx) for a chat. (None, 0) when
-    nothing has been cached yet."""
+    nothing has been cached yet.
+
+    `user_id` scopes the read to the owner. The caller is expected to have
+    ownership-checked already; this is the second lock on the door, because a
+    leaked summary here lands verbatim in another user's prompt.
+    """
     try:
         cid = uuid.UUID(chat_id)
+        uid = uuid.UUID(user_id) if user_id is not None else None
     except (ValueError, TypeError):
         return None, 0
     async with _pool_or_raise().acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT summary_text, summary_up_to_idx FROM chats WHERE id = $1",
-            cid,
-        )
+        if uid is None:
+            row = await conn.fetchrow(
+                "SELECT summary_text, summary_up_to_idx FROM chats WHERE id = $1",
+                cid,
+            )
+        else:
+            row = await conn.fetchrow(
+                "SELECT summary_text, summary_up_to_idx FROM chats "
+                "WHERE id = $1 AND user_id = $2",
+                cid, uid,
+            )
     if row is None:
         return None, 0
     return row["summary_text"], int(row["summary_up_to_idx"] or 0)
 
 
-async def set_chat_summary(chat_id: str, summary_text: str, up_to_idx: int) -> None:
-    """Persist a new summary cache for the chat."""
+async def set_chat_summary(
+    chat_id: str, summary_text: str, up_to_idx: int,
+    user_id: Optional[str] = None,
+) -> None:
+    """Persist a new summary cache for the chat, scoped to its owner."""
     try:
         cid = uuid.UUID(chat_id)
+        uid = uuid.UUID(user_id) if user_id is not None else None
     except (ValueError, TypeError):
         return
     async with _pool_or_raise().acquire() as conn:
-        await conn.execute(
-            "UPDATE chats SET summary_text = $2, summary_up_to_idx = $3 WHERE id = $1",
-            cid, summary_text, int(up_to_idx),
-        )
+        if uid is None:
+            await conn.execute(
+                "UPDATE chats SET summary_text = $2, summary_up_to_idx = $3 "
+                "WHERE id = $1",
+                cid, summary_text, int(up_to_idx),
+            )
+        else:
+            await conn.execute(
+                "UPDATE chats SET summary_text = $2, summary_up_to_idx = $3 "
+                "WHERE id = $1 AND user_id = $4",
+                cid, summary_text, int(up_to_idx), uid,
+            )
 
 
 async def clear_chat_summary(chat_id: str) -> None:

@@ -27,6 +27,7 @@
     listProjects,
     setUploadProject,
   } from '$lib/api';
+  import { confirmDialog } from '$lib/confirm.svelte';
   import { toast } from '$lib/toast.svelte';
   import {
     IconCheck,
@@ -147,7 +148,13 @@
   }
 
   async function onDeleteUpload(u: UserUpload) {
-    if (!confirm(`Delete ${u.filename}? Removes the file and its index.`)) return;
+    const ok = await confirmDialog({
+      message: `Delete ${u.filename}?`,
+      detail: 'Removes the file and its index.',
+      confirmLabel: 'Delete',
+      danger: true
+    });
+    if (!ok) return;
     try {
       await deleteUserUpload(u.id);
       uploads = uploads.filter((x) => x.id !== u.id);
@@ -230,7 +237,13 @@
 
   async function bulkDeleteUploads() {
     if (selUploads.size === 0) return;
-    if (!confirm(`Delete ${selUploads.size} upload${selUploads.size === 1 ? '' : 's'}? Removes files and indexes.`)) return;
+    const confirmed = await confirmDialog({
+      message: `Delete ${selUploads.size} upload${selUploads.size === 1 ? '' : 's'}?`,
+      detail: 'Removes files and indexes.',
+      confirmLabel: 'Delete',
+      danger: true
+    });
+    if (!confirmed) return;
     bulkBusy = true;
     const ids = [...selUploads];
     let ok = 0, fail = 0;
@@ -247,7 +260,12 @@
 
   async function bulkDeleteArtifacts() {
     if (selArtifacts.size === 0) return;
-    if (!confirm(`Delete ${selArtifacts.size} artifact${selArtifacts.size === 1 ? '' : 's'}?`)) return;
+    const confirmed = await confirmDialog({
+      message: `Delete ${selArtifacts.size} artifact${selArtifacts.size === 1 ? '' : 's'}?`,
+      confirmLabel: 'Delete',
+      danger: true
+    });
+    if (!confirmed) return;
     bulkBusy = true;
     const ids = [...selArtifacts];
     let ok = 0, fail = 0;
@@ -295,7 +313,13 @@
 
   async function bulkDeleteSandbox() {
     if (selSandbox.size === 0) return;
-    if (!confirm(`Delete ${selSandbox.size} item${selSandbox.size === 1 ? '' : 's'} from the sandbox? Directories will be removed recursively.`)) return;
+    const confirmed = await confirmDialog({
+      message: `Delete ${selSandbox.size} item${selSandbox.size === 1 ? '' : 's'} from the sandbox?`,
+      detail: 'Directories will be removed recursively.',
+      confirmLabel: 'Delete',
+      danger: true
+    });
+    if (!confirmed) return;
     bulkBusy = true;
     const paths = [...selSandbox];
     let ok = 0, fail = 0;
@@ -344,7 +368,12 @@
   }
 
   async function onDeleteArtifact(a: UserArtifact) {
-    if (!confirm(`Delete this artifact?`)) return;
+    const ok = await confirmDialog({
+      message: 'Delete this artifact?',
+      confirmLabel: 'Delete',
+      danger: true
+    });
+    if (!ok) return;
     try {
       await deleteArtifact(a.id);
       artifacts = artifacts.filter((x) => x.id !== a.id);
@@ -423,8 +452,15 @@
     }
   }
 
-  function closeOpenFile() {
-    if (sandboxOpenDirty && !confirm('Discard unsaved changes?')) return;
+  async function closeOpenFile() {
+    if (sandboxOpenDirty) {
+      const ok = await confirmDialog({
+        message: 'Discard unsaved changes?',
+        confirmLabel: 'Discard',
+        danger: true
+      });
+      if (!ok) return;
+    }
     sandboxOpenPath = null;
     sandboxOpenContent = '';
     sandboxOpenDirty = false;
@@ -459,7 +495,13 @@
 
   async function onSandboxDelete(entry: SandboxEntry) {
     const isDir = entry.type === 'dir';
-    if (!confirm(`Delete ${isDir ? 'directory' : 'file'} "${entry.name}"${isDir ? ' and everything inside it' : ''}?`)) return;
+    const ok = await confirmDialog({
+      message: `Delete ${isDir ? 'directory' : 'file'} "${entry.name}"?`,
+      detail: isDir ? 'Everything inside it is removed too.' : undefined,
+      confirmLabel: 'Delete',
+      danger: true
+    });
+    if (!ok) return;
     try {
       await sandboxDelete(pathJoin(sandboxPath, entry.name), isDir);
       if (sandboxOpenPath === pathJoin(sandboxPath, entry.name)) {
@@ -536,7 +578,13 @@
   }
 
   async function onRemoveMount(name: string) {
-    if (!confirm(`Remove the "${name}" mount? The sandbox loses access on next Apply; your host files are not touched.`)) return;
+    const ok = await confirmDialog({
+      message: `Remove the "${name}" mount?`,
+      detail: 'The sandbox loses access on next Apply; your host files are not touched.',
+      confirmLabel: 'Remove',
+      danger: true
+    });
+    if (!ok) return;
     try {
       mounts = await deleteMount(name);
       toast.info(`Removed ${name} — click Apply to unmount in the sandbox`);

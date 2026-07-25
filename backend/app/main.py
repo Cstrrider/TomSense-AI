@@ -39,7 +39,9 @@ from .cf import close_client, fetch_gateway_spend_today, fetch_neurons_today
 from .chat import run_chat, short_name, _strip_hallucinated_chips
 from .clienttools import resolve_client_tool
 from .config import settings
-from .liverun import KEEPALIVE, LiveRun, create_run, get_run, live_run_for_chat, retire_run
+from .liverun import (
+    KEEPALIVE, LiveRun, cancel_run, create_run, get_run, live_run_for_chat, retire_run,
+)
 from .schemas import (
     BranchRequest,
     ChatRequest,
@@ -337,6 +339,33 @@ async def _task_model(user_id: Optional[str], prefs: Optional[dict] = None) -> s
     return settings.model_title
 
 
+async def _vision_model(user_id: Optional[str], prefs: Optional[dict] = None) -> str:
+    """The model to use for an image-understanding utility call: the user's
+    Vision slot (`tool_models.vision`), else the CF vision default — the same
+    resolution order the chat path uses for image turns."""
+    if user_id:
+        try:
+            if prefs is None:
+                prefs = await db.get_user_prefs(user_id)
+            picked = ((prefs or {}).get("tool_models") or {}).get("vision")
+            if picked and str(picked).strip():
+                return str(picked).strip()
+        except Exception:
+            pass
+    return f"{providers.CF_BUILTIN_ID}::{settings.model_vision}"
+
+
+def _task_session(user_id: Optional[str], purpose: str) -> Optional[str]:
+    """Cache-affinity key for a utility (task-model) call.
+
+    Keyed by (user, purpose) rather than by chat: every `title` call shares one
+    fixed prompt prefix, every `summary` call another, so pinning per purpose is
+    what actually lands on a warm prefix cache. These are the small,
+    high-frequency calls where the cached-input discount matters most — they
+    were previously sent with no affinity header at all."""
+    return f"task:{purpose}:{user_id}" if user_id else None
+
+
 async def _task_fallback(user_id: Optional[str], prefs: Optional[dict] = None) -> Optional[str]:
     """The user's `tool_models.title_fallback` — dispatch_chat_complete retries
     a failed/empty utility call on it. None when unset."""
@@ -367,6 +396,7 @@ async def _route_model(msgs: list[dict], user_id: str) -> Optional[str]:
             user_id=user_id,
             model_str=await _task_model(user_id),
             fallback_model_str=await _task_fallback(user_id),
+            session_id=_task_session(user_id, "route"),
             messages=[{
                 "role": "user",
                 "content": (
@@ -495,12 +525,11 @@ async def me_usage_today(user: dict = Depends(current_user)):
     }
 
 
-def _mask_key(key: str) -> str:
-    if not key:
-        return ""
-    if len(key) <= 10:
-        return "•" * len(key)
-    return f"{key[:4]}…{key[-4:]}"
+# One masking rule, not two: this used to be a near-copy of
+# providers.mask_api_key that differed only in its short-key threshold (10 vs
+# 12), so the same key rendered differently depending on which endpoint you
+# asked. providers.mask_api_key is the canonical one.
+_mask_key = providers.mask_api_key
 
 
 CREDENTIAL_KEYS = {
@@ -621,10 +650,16 @@ async def me_secret_delete(name: str, user: dict = Depends(current_user)):
 
 
 async def _credentials_snapshot(user_id: str) -> dict[str, dict]:
-    """Build the masked {set, preview} response from the providers table."""
+    """Build the masked {set, preview} response from the providers table.
+
+    The lookups are independent, so they go out together — this was four
+    sequential DB round-trips on every /me/credentials hit."""
+    items = list(_CRED_TO_BUILTIN.items())
+    rows = await asyncio.gather(
+        *(db.get_builtin_provider(user_id, builtin_id) for _, builtin_id in items)
+    )
     out: dict[str, dict] = {}
-    for cred_key, builtin_id in _CRED_TO_BUILTIN.items():
-        row = await db.get_builtin_provider(user_id, builtin_id)
+    for (cred_key, _), row in zip(items, rows):
         api_key = (row or {}).get("api_key") or ""
         out[cred_key] = {"set": bool(api_key), "preview": _mask_key(api_key)}
     return out
@@ -1808,14 +1843,19 @@ async def uploads_create(
     # model, so the excerpt/RAG path works for photographed documents too.
     if meta["kind"] == "pdf" and not (meta.get("text_excerpt") or "").strip():
         pages = up_mod.render_pdf_pages(raw)
-        ocr_parts: list[str] = []
-        for i, jpeg in enumerate(pages, start=1):
+        # The user's Vision slot, not the chat model: every other utility call
+        # in this file resolves its model through prefs, and OCR is precisely a
+        # vision task — a text-only chat model just fails on the image part.
+        ocr_model = await _vision_model(user["id"])
+
+        async def _ocr_page(page_no: int, jpeg: bytes) -> Optional[str]:
+            import base64 as _b64
+            data_url = "data:image/jpeg;base64," + _b64.b64encode(jpeg).decode()
             try:
-                import base64 as _b64
-                data_url = "data:image/jpeg;base64," + _b64.b64encode(jpeg).decode()
                 r = await providers.dispatch_chat_complete(
                     user_id=user["id"],
-                    model_str=settings.model_chat,
+                    model_str=ocr_model,
+                    session_id=_task_session(user["id"], "ocr"),
                     messages=[{
                         "role": "user",
                         "content": [
@@ -1828,11 +1868,19 @@ async def uploads_create(
                     }],
                     max_tokens=1500,
                 )
-                t = (r.get("content") or "").strip()
-                if t:
-                    ocr_parts.append(f"[page {i}]\n{t}")
             except Exception as e:
-                log.warning("PDF OCR page %d failed: %s", i, e)
+                log.warning("PDF OCR page %d failed: %s", page_no, e)
+                return None
+            t = (r.get("content") or "").strip()
+            return f"[page {page_no}]\n{t}" if t else None
+
+        # In parallel: these are up to 4 independent vision calls and they run
+        # inside the upload request, so serially they stacked their full
+        # latency onto the user's wait.
+        results = await asyncio.gather(
+            *(_ocr_page(i, jpeg) for i, jpeg in enumerate(pages, start=1))
+        )
+        ocr_parts = [p for p in results if p]
         if ocr_parts:
             meta["text_excerpt"] = (
                 "[OCR of scanned PDF]\n" + "\n\n".join(ocr_parts)
@@ -2006,6 +2054,7 @@ async def _summarize_to_text(transcript_blob: str, user_id: Optional[str] = None
             user_id=user_id,
             model_str=await _task_model(user_id),
             fallback_model_str=await _task_fallback(user_id),
+            session_id=_task_session(user_id, "summary"),
             messages=[{"role": "user", "content": prompt}],
             max_tokens=600,
         )
@@ -2064,7 +2113,7 @@ async def _maybe_summarize(
         return [sys_msg, *recent], len(older)
 
     # ─── persisted chat: use / extend the cache ──────────────────────────
-    cached_text, cached_up_to = await db.get_chat_summary(chat_id)
+    cached_text, cached_up_to = await db.get_chat_summary(chat_id, user_id=user_id)
     # Guard against a stale cache that points past current msg count (e.g.
     # truncation invalidation race). Treat as no-cache in that case.
     if cached_up_to > len(messages):
@@ -2116,7 +2165,7 @@ async def _maybe_summarize(
 
     new_up_to = cached_up_to + len(new_older)
     try:
-        await db.set_chat_summary(chat_id, new_summary, new_up_to)
+        await db.set_chat_summary(chat_id, new_summary, new_up_to, user_id=user_id)
     except Exception as e:
         log.warning("set_chat_summary failed (%s) — still using new summary for this turn", e)
     log.info(
@@ -2147,6 +2196,7 @@ async def _generate_title(first_user_msg: str, user_id: Optional[str] = None) ->
             user_id=user_id,
             model_str=await _task_model(user_id),
             fallback_model_str=await _task_fallback(user_id),
+            session_id=_task_session(user_id, "title"),
             messages=[{"role": "user", "content": prompt}],
             max_tokens=24,
         )
@@ -2201,6 +2251,7 @@ async def _generate_followups(chat_id: str, user_id: str) -> list[str]:
             user_id=user_id,
             model_str=await _task_model(user_id),
             fallback_model_str=await _task_fallback(user_id),
+            session_id=_task_session(user_id, "followups"),
             messages=[{"role": "user", "content": prompt}],
             max_tokens=90,
         )
@@ -2272,6 +2323,7 @@ async def _generate_starters(user_id: str) -> list[dict]:
         result = await providers.dispatch_chat_complete(
             user_id=user_id, model_str=await _task_model(user_id),
             fallback_model_str=await _task_fallback(user_id),
+            session_id=_task_session(user_id, "starters"),
             messages=[{"role": "user", "content": prompt}], max_tokens=160,
         )
         out: list[dict] = []
@@ -2309,6 +2361,7 @@ async def _auto_memory(user_id: str, user_text: str) -> None:
             user_id=user_id,
             model_str=await _task_model(user_id),
             fallback_model_str=await _task_fallback(user_id),
+            session_id=_task_session(user_id, "memory"),
             messages=[{
                 "role": "user",
                 "content": (
@@ -2632,11 +2685,11 @@ async def _run_generation(
     working_set_block: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
 ):
-    touched_paths: list = []
     """Drive run_chat to completion, buffering output into `run`. Runs as a
     detached task: it persists the assistant message + token usage when done
     regardless of whether any client is still streaming it — so a swipe-away,
     a network drop, or an app restart can no longer lose the reply."""
+    touched_paths: list = []
     accumulated = ""
     msg_meta: dict = {}
     stats: dict = {}
@@ -2816,7 +2869,14 @@ async def _run_scheduled(s: dict) -> None:
         s.get("model") or None, user_id=user["id"], slot_fallback=_sched_fb
     )
     run = create_run(chat_id, user_id=user["id"])
+    if _notice:
+        # Same treatment the interactive path gives it: a scheduled run that
+        # got downshifted for budget was previously silent about it, so the
+        # reply just looked worse for no visible reason.
+        run.append({"type": "notice", "text": _notice})
     log.info("schedule %r firing → chat %s", s["title"], chat_id)
+    # Awaited inline (not detached), so there's no task to hand to run.task —
+    # a scheduled run has no client to stop it anyway.
     await _run_generation(
         run,
         [{"role": "user", "content": s["prompt"]}],
@@ -2827,6 +2887,7 @@ async def _run_scheduled(s: dict) -> None:
             "uploads": [],
             "user_id": user["id"],
             "chat_id": chat_id,
+            "run_id": run.run_id,
             "memories": memories,
             "tool_models": _tm_dict,
             "cf_models": (prefs or {}).get("cf_models") or [],
@@ -2842,10 +2903,14 @@ async def _run_scheduled(s: dict) -> None:
         working_set_block=None,
     )
     # Push the result to the phone — a scheduled run nobody hears about
-    # might as well not have run. Body = reply preview minus chip markup.
+    # might as well not have run. Tool chips and reasoning are dict events, so
+    # the isinstance filter already drops them; the <details> sub only catches
+    # chip markup a model typed into its own answer text.
     reply = "".join(c for c in run.chunks if isinstance(c, str))
     preview = _re.sub(r"<details.*?</details>", "", reply, flags=_re.DOTALL)
     preview = _re.sub(r"\n?---\n\*.*?\*\s*$", "", preview.strip())  # stats footer
+    if _notice:
+        preview = f"({_notice})\n\n{preview}".strip()
     await notify.push(
         f"⏰ {s['title']}",
         preview[:1500] or "(no reply)",
@@ -2901,11 +2966,33 @@ async def chat_stream(
 
     msgs = [m.model_dump(exclude_none=True) for m in req.messages]
 
+    # Resolve + ownership-check the chat BEFORE anything reads or writes state
+    # keyed by chat_id. The summary cache below is exactly that: passing
+    # someone else's chat_id used to splice their cached summary into your
+    # prompt and overwrite it with yours, all before the 404 fired.
+    chat_id = req.chat_id
+    existing: Optional[dict] = None
+    if chat_id:
+        existing = await db.get_chat(chat_id, user_id=user["id"])
+        if existing is None:
+            raise HTTPException(status_code=404, detail="chat not found")
+
+        # One generation per chat. Runs are detached, so the client tapping
+        # Stop (or navigating away) does NOT end the server-side run — sending
+        # again used to start a second one, and BOTH persisted an assistant
+        # message while _RUN_BY_CHAT only tracked the newer. The new message
+        # supersedes the old, so cancel the in-flight run and let it unwind
+        # before we persist anything for this turn.
+        _prior = live_run_for_chat(chat_id)
+        if _prior is not None:
+            log.info("chat %s: superseding in-flight run %s", chat_id, _prior.run_id)
+            await cancel_run(_prior)
+
     # Auto-summary: if the rolling history blows past the threshold, collapse
     # the older slice into one summary message via the small task model.
     # For persisted chats this consults / updates a per-chat summary cache so
     # we don't re-run the summarizer on every turn.
-    msgs, summarized = await _maybe_summarize(msgs, req.chat_id, user_id=user["id"])
+    msgs, summarized = await _maybe_summarize(msgs, chat_id, user_id=user["id"])
 
     upload_metas: list[dict] = []
     if req.upload_ids:
@@ -2913,16 +3000,12 @@ async def chat_stream(
 
     persisted_user_text = _augment_last_user_with_uploads(msgs, upload_metas)
 
-    chat_id = req.chat_id
     needs_autotitle = False
     persona: Optional[str] = None
     chat_model_override: Optional[str] = None
     code_mode = False
     project_knowledge: list = []  # project knowledge files, if any
-    if chat_id:
-        existing = await db.get_chat(chat_id, user_id=user["id"])
-        if existing is None:
-            raise HTTPException(status_code=404, detail="chat not found")
+    if existing is not None:
         code_mode = bool(existing.get("is_code"))
         last = msgs[-1] if msgs else None
         if last and last.get("role") == "user":
@@ -3157,7 +3240,7 @@ async def chat_stream(
         # Streamed as the first chunk — visible live and on reconnect (it is
         # part of run.chunks), though not persisted with the reply.
         run.append({"type": "notice", "text": budget_notice})
-    _spawn(
+    run.task = _spawn(
         _run_generation(
             run,
             msgs,
@@ -3172,6 +3255,7 @@ async def chat_stream(
                 "uploads": upload_metas,
                 "user_id": user["id"],
                 "chat_id": chat_id,
+                "run_id": run.run_id,
                 # This turn's user text — image tools derive the HD decision
                 # from it (an explicit /HD, "4K", "best quality", …) rather
                 # than trusting the model's hd flag, which small models set
@@ -3244,6 +3328,22 @@ async def chat_live(chat_id: str, user: dict = Depends(current_user)):
     return {"run_id": run.run_id if run else None}
 
 
+@app.post("/chat/{chat_id}/stop")
+async def chat_stop(chat_id: str, user: dict = Depends(current_user)):
+    """Actually stop an in-flight generation for this chat.
+
+    The client's Stop button aborts its SSE read, which only ends the
+    STREAMING — the run is detached, so it kept going, kept spending tokens,
+    and still persisted its reply. This cancels the run itself. A cancelled
+    run does not persist its partial reply."""
+    if await db.get_chat(chat_id, user_id=user["id"]) is None:
+        raise HTTPException(status_code=404, detail="chat not found")
+    run = live_run_for_chat(chat_id)
+    if run is None:
+        return {"stopped": False}
+    return {"stopped": await cancel_run(run)}
+
+
 @app.post("/chat/{chat_id}/followups")
 async def chat_followups(chat_id: str, user: dict = Depends(current_user)):
     """Suggested follow-up questions for the chat, generated by the cheap
@@ -3258,6 +3358,9 @@ async def chat_tool_result(
 ):
     """The device's answer to a `client_tool` SSE event — wakes the awaiting
     run_chat so the in-flight streaming turn can continue. See clienttools.py.
-    `ok` is False when no call was pending (already resolved or timed out)."""
-    delivered = resolve_client_tool(req.call_id, req.result)
+    `ok` is False when no call was pending (already resolved or timed out) or
+    when the ticket belongs to another user — the same answer either way, so a
+    guessed ticket learns nothing. The ownership check matters because the
+    approve_edit / deploy_project gates ride this same endpoint."""
+    delivered = resolve_client_tool(req.call_id, req.result, user_id=user["id"])
     return {"ok": delivered}

@@ -23,10 +23,19 @@
     if (token) load(token);
   });
 
+  // `meta` must survive the map: since stats moved out of `content` into
+  // `meta` (P6), dropping it here meant msg.meta?.stats_text was always
+  // undefined and shared chats silently lost their stats footer.
   let messages = $derived<Msg[]>(
     (chat?.messages ?? [])
       .filter((m) => m.role === 'user' || m.role === 'assistant')
-      .map((m) => ({ role: m.role, content: m.content, uploads: m.uploads ?? [] }))
+      .map((m) => ({
+        role: m.role,
+        content: m.content,
+        uploads: m.uploads ?? [],
+        dbId: m.id,
+        meta: m.meta ?? null
+      }))
   );
 </script>
 
@@ -48,7 +57,7 @@
     {:else if messages.length === 0}
       <div class="muted">(empty chat)</div>
     {:else}
-      {#each messages as msg, i (i)}
+      {#each messages as msg, i (msg.dbId ?? i)}
         <Message role={msg.role} content={msg.content} uploads={msg.uploads ?? []} statsText={msg.meta?.stats_text ?? ''} />
       {/each}
     {/if}

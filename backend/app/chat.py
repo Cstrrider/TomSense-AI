@@ -7,17 +7,18 @@ import json
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import AsyncIterator
 
 from . import mounts
-from .clienttools import CLIENT_TOOL_NAMES, request_client_tool
+from .clienttools import CLIENT_TOOL_NAMES, await_client_call, open_client_call
 from .code_hints import active_hint_keys, apply_code_hints
 from .config import settings
 from .providers import dispatch_stream_round, parse_model_str
 from .tools import (
     ALLOWED_TOOL_NAMES,
     CODE_TOOL_SPECS,
+    GENERATED_DIR,
     TOOL_SPECS,
     dispatch,
     resolve_image_model,
@@ -44,7 +45,7 @@ _MAX_SUBAGENTS_PER_TURN = 4    # bound total fan-out per parent turn
 # ─────────────────────────────────────────────────────────────────────────────
 
 def system_prompt() -> str:
-    now = datetime.utcnow().strftime("%A %B %d %Y %H:%M UTC")
+    now = datetime.now(timezone.utc).strftime("%A %B %d %Y %H:%M UTC")
     return (
         now + "\n"
         "You are TomSense. Answer concept / explanation / casual questions "
@@ -114,7 +115,7 @@ def code_system_prompt() -> str:
     its input tokens or risk picking up checklist behavior on a non-docker
     task. See `code_hints.py` for the registry and how to add a new hint.
     """
-    now = datetime.utcnow().strftime("%A %B %d %Y %H:%M UTC")
+    now = datetime.now(timezone.utc).strftime("%A %B %d %Y %H:%M UTC")
     # Name the actual project mounts (from .mounts.json) instead of a
     # hardcoded list — the set changes via Files → Mounts and a stale
     # prompt misleads the model about what's real source vs. scratch.
@@ -327,19 +328,28 @@ def _strip_hallucinated_chips(text: str) -> str:
     out = _TOOL_CHIP_RE.sub(_repl, text)
     return re.sub(r"\n{3,}", "\n\n", out).strip()
 # Any inline generated/edited-image markdown (the copy yielded outside the
-# chip). Removed entirely from history — leaving even a placeholder gives the
-# model something to mimic.
+# chip), together with the model-label line emitted directly under it
+# (*nano-banana-2*, *flux-2-klein-4b img2img · 2 ref*, …). Removed entirely
+# from history — leaving even a placeholder gives the model something to mimic,
+# and leaving the label teaches it to fabricate model names.
+#
+# The label is matched HERE, anchored to the image, rather than by a blanket
+# "any standalone italic line" sweep: that sweep also deleted legitimate model
+# output, since a one-line emphasis (*This part matters.*) is indistinguishable
+# from a model label out of context.
 _INLINE_IMAGE_MD_RE = re.compile(
-    r"!\[(?:Generated|Edited) Image\]\([^)]*\)"
+    r"!\[(?:Generated|Edited) Image\]\([^)]*\)"   # the image markdown
+    r"(?:[ \t]*\r?\n)*"                           # any blank lines under it
+    r"(?:[ \t]*\*[^*\n]{1,90}\*[ \t]*$)?",        # its model-label line
+    re.MULTILINE,
 )
 # The transient "⏳ Generating image…" progress line.
 _PROGRESS_LINE_RE = re.compile(r"\*⏳[^*\n]*\*")
-# A whole line that is nothing but one italic span — these are the model-label
-# lines (*nano-banana-2*, *flux-2-klein-4b img2img · 2 ref*, etc.) emitted
-# under generated images. Stripped from history so the model doesn't learn to
-# fabricate model names in its replies.
-_STANDALONE_ITALIC_LINE_RE = re.compile(
-    r"^[ \t]*\*[^*\n]{1,90}\*[ \t]*$", re.MULTILINE
+# Bracketed system markers we inject into a reply — *[error: …]*, *[image
+# attached — answering with X]*. Ours, not the model's, so they're safe to
+# strip from history unconditionally.
+_SYSTEM_MARKER_LINE_RE = re.compile(
+    r"^[ \t]*\*\[[^\]\n]{1,160}\]\*[ \t]*$", re.MULTILINE
 )
 
 
@@ -358,8 +368,7 @@ def _last_generated_image_path(messages: list[dict]) -> str | None:
             continue
         url = match[-1].group(1)  # last image referenced in this assistant turn
         rel = url[len("/generated/"):]
-        # GENERATED_DIR lives in tools.py but we know it's /data/generated_images
-        path = os.path.join("/data/generated_images", rel)
+        path = os.path.join(GENERATED_DIR, rel)
         if os.path.exists(path):
             return path
     return None
@@ -405,7 +414,7 @@ def sanitize_messages(messages: list[dict]) -> list[dict]:
             while content != prev:
                 prev = content
                 content = _STATS_FOOTER_RE.sub("", content).rstrip()
-            content = _STANDALONE_ITALIC_LINE_RE.sub("", content)
+            content = _SYSTEM_MARKER_LINE_RE.sub("", content)
             # Collapse the blank lines the strips leave behind.
             content = re.sub(r"\n{3,}", "\n\n", content).strip()
 
@@ -724,6 +733,9 @@ async def run_chat(
     # already carry an "OR" suffix for OpenRouter). Best-effort.
     model_labels: dict = {}
     _uid = (tool_context or {}).get("user_id")
+    # Owner + run identity for the client-tool / approval rendezvous, so a
+    # pending approval can only be answered by the user whose run opened it.
+    _run_id = (tool_context or {}).get("run_id")
     if _uid and not subagent:
         for m in (tool_context or {}).get("cf_models") or []:
             if m.get("id") and m.get("label"):
@@ -865,22 +877,47 @@ async def run_chat(
     same_tool_streak = 0
     force_no_tools = False  # spiral guard tripped → next round must answer
 
+    def _finish() -> list:
+        """Terminal bookkeeping for the turn: build the stats footer and hand
+        the caller its usage totals. Returns the events to yield (a nested
+        function can't yield into this async generator, so the caller does
+        `for _ev in _finish(): yield _ev`).
+
+        Every exit path from run_chat goes through here — the loop finishing,
+        the repeat-guard aborting, ask_user pausing, and the max-rounds
+        fall-through. They were four copies that differed only cosmetically.
+        """
+        footer = "" if subagent else stats_footer(
+            models_used, total_usage, time.monotonic() - start,
+            summarized=summarized, labels=model_labels,
+        )
+        if stats_out is not None:
+            stats_out.update(total_usage)
+        if not footer:
+            return []
+        return [stats_event(footer, models_used, total_usage,
+                            time.monotonic() - start, summarized)]
+
     for round_num in range(rounds):
         # Re-evaluate task hints each round so a hint can fire mid-conversation
         # when a tool result first reveals the task type (e.g. round 1 lists
         # a directory and finds docker-compose.yml — round 2 gets the docker
         # deployment block injected). apply_code_hints is idempotent via its
         # <task-rules name="..."> marker.
+        _hint_str = ""
         if code_mode and msgs and msgs[0].get("role") == "system":
             msgs[0]["content"] = apply_code_hints(msgs[0]["content"], msgs[1:])
             _hint_keys = active_hint_keys(msgs[0]["content"])
             _hint_str = f" hints=[{','.join(_hint_keys)}]" if _hint_keys else ""
-            # #10: keep the growing tool-result history from blowing the window.
-            _elided = _compact_history(msgs)
-            if _elided:
-                print(f"[chat] compacted history — elided {_elided} old tool result(s)")
-        else:
-            _hint_str = ""
+
+        # #10: keep the growing tool-result history from blowing the window.
+        # NOT code-mode-only: a normal chat that stacks up deep_research +
+        # fetch_page results (a few thousand chars each, over several rounds)
+        # hits the same wall, and _compact_history only touches role="tool"
+        # messages so it's safe on any history shape.
+        _elided = _compact_history(msgs)
+        if _elided:
+            print(f"[chat] compacted history — elided {_elided} old tool result(s)")
         print(f"[chat] round {round_num+1}/{rounds} model={model}{_hint_str}")
         round_start = time.monotonic()
 
@@ -891,9 +928,15 @@ async def run_chat(
         reasoning_buf = ""
         reasoning_flushed = False
 
+        # One-shot, as the spiral guard intends: consume the flag here so the
+        # tool-less round is exactly ONE round. Leaving it set stripped tools
+        # from every remaining round of the turn.
+        no_tools_this_round = force_no_tools
+        force_no_tools = False
+
         async for kind, payload in dispatch_stream_round(
             (tool_context or {}).get("user_id"), model, msgs, max_tokens,
-            tools=None if force_no_tools else active_specs,
+            tools=None if no_tools_this_round else active_specs,
             temperature=(0.3 if code_mode else None),  # #6: deterministic code edits
             reasoning_effort=reasoning_effort,
             fallback_model_str=(tool_context or {}).get("stall_fallback") or None,
@@ -1055,12 +1098,8 @@ async def run_chat(
                 f"↑{total_usage['prompt_tokens']} ↓{total_usage['completion_tokens']} "
                 f"| tools_dispatched={tools_dispatched}"
             )
-            footer = "" if subagent else stats_footer(models_used, total_usage, time.monotonic() - start, summarized=summarized, labels=model_labels)
-            if footer:
-                yield stats_event(footer, models_used, total_usage,
-                                   time.monotonic() - start, summarized)
-            if stats_out is not None:
-                stats_out.update(total_usage)
+            for _ev in _finish():
+                yield _ev
             return
 
         # A productive round (the model actually called a tool) clears the
@@ -1089,12 +1128,8 @@ async def run_chat(
             yield ("\n\n> ⚠️ **Stopping** — the model repeated the same action "
                    "without making progress.")
             print(f"[chat] run aborted: identical tool call repeated x{repeat_count + 1}")
-            footer = "" if subagent else stats_footer(models_used, total_usage, time.monotonic() - start, summarized=summarized, labels=model_labels)
-            if footer:
-                yield stats_event(footer, models_used, total_usage,
-                                   time.monotonic() - start, summarized)
-            if stats_out is not None:
-                stats_out.update(total_usage)
+            for _ev in _finish():
+                yield _ev
             return
 
         # Search-spiral guard (normal chat only): the identical-call detector
@@ -1154,8 +1189,13 @@ async def run_chat(
         # continuation, and the working-set + plan carry the task context across
         # the turn. Asking means "stop and wait", so any other tool calls in the
         # same round are intentionally ignored.
+        # `not subagent`: ask_user is stripped from a subagent's tool specs, but
+        # it stays in ALLOWED_TOOL_NAMES, so a hallucinated call would otherwise
+        # push an ask-user card into the PARENT's stream and end the nested run
+        # early. A subagent has nobody to ask — it falls through to the dispatch
+        # loop, which tells it the tool is unavailable.
         _ask = next((tc for tc in tool_calls if tc["name"] == "ask_user"), None)
-        if code_mode and _ask is not None:
+        if code_mode and not subagent and _ask is not None:
             _args = _ask["arguments"] or {}
             yield _ask_user_block(_args.get("question") or "", _args.get("options") or [])
             _fcf = _file_change_footer(changed_files, text or "")
@@ -1163,12 +1203,8 @@ async def run_chat(
                 yield _fcf
             print(f"[chat] ask_user — turn paused for user input after "
                   f"{round_num+1} round(s)")
-            footer = "" if subagent else stats_footer(models_used, total_usage, time.monotonic() - start, summarized=summarized, labels=model_labels)
-            if footer:
-                yield stats_event(footer, models_used, total_usage,
-                                   time.monotonic() - start, summarized)
-            if stats_out is not None:
-                stats_out.update(total_usage)
+            for _ev in _finish():
+                yield _ev
             return
 
         # Dispatch each tool and yield a chip
@@ -1180,6 +1216,20 @@ async def run_chat(
             # the model would hallucinate results instead of calling the server.
             if tc["name"] not in ALLOWED_TOOL_NAMES and not tc["name"].startswith("mcp__"):
                 print(f"[chat] skipping unknown tool '{tc['name']}'")
+                # The assistant message carrying this tool_call_id was already
+                # appended above. Both OpenAI-compat and Anthropic reject an
+                # assistant tool_calls message with no matching tool response,
+                # so skipping without a result 400s the NEXT round. Every other
+                # skip path in this loop appends an error result; so must this.
+                msgs.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": (
+                        f"Unknown tool: {tc['name']}. It does not exist — do not "
+                        "call it again. Use one of the tools you were given, or "
+                        "answer without tools."
+                    ),
+                })
                 continue
 
             # Truncated tool call: the args JSON was unrecoverable. For file
@@ -1228,7 +1278,7 @@ async def run_chat(
             # keepalive holds the connection) until the app POSTs the result
             # back to /chat/tool_result.
             if tc["name"] in CLIENT_TOOL_NAMES:
-                call_id = tc["id"]
+                call_id = open_client_call(_uid, _run_id)
                 yield {
                     "type": "client_tool",
                     "call_id": call_id,
@@ -1237,7 +1287,7 @@ async def run_chat(
                 }
                 # Truncate BEFORE the chip so both the chip and the model see
                 # the same capped result (parity with server-side tools).
-                tool_result = (await request_client_tool(call_id))[:3000]
+                tool_result = (await await_client_call(call_id))[:3000]
                 yield {"type": "chip", "name": tc["name"], "text": tool_chip(tc, tool_result)}
                 msgs.append({
                     "role": "tool",
@@ -1314,7 +1364,7 @@ async def run_chat(
                     msgs.append({"role": "tool", "tool_call_id": tc["id"],
                                  "content": f"Unknown deploy target '{_proj}'. Allowed: {target_keys()}."})
                     continue
-                call_id = tc["id"]
+                call_id = open_client_call(_uid, _run_id)
                 # Reuse the approval rendezvous + card (approve_edit event).
                 yield {
                     "type": "approve_edit",
@@ -1323,7 +1373,7 @@ async def run_chat(
                     "paths": [f"Deploy: {_proj}"],
                     "diff": deploy_plan(_proj),
                 }
-                decision = (await request_client_tool(
+                decision = (await await_client_call(
                     call_id, timeout=float(settings.code_review_timeout)
                 )).strip().lower()
                 if not decision.startswith("approve"):
@@ -1334,7 +1384,7 @@ async def run_chat(
                         f"The deploy of '{_proj}' was NOT approved, so nothing was built or "
                         "restarted. Do not retry automatically — ask the user how to proceed.")})
                     continue
-                tools_dispatched += 1
+                # (already counted with every other tool above — no second bump)
                 yield f"\n\n> 🚀 *Deploying {_proj} — rebuilding and restarting…*\n\n"
                 _ok, _log = await run_deploy(_proj)
                 print(f"[chat] deploy '{_proj}' {'OK' if _ok else 'FAILED'}")
@@ -1352,7 +1402,7 @@ async def run_chat(
             if code_mode and review_edits and tc["name"] in EDIT_TOOL_NAMES:
                 _diff, _perr, _paths = await preview_edit(tc["name"], tc["arguments"] or {})
                 if _perr is None and _diff and _diff.strip():
-                    call_id = tc["id"]
+                    call_id = open_client_call(_uid, _run_id)
                     yield {
                         "type": "approve_edit",
                         "call_id": call_id,
@@ -1366,7 +1416,7 @@ async def run_chat(
                     # explicit "reject" blocks the edit; if the wait is genuinely
                     # exhausted (run abandoned) the fail-safe APPLIES rather than
                     # hanging the task forever or silently rejecting your work.
-                    decision = (await request_client_tool(
+                    decision = (await await_client_call(
                         call_id, timeout=float(settings.code_review_timeout)
                     )).strip().lower()
                     if decision.startswith("reject"):
@@ -1536,12 +1586,8 @@ async def run_chat(
         f"{time.monotonic() - start:.1f}s | ↑{total_usage['prompt_tokens']} "
         f"↓{total_usage['completion_tokens']}"
     )
-    footer = "" if subagent else stats_footer(models_used, total_usage, time.monotonic() - start, summarized=summarized, labels=model_labels)
-    if footer:
-        yield stats_event(footer, models_used, total_usage,
-                                   time.monotonic() - start, summarized)
-    if stats_out is not None:
-        stats_out.update(total_usage)
+    for _ev in _finish():
+        yield _ev
 
 
 def _specialist_model_for(
