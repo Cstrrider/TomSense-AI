@@ -1,6 +1,6 @@
 # beta/edge-native — session handoff
 
-Last worked: **2026-09-19**. Branch `beta/edge-native`, 4 commits ahead of `main`.
+Last worked: **2026-09-19**. Branch `beta/edge-native`, pushed to origin.
 
 Read `EDGE-NATIVE-SPEC.md` first for the *why*. This file is only the state of
 play and what to do next.
@@ -12,10 +12,10 @@ play and what to do next.
 | Milestone | State |
 |---|---|
 | M0 spec | done — `docs/EDGE-NATIVE-SPEC.md` |
-| M1 edge router + D1 + auth | done, **deployed** |
+| M1 edge router + D1 + auth | done, **deployed and verified live** |
 | M2 duplex voice DO | code complete, **never executed** |
-| M3 sync protocol | done both halves (edge + client) |
-| M4 client shells | Android APK + desktop both build |
+| M3 sync protocol | done both halves; `/sync/pull` verified live |
+| M4 client shells | Android APK + desktop build; Access login implemented |
 | M5 assistant role / wake word / real voice | **not started** |
 | M6 home LAN agent | code complete, **not deployed** |
 | M7 memory layers, cron | stubs only |
@@ -23,7 +23,8 @@ play and what to do next.
 
 ### Deployed (live)
 
-- Worker `tomsense-edge` → `https://tomsense-edge.tdisarro.workers.dev`
+- Worker `tomsense-edge` → **`https://edge.cstrrider.org`** (primary; what the
+  clients use) and `https://tomsense-edge.tdisarro.workers.dev`
 - D1 `tomsense`, id `dab300a7-1f71-4eef-ac8a-cdb91a8b8e7a`, migration `0001` applied
 - R2 `tomsense-files`
 - DOs bound: `VoiceSession`, `DetachedRun`, `HomeLink`
@@ -38,23 +39,54 @@ client/     :androidApp:assembleDebug         APK, ~74 MB debug
 client/     :desktopApp:compileKotlin         clean
 ```
 
+### Verified live (2026-09-19, against edge.cstrrider.org)
+
+Exercised with a device token inserted directly into D1, then with one
+obtained through the real PKCE exchange:
+
+```
+/sync/pull  valid token     → {"cursor":0,"rows":[],"more":false}
+/sync/pull  bad token       → 401
+/chat       valid token     → text… → done, usage {in:16,out:3}
+usage_daily                 → row written, llama-4-scout
+/auth/exchange wrong verifier / unknown code / replay → 400 (identical error)
+/auth/exchange correct      → device token, which then streamed a completion
+```
+
+Test identity was deleted from D1 afterwards.
+
 ---
 
 ## BLOCKERS — both need the owner
 
-### 1. `ACCESS_AUD` is empty → the Worker rejects everything
+### 1. Create the CF Access application, then set `ACCESS_AUD`
 
-`/health` returns `{"ok":true,"accessConfigured":false}`; every other route
-returns **503**. This is deliberate (see `accessConfig()` in `edge/src/index.ts`):
-if the aud check were skipped when unconfigured, an Access JWT minted for any
-other application in the account would authenticate here.
+**This is the only thing standing between here and installing the app.**
 
-To fix: Zero Trust → Access → Applications → the app fronting this Worker →
-copy **Application Audience (AUD) Tag**, then either set `ACCESS_AUD` in
-`edge/wrangler.toml` and redeploy, or `wrangler secret put ACCESS_AUD`.
+Access cannot front a `workers.dev` hostname, so the Worker now also serves
+**`edge.cstrrider.org`** (Workers custom domain, created via API; DNS handled
+automatically; verified serving). The clients default to that URL.
 
-The deploy API token has **no Access:Read**, so this cannot be fetched
-programmatically with current credentials.
+The API token can read Access config but **not write** it (`auth.forbidden` on
+create), so this step is manual. Zero Trust → Access → Applications → Add an
+application → **Self-hosted**:
+
+- Application domain: `edge.cstrrider.org`
+- Session duration: 1 month (otherwise the app re-auths constantly)
+- Policy: Allow → Emails → `cstrrider@gmail.com`
+
+Then copy the **Application Audience (AUD) Tag**, set `ACCESS_AUD` in
+`edge/wrangler.toml`, and `npx wrangler deploy`.
+
+Team domain is already correct — `cstrrider.cloudflareaccess.com`, read off
+the live `tomgpt.cstrrider.org` Access redirect.
+
+Note the earlier claim that the token has "no Access:Read" was wrong: Access
+is 403 at *zone* scope but 200 at *account* scope, and modern Access apps are
+account-scoped. Reads work; writes don't.
+
+Only the browser-JWT path depends on this. **Device-token auth works without
+it** — that is how the whole pipeline was verified end to end.
 
 ### 2. Vectorize permission missing
 
