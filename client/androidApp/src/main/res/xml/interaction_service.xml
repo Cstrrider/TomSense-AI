@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Assistant role metadata.
+
+  sessionService is mandatory — it names the class that hosts the overlay
+  shown on invocation. supportsAssist is what puts TomSense on the
+  power-button hold, and supportsLaunchVoiceAssistFromKeyguard is what lets
+  it answer from the lock screen without unlocking first.
+-->
+<voice-interaction-service
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:sessionService="org.tomsense.android.assist.TomsenseSessionService"
+    android:recognitionService="org.tomsense.android.assist.TomsenseInteractionService"
+    android:supportsAssist="true"
+    android:supportsLaunchVoiceAssistFromKeyguard="true" />

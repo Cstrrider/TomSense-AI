@@ -72,6 +72,17 @@ INSERT OR REPLACE INTO message(
   created_at, deleted, lamport, device_id, dirty
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
+upsertConversationTimestamp:
+UPDATE conversation SET updated_at = ?, dirty = 1 WHERE id = ?;
+
+-- Streaming writes bypass the dirty flag deliberately; see
+-- ChatRepository.updateStreamingContent for why.
+updateMessageContent:
+UPDATE message SET content = ? WHERE id = ?;
+
+markMessageDirty:
+UPDATE message SET lamport = ?, dirty = 1 WHERE id = ?;
+
 dirtyConversations:
 SELECT * FROM conversation WHERE dirty = 1 LIMIT ?;
 

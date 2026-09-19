@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Adaptive-icon foregrounds are masked to the inner ~66dp; keeping the
+         glyph well inside that avoids it being clipped on round launchers. -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M54,32c-7.18,0 -13,5.82 -13,13v10c0,7.18 5.82,13 13,13s13,-5.82 13,-13V45C67,37.82 61.18,32 54,32zM74,55c0,11.05 -8.95,20 -20,20s-20,-8.95 -20,-20h-6c0,13.2 9.88,24.1 22.67,25.76V88h6.66v-7.24C70.12,79.1 80,68.2 80,55H74z" />
+</vector>

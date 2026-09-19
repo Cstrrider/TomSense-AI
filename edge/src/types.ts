@@ -1,6 +1,8 @@
 export interface Env {
   DB: D1Database;
-  VECTORS: VectorizeIndex;
+  /** Memory layer 3 (§9). Optional: the binding is not attached until M7, and
+   *  the deploy token currently lacks Vectorize permission. */
+  VECTORS?: VectorizeIndex;
   FILES: R2Bucket;
   AI: Ai;
 
@@ -12,6 +14,11 @@ export interface Env {
   TIER2_MODEL: string;
   STT_MODEL: string;
   TTS_MODEL: string;
+
+  /** CF Access team domain, e.g. "example.cloudflareaccess.com". */
+  ACCESS_TEAM_DOMAIN: string;
+  /** Access application AUD tag. Unset → all JWT auth is rejected. */
+  ACCESS_AUD: string;
 
   KEY_ENC_SECRET: string;
   HOME_AGENT_TOKEN: string;

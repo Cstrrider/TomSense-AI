@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">TomSense</string>
+    <string name="accessibility_description">Lets TomSense read the screen so you can ask about what you are looking at. Reads on demand only, never continuously.</string>
+    <string name="widget_hint">Ask TomSense…</string>
+</resources>

@@ -7,15 +7,19 @@ compatibility_flags = ["nodejs_compat"]
 [[d1_databases]]
 binding = "DB"
 database_name = "tomsense"
-database_id = "REPLACE_ME"          # `wrangler d1 create tomsense`
+database_id = "dab300a7-1f71-4eef-ac8a-cdb91a8b8e7a"
 migrations_dir = "migrations"
 
 # ─── Vectorize: memory layer 3 ──────────────────────────────────────────────
 # 1536-dim to match text-embedding-3-small / bge-large. Cosine per the
 # narrow-band lesson from news-worker: normalize before insert.
-[[vectorize]]
-binding = "VECTORS"
-index_name = "tomsense-memory"
+#
+# COMMENTED OUT until M7. Nothing references the binding yet, and the current
+# deploy token returns 403 on the Vectorize API, so attaching it would only
+# make `wrangler deploy` fail. Re-enable together with the memory work.
+# [[vectorize]]
+# binding = "VECTORS"
+# index_name = "tomsense-memory"
 
 # ─── R2: /shared replacement + code-mode workspace rehydration (§8) ─────────
 [[r2_buckets]]
@@ -53,6 +57,13 @@ TIER1_MODEL = "cf::@cf/google/gemma-4-26b-a4b-it"
 TIER2_MODEL = "cf::@cf/meta/llama-4-scout-17b-16e-instruct"
 STT_MODEL   = "@cf/deepgram/flux"
 TTS_MODEL   = "@cf/deepgram/aura-2"
+
+# CF Access. ACCESS_AUD must be the AUD tag of the Access application that
+# fronts this Worker. While it is empty the Worker FAILS CLOSED and rejects
+# every JWT — see accessConfig() in src/index.ts for why that beats skipping
+# the check.
+ACCESS_TEAM_DOMAIN = "cstrrider.cloudflareaccess.com"
+ACCESS_AUD = ""
 
 # Secrets (wrangler secret put):
 #   KEY_ENC_SECRET   — wraps provider api_key_enc at rest in D1

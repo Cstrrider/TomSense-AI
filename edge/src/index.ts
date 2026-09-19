@@ -17,11 +17,18 @@ export { VoiceSession } from "./do/voice";
 export { DetachedRun } from "./do/run";
 export { HomeLink } from "./do/homelink";
 
-/** CF Access team domain + application AUD. Set as vars at deploy time. */
-const ACCESS = {
-  teamDomain: "cstrrider.cloudflareaccess.com",
-  aud: "REPLACE_ME", // Access application AUD tag
-};
+/**
+ * CF Access team domain + application AUD, from config rather than hardcoded.
+ *
+ * If ACCESS_AUD is unset we FAIL CLOSED — every Access-JWT request is
+ * rejected. The tempting alternative (skip the aud check when unconfigured)
+ * would mean a token minted for any other application in the account is
+ * accepted here, which is a real privilege-escalation path, not a hypothetical.
+ */
+function accessConfig(env: Env): { teamDomain: string; aud: string } | null {
+  if (!env.ACCESS_TEAM_DOMAIN || !env.ACCESS_AUD) return null;
+  return { teamDomain: env.ACCESS_TEAM_DOMAIN, aud: env.ACCESS_AUD };
+}
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -42,7 +49,21 @@ export default {
       return env.HOMELINK.get(id).fetch(req);
     }
 
-    const who = await authenticate(req, env, ACCESS);
+    // Health check is the ONLY unauthenticated route, and it deliberately
+    // reveals nothing beyond liveness and whether Access is configured.
+    if (path === "/health") {
+      return json({ ok: true, accessConfigured: accessConfig(env) !== null });
+    }
+
+    const cfg = accessConfig(env);
+    if (!cfg) {
+      return json(
+        { error: "ACCESS_TEAM_DOMAIN / ACCESS_AUD not configured on this Worker" },
+        503,
+      );
+    }
+
+    const who = await authenticate(req, env, cfg);
     if (!who) return json({ error: "authentication required" }, 401);
 
     try {

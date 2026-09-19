@@ -1,0 +1,103 @@
+package org.tomsense.android
+
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
+import org.tomsense.db.Message
+import org.tomsense.sync.ChatRequest
+import org.tomsense.sync.SyncStatus
+import org.tomsense.sync.WireMessage
+import org.tomsense.ui.ChatScreen
+
+class MainActivity : ComponentActivity() {
+
+    private val app by lazy { application as TomsenseApp }
+    private lateinit var convId: String
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        setContent {
+            MaterialTheme {
+                var ready by remember { mutableStateOf(false) }
+                val messagesFlow = remember { MutableStateFlow<List<Message>>(emptyList()) }
+                val messages by messagesFlow.collectAsState()
+                val syncStatus by app.sync.status.collectAsState()
+
+                androidx.compose.runtime.LaunchedEffect(Unit) {
+                    // Reuse the most recent conversation, or start one. Both
+                    // paths are local — opening the app never waits on a
+                    // network round trip.
+                    val existing = app.db.schemaQueries.conversationList().executeAsList()
+                    convId = existing.firstOrNull()?.id ?: app.repo.createConversation()
+                    ready = true
+                    app.repo.messages(convId).collect { messagesFlow.value = it }
+                }
+
+                if (ready) {
+                    ChatScreen(
+                        messages = messages,
+                        syncLabel = syncStatus.label(),
+                        onSend = ::send,
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Persist first, then generate.
+     *
+     * The user's turn is committed to SQLite before any network call, so
+     * pressing send with no connection still records the message and it
+     * syncs later. The generation is a separate concern that may fail.
+     */
+    private fun send(text: String) {
+        lifecycleScope.launch {
+            app.repo.appendMessage(convId, "user", text)
+            val assistantId = app.repo.appendMessage(convId, "assistant", "")
+
+            val history = app.db.schemaQueries.messagesFor(convId).executeAsList()
+                .filter { it.content.isNotBlank() }
+                .map { WireMessage(it.role, it.content) }
+
+            val buffer = StringBuilder()
+            runCatching {
+                app.chat.stream(ChatRequest(convId, history)).collect { ev ->
+                    when (ev.type) {
+                        "text" -> {
+                            buffer.append(ev.text.orEmpty())
+                            app.repo.updateStreamingContent(assistantId, buffer.toString())
+                        }
+                        // heartbeat carries no payload; it exists so a long
+                        // silent reasoning stretch isn't mistaken for a dead
+                        // connection. Nothing to render.
+                        "heartbeat" -> Unit
+                        "done" -> app.repo.finishStreaming(assistantId)
+                    }
+                }
+            }.onFailure {
+                app.repo.updateStreamingContent(
+                    assistantId,
+                    buffer.toString().ifEmpty { "[offline — will retry]" },
+                )
+                app.repo.finishStreaming(assistantId)
+            }
+        }
+    }
+}
+
+private fun SyncStatus.label(): String = when (this) {
+    SyncStatus.Idle -> ""
+    SyncStatus.Syncing -> "syncing"
+    is SyncStatus.Error -> "offline"
+}
