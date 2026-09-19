@@ -157,7 +157,13 @@ async function sha256Hex(s: string): Promise<string> {
 export async function authenticate(
   req: Request,
   env: Env,
-  cfg: AccessConfig,
+  /**
+   * Null when Access is not configured. Only the JWT path depends on it —
+   * device tokens are issued and verified entirely by us, so gating them on
+   * Access config would be an unrelated coupling that makes the app
+   * un-testable before Access exists.
+   */
+  cfg: AccessConfig | null,
 ): Promise<Principal | null> {
   const authz = req.headers.get("authorization") ?? "";
   if (authz.toLowerCase().startsWith("bearer ")) {
@@ -175,6 +181,11 @@ export async function authenticate(
     if (!row) return null;
     return { userId: row.user_id, email: row.email, deviceId: row.device_id };
   }
+
+  // Beyond this point only the Access-JWT path remains. With no Access
+  // config there is nothing to verify against, and accepting the request
+  // would mean trusting an unverified header — so refuse.
+  if (!cfg) return null;
 
   const jwt = req.headers.get(ACCESS_JWT_HEADER);
   if (!jwt) return null;

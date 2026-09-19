@@ -99,7 +99,10 @@ export async function resolveProvider(
       id: CF_BUILTIN_ID,
       name: "Cloudflare Workers AI",
       kind: "cf",
-      baseUrl: "", // unused — the AI binding is called directly
+      // Both empty by design: cf-kind never does an HTTP round trip. It is
+      // dispatched through the Workers AI binding, which carries its own
+      // authorization, so there is no base URL and no key to hold.
+      baseUrl: "",
       apiKey: "",
       models: [], // capability comes from the bundled catalogue
       extraBody: {},
@@ -123,7 +126,11 @@ export async function resolveProvider(
 
 export function chatCompletionsUrl(provider: Provider, accountId?: string): string {
   if (provider.kind === "cf") {
-    return `${CF_ACCOUNT_BASE}/${accountId ?? ""}/ai/v1/chat/completions`;
+    // Unused: cf-kind is served by the AI binding in streamWorkersAi, not by
+    // fetch. Kept only so a caller that reaches here gets a URL that fails
+    // loudly rather than a silently malformed one.
+    if (!accountId) return "cf-binding://unrouted";
+    return `${CF_ACCOUNT_BASE}/${accountId}/ai/v1/chat/completions`;
   }
   if (provider.kind === "anthropic") {
     return `${provider.baseUrl}/v1/messages`;

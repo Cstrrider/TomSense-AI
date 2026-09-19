@@ -37,6 +37,17 @@ export interface RoundOptions {
   /** Model string to retry with if the primary stalls. */
   fallback?: { provider: Provider; modelId: string };
   signal?: AbortSignal;
+  /**
+   * Workers AI binding, required for `cf`-kind providers.
+   *
+   * CF models go through the binding rather than the REST endpoint on
+   * purpose. The REST path would need an account id AND an API token stored
+   * as a Worker secret, and the only token available here also carries
+   * Workers/D1/R2 edit rights — concentrating that inside an
+   * internet-facing Worker to call a model is a bad trade. The binding needs
+   * no credential at all.
+   */
+  ai?: Ai;
 }
 
 function shortName(modelId: string): string {
@@ -159,6 +170,10 @@ export async function* streamRound(
   opts: RoundOptions,
   url: string,
 ): AsyncGenerator<StreamEvent> {
+  if (opts.provider.kind === "cf") {
+    yield* streamWorkersAi(opts);
+    return;
+  }
   const toolCalls = new ToolCallAccumulator();
   let content = "";
   let usage = emptyUsage();
@@ -271,6 +286,103 @@ export async function* streamRound(
     usage,
     stalled: !sawAnything,
   };
+}
+
+/**
+ * Cloudflare Workers AI via the `AI` binding.
+ *
+ * Workers AI does NOT speak OpenAI chunk format on the binding: it emits
+ * `data: {"response":"…"}` rather than `choices[0].delta.content`, with usage
+ * on the terminal frame. So this is a separate reader that normalises into the
+ * same StreamEvent contract — the divergence is confined here, and everything
+ * downstream stays format-agnostic.
+ */
+async function* streamWorkersAi(opts: RoundOptions): AsyncGenerator<StreamEvent> {
+  const { ai, modelId, messages, temperature, maxTokens } = opts;
+  if (!ai) {
+    yield { type: "text", text: "\n\n[cf provider selected but no AI binding available]" };
+    yield { type: "done", content: "", toolCalls: [], usage: emptyUsage() };
+    return;
+  }
+
+  const caps = modelCapabilities(opts.provider, modelId);
+  const msgs = caps.vision ? messages : flattenForTextModel(messages as never);
+
+  let content = "";
+  let usage = emptyUsage();
+  let sawAnything = false;
+
+  try {
+    const input: Record<string, unknown> = { messages: msgs, stream: true };
+    if (temperature !== undefined) input["temperature"] = temperature;
+    if (maxTokens !== undefined) input["max_tokens"] = maxTokens;
+
+    const result = (await ai.run(modelId as never, input as never)) as unknown;
+    const body = result as ReadableStream<Uint8Array>;
+    const reader = body.pipeThrough(new TextDecoderStream()).getReader();
+
+    let buf = "";
+    let lastToken = Date.now();
+    let lastEmit = Date.now();
+
+    for (;;) {
+      const timeout = new Promise<"timeout">((r) => setTimeout(() => r("timeout"), HEARTBEAT_MS));
+      const step = await Promise.race([reader.read(), timeout]);
+
+      if (step === "timeout") {
+        const now = Date.now();
+        if (now - lastToken > STALL_MS) {
+          await reader.cancel().catch(() => {});
+          yield { type: "done", content, toolCalls: [], usage, stalled: true };
+          return;
+        }
+        if (now - lastEmit >= HEARTBEAT_MS) {
+          lastEmit = now;
+          yield { type: "heartbeat" };
+        }
+        continue;
+      }
+
+      const { done, value } = step;
+      if (done) break;
+      lastToken = Date.now();
+      buf += value;
+
+      let nl: number;
+      while ((nl = buf.indexOf("\n")) !== -1) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice(5).trim();
+        if (payload === "[DONE]") continue;
+
+        let chunk: Record<string, unknown>;
+        try {
+          chunk = JSON.parse(payload);
+        } catch {
+          continue;
+        }
+
+        const u = chunk["usage"] as Record<string, unknown> | undefined;
+        if (u) usage = readUsage(u);
+
+        const piece = chunk["response"];
+        if (typeof piece === "string" && piece) {
+          const cleaned = stripTemplateTokens(piece);
+          if (cleaned) {
+            sawAnything = true;
+            content += cleaned;
+            lastEmit = Date.now();
+            yield { type: "text", text: cleaned };
+          }
+        }
+      }
+    }
+  } catch (e) {
+    yield { type: "text", text: `\n\n[workers-ai error: ${(e as Error).message}]` };
+  }
+
+  yield { type: "done", content, toolCalls: [], usage, stalled: !sawAnything };
 }
 
 /**

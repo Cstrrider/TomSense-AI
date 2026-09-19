@@ -256,6 +256,7 @@ export class VoiceSession implements DurableObject {
           modelId,
           messages: [{ role: "user", content: prompt }],
           signal: abort.signal,
+          ai: this.env.AI,
         },
         chatCompletionsUrl(provider),
       )) {

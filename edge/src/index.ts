@@ -55,15 +55,10 @@ export default {
       return json({ ok: true, accessConfigured: accessConfig(env) !== null });
     }
 
-    const cfg = accessConfig(env);
-    if (!cfg) {
-      return json(
-        { error: "ACCESS_TEAM_DOMAIN / ACCESS_AUD not configured on this Worker" },
-        503,
-      );
-    }
-
-    const who = await authenticate(req, env, cfg);
+    // Access config gates ONLY the browser JWT path (enforced inside
+    // authenticate). Device-token auth is ours end to end and works without
+    // it, which is what makes the native app testable before Access exists.
+    const who = await authenticate(req, env, accessConfig(env));
     if (!who) return json({ error: "authentication required" }, 401);
 
     try {
@@ -113,6 +108,7 @@ async function chat(req: Request, env: Env, who: Principal): Promise<Response> {
       messages: body.messages,
       tools: body.tools,
       fallback: fbProvider ? { provider: fbProvider, modelId: fb.modelId } : undefined,
+      ai: env.AI,
     },
     (p) => chatCompletionsUrl(p),
   );
