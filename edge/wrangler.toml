@@ -63,7 +63,7 @@ TTS_MODEL   = "@cf/deepgram/aura-2"
 # every JWT — see accessConfig() in src/index.ts for why that beats skipping
 # the check.
 ACCESS_TEAM_DOMAIN = "cstrrider.cloudflareaccess.com"
-ACCESS_AUD = ""
+ACCESS_AUD = "513c6e4e878c148e6774ee322bf616d0506e2f134f7e03ef3c7b8b437ab51e50"
 
 # Secrets (wrangler secret put):
 #   KEY_ENC_SECRET   — wraps provider api_key_enc at rest in D1
