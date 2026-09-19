@@ -1,0 +1,59 @@
+name = "tomsense-edge"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+# ─── D1: sync target (NOT the hot read path — see spec §5) ──────────────────
+[[d1_databases]]
+binding = "DB"
+database_name = "tomsense"
+database_id = "REPLACE_ME"          # `wrangler d1 create tomsense`
+migrations_dir = "migrations"
+
+# ─── Vectorize: memory layer 3 ──────────────────────────────────────────────
+# 1536-dim to match text-embedding-3-small / bge-large. Cosine per the
+# narrow-band lesson from news-worker: normalize before insert.
+[[vectorize]]
+binding = "VECTORS"
+index_name = "tomsense-memory"
+
+# ─── R2: /shared replacement + code-mode workspace rehydration (§8) ─────────
+[[r2_buckets]]
+binding = "FILES"
+bucket_name = "tomsense-files"
+
+# ─── Workers AI: tier-1 models + the whole voice path (flux, aura-2) ────────
+[ai]
+binding = "AI"
+
+# ─── Durable Objects ────────────────────────────────────────────────────────
+[[durable_objects.bindings]]
+name = "VOICE"
+class_name = "VoiceSession"
+
+[[durable_objects.bindings]]
+name = "RUN"
+class_name = "DetachedRun"
+
+[[durable_objects.bindings]]
+name = "HOMELINK"
+class_name = "HomeLink"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["VoiceSession", "DetachedRun", "HomeLink"]
+
+# ─── Cron: scheduled prompts + memory decay ─────────────────────────────────
+[triggers]
+crons = ["*/15 * * * *"]
+
+[vars]
+# Tier defaults (spec §4). Tier 0 is on-device and has no entry here.
+TIER1_MODEL = "cf::@cf/google/gemma-4-26b-a4b-it"
+TIER2_MODEL = "cf::@cf/meta/llama-4-scout-17b-16e-instruct"
+STT_MODEL   = "@cf/deepgram/flux"
+TTS_MODEL   = "@cf/deepgram/aura-2"
+
+# Secrets (wrangler secret put):
+#   KEY_ENC_SECRET   — wraps provider api_key_enc at rest in D1
+#   HOME_AGENT_TOKEN — shared secret the home agent presents to HomeLink
