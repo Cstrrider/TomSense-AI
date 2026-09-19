@@ -104,6 +104,44 @@ That is true *right now* specifically because:
 
 ---
 
+## Recovering this branch after a container reset
+
+`/workspace/tomsense-ai` is container-local and this branch is **not on the
+public remote** (deliberately — it would newly disclose the Access team domain,
+the Worker URL, and the D1 id, none of which are on `main`).
+
+A verified git bundle of the full history lives in R2:
+
+```
+bucket tomsense-files
+key    backups/tomsense-edge-native-20260919.bundle
+```
+
+Restore:
+
+```bash
+set -a && . /workspace/aistack/.env && set +a
+export CLOUDFLARE_API_TOKEN="$CF_API_TOKEN" CLOUDFLARE_ACCOUNT_ID="$CF_ACCOUNT_ID"
+npx wrangler r2 object get \
+  tomsense-files/backups/tomsense-edge-native-20260919.bundle \
+  --file /tmp/ts.bundle --remote
+git clone --branch beta/edge-native /tmp/ts.bundle tomsense-ai
+```
+
+This round trip was tested on 2026-09-19: re-downloaded, sha256 matched, cloned
+clean with all 5 commits. Re-bundle and re-upload after any significant work —
+the backup is only as current as the last upload.
+
+The intended permanent home is a **private** GitHub repo. The PAT in
+`~/.git-credentials` is a fine-grained token that cannot create repositories
+(`Resource not accessible by personal access token`), so the repo must be
+created by the owner, then:
+
+```bash
+git remote add private https://github.com/Cstrrider/<repo>.git
+git push -u private beta/edge-native
+```
+
 ## Environment notes for a fresh container
 
 - **`/workspace/tomsense-ai` is container-local.** The host copy is canonical
