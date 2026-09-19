@@ -1,0 +1,38 @@
+# The entire home footprint after the edge migration.
+#
+# Compare against docker-compose.yml on main, which brings up backend,
+# frontend, postgres, qdrant, searxng, nginx and the docker proxy. This is
+# what replaces all of it.
+
+services:
+  tomsense-homeagent:
+    build: .
+    container_name: tomsense-homeagent
+    restart: unless-stopped
+    environment:
+      EDGE_URL: ${EDGE_URL:?set EDGE_URL to the HomeLink websocket endpoint}
+      HOME_AGENT_TOKEN: ${HOME_AGENT_TOKEN:?set HOME_AGENT_TOKEN to match the Worker secret}
+    volumes:
+      # Read-write on the docker socket is what makes lan_container_restart
+      # work. Be clear-eyed about this: socket access is effectively root on
+      # the host, so the allow-list in src/index.ts is the ONLY thing standing
+      # between an internet-facing Worker and arbitrary container control.
+      #
+      # If you'd rather not accept that, mount it :ro and drop the restart
+      # tool — status and backup queries still work. That is a reasonable
+      # default and the safer starting point.
+      - /var/run/docker.sock:/var/run/docker.sock
+    # The container runs as USER node, which will not have permission on the
+    # docker socket by default. Set this to the host's `getent group docker`
+    # gid. It is deliberately not hardcoded — it differs per host.
+    group_add:
+      - ${DOCKER_GID:?set DOCKER_GID to the host docker group id}
+    networks:
+      - tomsense
+
+    # No ports. No ingress. The agent dials out and nothing dials in.
+
+networks:
+  tomsense:
+    external: true
+    name: tomsense

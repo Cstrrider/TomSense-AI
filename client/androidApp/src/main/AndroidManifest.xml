@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The integration surface (spec §12) — this is the moat, and it is the entire
+  reason a native client is worth the loss of instant OTA web iteration.
+  A Capacitor WebView on server.url can declare none of what follows.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:name=".TomsenseApp"
+        android:label="TomSense"
+        android:icon="@mipmap/ic_launcher"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Tomsense">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- Share-sheet target: select text or an image anywhere and send
+                 it straight into a conversation. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
+        </activity>
+
+        <!-- ── Assistant role ──────────────────────────────────────────────
+             This is the one that matters. Registering as a VoiceInteraction
+             service is what puts TomSense on the power-button hold and the
+             lock screen — "there before you decide to ask".
+
+             Requires the user to pick it in Settings > Default assistant;
+             it cannot be claimed programmatically. -->
+        <service
+            android:name=".assist.TomsenseInteractionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_VOICE_INTERACTION">
+            <meta-data
+                android:name="android.voice_interaction"
+                android:resource="@xml/interaction_service" />
+            <intent-filter>
+                <action android:name="android.service.voice.VoiceInteractionService" />
+            </intent-filter>
+        </service>
+
+        <service
+            android:name=".assist.TomsenseSessionService"
+            android:exported="false"
+            android:permission="android.permission.BIND_VOICE_INTERACTION" />
+
+        <!-- Screen read AND act. The accessibility route is the only way to
+             reach content the assist API does not expose. It is also the most
+             invasive permission on the platform, so it stays strictly opt-in
+             and is not required for anything else to work. -->
+        <service
+            android:name=".assist.ScreenReaderService"
+            android:exported="false"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_config" />
+        </service>
+
+        <!-- Duplex voice runs in a foreground service so a turn survives the
+             screen going off mid-sentence. -->
+        <service
+            android:name=".voice.VoiceService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+
+        <!-- Quick Settings tile: one pull-down to talk. -->
+        <service
+            android:name=".tile.TomsenseTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_tile"
+            android:label="TomSense"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <!-- Notification triage (spec §12). Opt-in, off by default. -->
+        <service
+            android:name=".notify.NotificationTriageService"
+            android:exported="false"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+        <!-- Home-screen widget. -->
+        <receiver
+            android:name=".widget.TomsenseWidgetProvider"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_info" />
+        </receiver>
+
+        <!-- Intent endpoint so Tasker and friends can drive the assistant. -->
+        <activity
+            android:name=".intent.AskActivity"
+            android:exported="true"
+            android:theme="@style/Theme.Tomsense.Transparent">
+            <intent-filter>
+                <action android:name="org.tomsense.ASK" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

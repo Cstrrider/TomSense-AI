@@ -1,0 +1,103 @@
+-- Local store — the SOURCE OF TRUTH (spec §5).
+--
+-- Mirrors the D1 schema, with one addition per table: `dirty`. A row is dirty
+-- when it has local changes not yet acknowledged by the edge. That single flag
+-- is what makes the app work offline: writes land here immediately, the UI
+-- renders from here, and the sync engine drains dirty rows whenever it can.
+--
+-- `lamport` is a per-device logical clock, NOT a timestamp. Device clocks are
+-- wrong often enough (travel, reboots, manual changes) that ordering on them
+-- produces lost writes that are almost impossible to debug after the fact.
+
+CREATE TABLE conversation (
+  id          TEXT NOT NULL PRIMARY KEY,
+  project_id  TEXT,
+  title       TEXT NOT NULL DEFAULT '',
+  model       TEXT NOT NULL DEFAULT '',
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL,
+  deleted     INTEGER NOT NULL DEFAULT 0,
+  lamport     INTEGER NOT NULL,
+  device_id   TEXT NOT NULL,
+  dirty       INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX conversation_updated ON conversation(updated_at DESC);
+CREATE INDEX conversation_dirty ON conversation(dirty);
+
+CREATE TABLE message (
+  id          TEXT NOT NULL PRIMARY KEY,
+  conv_id     TEXT NOT NULL,
+  role        TEXT NOT NULL,
+  content     TEXT NOT NULL,
+  encrypted   INTEGER NOT NULL DEFAULT 0,
+  reasoning   TEXT,
+  tool_calls  TEXT,
+  attachments TEXT,
+  created_at  INTEGER NOT NULL,
+  deleted     INTEGER NOT NULL DEFAULT 0,
+  lamport     INTEGER NOT NULL,
+  device_id   TEXT NOT NULL,
+  dirty       INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX message_conv ON message(conv_id, created_at);
+CREATE INDEX message_dirty ON message(dirty);
+
+-- Single-row table holding sync state. `cursor` is the server seq we have
+-- consumed up to; `lamport` is this device's logical clock.
+CREATE TABLE sync_state (
+  id        INTEGER NOT NULL PRIMARY KEY CHECK (id = 0),
+  device_id TEXT NOT NULL,
+  cursor    INTEGER NOT NULL DEFAULT 0,
+  lamport   INTEGER NOT NULL DEFAULT 0
+);
+
+-- ─── queries ────────────────────────────────────────────────────────────────
+
+conversationList:
+SELECT * FROM conversation WHERE deleted = 0 ORDER BY updated_at DESC;
+
+messagesFor:
+SELECT * FROM message WHERE conv_id = ? AND deleted = 0 ORDER BY created_at;
+
+upsertConversation:
+INSERT OR REPLACE INTO conversation(
+  id, project_id, title, model, created_at, updated_at, deleted, lamport, device_id, dirty
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+upsertMessage:
+INSERT OR REPLACE INTO message(
+  id, conv_id, role, content, encrypted, reasoning, tool_calls, attachments,
+  created_at, deleted, lamport, device_id, dirty
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+dirtyConversations:
+SELECT * FROM conversation WHERE dirty = 1 LIMIT ?;
+
+dirtyMessages:
+SELECT * FROM message WHERE dirty = 1 LIMIT ?;
+
+clearConversationDirty:
+UPDATE conversation SET dirty = 0 WHERE id = ? AND lamport <= ?;
+
+clearMessageDirty:
+UPDATE message SET dirty = 0 WHERE id = ? AND lamport <= ?;
+
+syncState:
+SELECT * FROM sync_state WHERE id = 0;
+
+initSyncState:
+INSERT OR IGNORE INTO sync_state(id, device_id, cursor, lamport) VALUES (0, ?, 0, 0);
+
+setCursor:
+UPDATE sync_state SET cursor = ? WHERE id = 0;
+
+bumpLamport:
+UPDATE sync_state SET lamport = lamport + 1 WHERE id = 0;
+
+-- Remote rows can carry a lamport ahead of ours. Adopting the max keeps this
+-- device's clock monotonic and ahead of anything it has observed, which is
+-- what makes subsequent local edits win as the user expects.
+raiseLamport:
+UPDATE sync_state SET lamport = MAX(lamport, ?) WHERE id = 0;
