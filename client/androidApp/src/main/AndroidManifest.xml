@@ -38,6 +38,24 @@
             </intent-filter>
         </activity>
 
+        <!-- Cloudflare Access login callback.
+             The custom scheme is NOT treated as trusted: any app can claim
+             it, so the redirect carries only a one-time code and the
+             exchange additionally requires the PKCE verifier held in this
+             process. See auth/Login.kt. -->
+        <activity
+            android:name=".auth.AuthCallbackActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:theme="@style/Theme.Tomsense.Transparent">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="tomsense" android:host="auth" />
+            </intent-filter>
+        </activity>
+
         <!-- ── Assistant role ──────────────────────────────────────────────
              This is the one that matters. Registering as a VoiceInteraction
              service is what puts TomSense on the power-button hold and the

@@ -226,6 +226,98 @@ export async function getOrCreateUser(
   return row ?? { id, email };
 }
 
+function b64urlFromBytes(bytes: Uint8Array): string {
+  let s = "";
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/** base64url(SHA-256(verifier)) — must match the app's challenge derivation. */
+export async function pkceChallenge(verifier: string): Promise<string> {
+  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+  return b64urlFromBytes(new Uint8Array(d));
+}
+
+/** Codes are short-lived: they only bridge a browser redirect to one call. */
+const AUTH_CODE_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * Issue a one-time code after a successful Access login. The caller must
+ * already be authenticated via a verified Access JWT.
+ */
+export async function issueAuthCode(
+  env: Env,
+  userId: string,
+  challenge: string,
+  deviceName: string,
+): Promise<string> {
+  const code = crypto.randomUUID().replace(/-/g, "") + crypto.randomUUID().replace(/-/g, "");
+  const now = Date.now();
+  await env.DB.prepare(
+    `INSERT INTO auth_codes (code, user_id, challenge, device_name, created_at, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(code, userId, challenge, deviceName, now, now + AUTH_CODE_TTL_MS)
+    .run();
+  return code;
+}
+
+/**
+ * Redeem a code for a device token.
+ *
+ * Returns null on ANY failure — unknown code, expired, already redeemed, or
+ * a verifier that doesn't match. The caller must not distinguish these to
+ * the client: a specific error ("already redeemed" vs "bad verifier") tells
+ * an interceptor which half of the exchange they got right.
+ */
+export async function redeemAuthCode(
+  env: Env,
+  code: string,
+  verifier: string,
+  platform: string,
+): Promise<{ deviceId: string; token: string } | null> {
+  const row = await env.DB.prepare(
+    `SELECT user_id, challenge, device_name, expires_at, redeemed_at
+       FROM auth_codes WHERE code = ?`,
+  )
+    .bind(code)
+    .first<{
+      user_id: string;
+      challenge: string;
+      device_name: string;
+      expires_at: number;
+      redeemed_at: number | null;
+    }>();
+
+  if (!row) return null;
+  if (row.redeemed_at !== null) return null;
+  if (row.expires_at < Date.now()) return null;
+
+  const expected = await pkceChallenge(verifier);
+  if (!timingSafeEqual(expected, row.challenge)) return null;
+
+  // Mark redeemed with a guard in the WHERE clause so two concurrent
+  // exchanges cannot both succeed; the loser sees 0 changes.
+  const claim = await env.DB.prepare(
+    `UPDATE auth_codes SET redeemed_at = ? WHERE code = ? AND redeemed_at IS NULL`,
+  )
+    .bind(Date.now(), code)
+    .run();
+  if (!claim.meta.changes) return null;
+
+  const deviceId = crypto.randomUUID();
+  const now = Date.now();
+  await env.DB.prepare(
+    `INSERT INTO devices (id, user_id, name, platform, created_at, last_seen_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(deviceId, row.user_id, row.device_name || "device", platform, now, now)
+    .run();
+
+  const token = await issueDeviceToken(env, row.user_id, deviceId);
+  return { deviceId, token };
+}
+
 /** Mint a device token. Returns the plaintext ONCE; only its hash is stored. */
 export async function issueDeviceToken(
   env: Env,

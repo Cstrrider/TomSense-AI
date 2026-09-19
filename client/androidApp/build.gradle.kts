@@ -47,6 +47,7 @@ dependencies {
     implementation(project(":shared"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.browser)
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.ktor.client.okhttp)
     // shared declares these as `implementation`, so they are not on the

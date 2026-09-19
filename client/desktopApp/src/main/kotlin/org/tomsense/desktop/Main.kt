@@ -96,7 +96,7 @@ private class Deps {
     }
 
     companion object {
-        const val DEFAULT_BASE_URL = "https://tomsense-edge.tdisarro.workers.dev"
+        const val DEFAULT_BASE_URL = "https://edge.cstrrider.org"
     }
 }
 

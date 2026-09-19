@@ -9,7 +9,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
+import org.tomsense.android.auth.Login
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import org.tomsense.db.Message
@@ -29,6 +34,20 @@ class MainActivity : ComponentActivity() {
         setContent {
             MaterialTheme {
                 var ready by remember { mutableStateOf(false) }
+                // Re-read on every composition after a resume: the token
+                // arrives via a different activity, so this screen has no
+                // event telling it sign-in finished.
+                var signedIn by remember { mutableStateOf(Login.hasToken(this@MainActivity)) }
+
+                androidx.compose.runtime.DisposableEffect(Unit) {
+                    val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                        if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                            signedIn = Login.hasToken(this@MainActivity)
+                        }
+                    }
+                    lifecycle.addObserver(observer)
+                    onDispose { lifecycle.removeObserver(observer) }
+                }
                 val messagesFlow = remember { MutableStateFlow<List<Message>>(emptyList()) }
                 val messages by messagesFlow.collectAsState()
                 val syncStatus by app.sync.status.collectAsState()
@@ -43,12 +62,20 @@ class MainActivity : ComponentActivity() {
                     app.repo.messages(convId).collect { messagesFlow.value = it }
                 }
 
+                // Chat renders regardless of sign-in — history is local and
+                // must be readable offline and signed-out. The banner only
+                // appears when a reply would fail for lack of a credential.
                 if (ready) {
-                    ChatScreen(
-                        messages = messages,
-                        syncLabel = syncStatus.label(),
-                        onSend = ::send,
-                    )
+                    Column {
+                        if (!signedIn) {
+                            SignInBanner(onSignIn = { Login.start(this@MainActivity, app.baseUrl) })
+                        }
+                        ChatScreen(
+                            messages = messages,
+                            syncLabel = syncStatus.label(),
+                            onSend = ::send,
+                        )
+                    }
                 }
             }
         }
@@ -91,6 +118,28 @@ class MainActivity : ComponentActivity() {
                     buffer.toString().ifEmpty { "[offline — will retry]" },
                 )
                 app.repo.finishStreaming(assistantId)
+            }
+        }
+    }
+}
+
+@androidx.compose.runtime.Composable
+private fun SignInBanner(onSignIn: () -> Unit) {
+    androidx.compose.material3.Surface(
+        color = androidx.compose.material3.MaterialTheme.colorScheme.tertiaryContainer,
+        modifier = androidx.compose.ui.Modifier.fillMaxWidth(),
+    ) {
+        androidx.compose.foundation.layout.Row(
+            modifier = androidx.compose.ui.Modifier.padding(12.dp),
+            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+        ) {
+            androidx.compose.material3.Text(
+                "Not signed in — replies need Cloudflare Access.",
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                modifier = androidx.compose.ui.Modifier.weight(1f),
+            )
+            androidx.compose.material3.TextButton(onClick = onSignIn) {
+                androidx.compose.material3.Text("Sign in")
             }
         }
     }

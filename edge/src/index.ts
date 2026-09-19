@@ -8,7 +8,7 @@
  */
 
 import type { Env, Principal, ChatMessage } from "./types";
-import { authenticate, issueDeviceToken } from "./auth";
+import { authenticate, issueDeviceToken, issueAuthCode, redeemAuthCode } from "./auth";
 import { parseModelStr, resolveProvider, chatCompletionsUrl } from "./providers";
 import { streamWithFallback } from "./stream";
 import { push, pull, type PushRequest } from "./sync";
@@ -55,6 +55,13 @@ export default {
       return json({ ok: true, accessConfigured: accessConfig(env) !== null });
     }
 
+    // Code exchange is UNAUTHENTICATED by necessity — the app has no
+    // credential yet; that is the point of the flow. It is protected by the
+    // PKCE verifier instead, so an intercepted code alone is not enough.
+    if (path === "/auth/exchange" && req.method === "POST") {
+      return await authExchange(req, env);
+    }
+
     // Access config gates ONLY the browser JWT path (enforced inside
     // authenticate). Device-token auth is ours end to end and works without
     // it, which is what makes the native app testable before Access exists.
@@ -66,6 +73,7 @@ export default {
       if (path === "/sync/push" && req.method === "POST") return await syncPush(req, env, who);
       if (path === "/sync/pull" && req.method === "GET") return await syncPull(url, env, who);
       if (path === "/auth/device" && req.method === "POST") return await registerDevice(req, env, who);
+      if (path === "/auth/mobile") return await authMobile(url, env, who);
       if (path === "/voice") return await voice(req, env, who);
       if (path.startsWith("/run/")) return await run(req, env, who, path);
       if (path === "/home/tools") return await homeTools(env);
@@ -189,6 +197,68 @@ async function registerDevice(req: Request, env: Env, who: Principal): Promise<R
   // Returned exactly once — only the hash is retained.
   const token = await issueDeviceToken(env, who.userId, deviceId);
   return json({ deviceId, token });
+}
+
+/**
+ * GET /auth/mobile — the browser leg of native login.
+ *
+ * Reached only AFTER Cloudflare Access has authenticated the user, so `who`
+ * is already a verified identity. Mints a one-time code and bounces back to
+ * the app's custom scheme.
+ *
+ * The redirect deliberately carries no token — see migrations/0002 for why.
+ */
+async function authMobile(url: URL, env: Env, who: Principal): Promise<Response> {
+  const challenge = url.searchParams.get("challenge") ?? "";
+  const state = url.searchParams.get("state") ?? "";
+  const name = url.searchParams.get("name") ?? "android device";
+
+  // A missing challenge would silently downgrade the flow to "code alone is
+  // sufficient", which is exactly the weakness PKCE exists to close.
+  if (challenge.length < 32) {
+    return json({ error: "missing or too-short PKCE challenge" }, 400);
+  }
+
+  const code = await issueAuthCode(env, who.userId, challenge, name);
+  const target = `tomsense://auth?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`;
+
+  // 302 with an HTML fallback: some in-app browsers refuse to follow a
+  // redirect to a non-http scheme, and a dead-end blank page is a
+  // maddening failure mode to debug on a phone.
+  return new Response(
+    `<!doctype html><meta charset="utf-8"><title>TomSense</title>
+<meta http-equiv="refresh" content="0;url=${target}">
+<body style="font-family:system-ui;padding:2rem">
+<p>Signing you in…</p>
+<p><a href="${target}">Tap here if nothing happens</a></p>`,
+    { status: 302, headers: { location: target, "content-type": "text/html; charset=utf-8" } },
+  );
+}
+
+/**
+ * POST /auth/exchange — redeem a one-time code for a device token.
+ *
+ * Unauthenticated by design. Every failure returns the SAME error, because
+ * distinguishing "expired" from "wrong verifier" tells an attacker which
+ * half of the exchange they have.
+ */
+async function authExchange(req: Request, env: Env): Promise<Response> {
+  const body = (await req.json().catch(() => null)) as {
+    code?: string;
+    verifier?: string;
+    platform?: string;
+  } | null;
+
+  const code = body?.code ?? "";
+  const verifier = body?.verifier ?? "";
+  if (!code || verifier.length < 32) {
+    return json({ error: "invalid code or verifier" }, 400);
+  }
+
+  const result = await redeemAuthCode(env, code, verifier, body?.platform ?? "android");
+  if (!result) return json({ error: "invalid code or verifier" }, 400);
+
+  return json(result);
 }
 
 async function voice(req: Request, env: Env, who: Principal): Promise<Response> {

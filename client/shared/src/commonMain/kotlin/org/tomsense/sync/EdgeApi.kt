@@ -35,10 +35,29 @@ class EdgeApi(
             parameter("cursor", cursor)
         }.body()
 
+    /**
+     * Redeem a one-time login code for a device token.
+     *
+     * Intentionally sends no Authorization header: the caller has no
+     * credential yet, which is the whole point. The PKCE verifier is what
+     * authorises this call.
+     */
+    suspend fun exchange(code: String, verifier: String, platform: String): ExchangeResult =
+        http.post("$baseUrl/auth/exchange") {
+            contentType(ContentType.Application.Json)
+            setBody(ExchangeRequest(code, verifier, platform))
+        }.body()
+
     private fun io.ktor.client.request.HttpRequestBuilder.auth() {
         deviceToken()?.let { header("Authorization", "Bearer $it") }
     }
 }
+
+@kotlinx.serialization.Serializable
+data class ExchangeRequest(val code: String, val verifier: String, val platform: String)
+
+@kotlinx.serialization.Serializable
+data class ExchangeResult(val deviceId: String, val token: String)
 
 @kotlinx.serialization.Serializable
 data class PushAck(val applied: Int, val cursor: Long)
