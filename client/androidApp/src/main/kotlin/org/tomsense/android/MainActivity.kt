@@ -12,6 +12,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import org.tomsense.android.auth.Login
@@ -66,7 +69,18 @@ class MainActivity : ComponentActivity() {
                 // must be readable offline and signed-out. The banner only
                 // appears when a reply would fail for lack of a credential.
                 if (ready) {
-                    Column {
+                    // targetSdk 35 means Android 15 draws edge-to-edge with no
+                    // opt-out, so anything above the Scaffold must apply the
+                    // status-bar inset itself or it renders under the clock.
+                    //
+                    // statusBarsPadding() CONSUMES the inset, so the Scaffold
+                    // and TopAppBar inside ChatScreen see zero and don't pad a
+                    // second time. Padding the banner alone would leave the
+                    // signed-in case double-spaced.
+                    // imePadding for the same reason: edge-to-edge means the
+                    // keyboard overlaps content, and adjustResize alone no
+                    // longer lifts the input row on Android 15.
+                    Column(Modifier.statusBarsPadding().imePadding()) {
                         if (!signedIn) {
                             SignInBanner(onSignIn = { Login.start(this@MainActivity, app.baseUrl) })
                         }
