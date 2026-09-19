@@ -106,11 +106,23 @@ That is true *right now* specifically because:
 
 ## Recovering this branch after a container reset
 
-`/workspace/tomsense-ai` is container-local and this branch is **not on the
-public remote** (deliberately — it would newly disclose the Access team domain,
-the Worker URL, and the D1 id, none of which are on `main`).
+`/workspace/tomsense-ai` is container-local, so nothing here survives a reset.
+The branch itself does — it is **pushed to the public remote**:
 
-A verified git bundle of the full history lives in R2:
+```bash
+git clone -b beta/edge-native https://github.com/Cstrrider/TomSense-AI.git
+```
+
+That is the primary recovery path. Note what going public disclosed, since it
+is not on `main` and is worth remembering before adding more: the CF Access
+team domain, the Worker URL, the D1 database id, and the home-agent container
+allow-list. No credentials — the D1 id is inert without the API token, and both
+endpoints fail closed. **Keep it that way: never commit anything from
+`edge/.secrets/`.**
+
+A verified git bundle of the full history also lives in R2. It is now a
+*secondary* copy rather than the only one, kept because it sits outside the
+Cloudflare control plane and is the concentration hedge spec §11 argues for:
 
 ```
 bucket tomsense-files
@@ -129,23 +141,20 @@ git clone --branch beta/edge-native /tmp/ts.bundle tomsense-ai
 ```
 
 This round trip was tested on 2026-09-19: re-downloaded, sha256 matched, cloned
-clean with all 5 commits. Re-bundle and re-upload after any significant work —
-the backup is only as current as the last upload.
+clean. The bundle is only as current as the last upload, so prefer the git
+clone above unless you specifically want an off-Cloudflare copy.
 
-The intended permanent home is a **private** GitHub repo. The PAT in
-`~/.git-credentials` is a fine-grained token that cannot create repositories
-(`Resource not accessible by personal access token`), so the repo must be
-created by the owner, then:
-
-```bash
-git remote add private https://github.com/Cstrrider/<repo>.git
-git push -u private beta/edge-native
-```
+One credential limit worth knowing before planning anything around it: the PAT
+in `~/.git-credentials` is a **fine-grained token that cannot create
+repositories** (`Resource not accessible by personal access token`). It can
+push to existing ones. Creating a new repo needs the owner, or
+*Administration: read & write* added to the token.
 
 ## Environment notes for a fresh container
 
 - **`/workspace/tomsense-ai` is container-local.** The host copy is canonical
-  and this branch lives only in git — re-clone from the remote.
+  for the deployed stack; this branch lives in git — re-clone from `origin`
+  (see the recovery section above).
 - Gradle: there is **no wrapper jar**. Use the cached distribution:
   ```
   source /home/node/android-toolchain/env.sh
