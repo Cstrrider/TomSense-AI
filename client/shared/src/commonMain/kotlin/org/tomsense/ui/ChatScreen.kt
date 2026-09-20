@@ -23,6 +23,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -50,6 +51,8 @@ fun ChatScreen(
     syncLabel: String,
     onSend: (String) -> Unit,
     modifier: Modifier = Modifier,
+    /** Null on platforms with no settings surface yet (desktop). */
+    onOpenSettings: (() -> Unit)? = null,
 ) {
     var draft by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
@@ -72,8 +75,13 @@ fun ChatScreen(
                     Text(
                         syncLabel,
                         style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.padding(end = 12.dp),
+                        modifier = Modifier.padding(end = 4.dp),
                     )
+                    onOpenSettings?.let {
+                        IconButton(onClick = it) {
+                            Icon(Icons.Filled.Settings, contentDescription = "Providers and models")
+                        }
+                    }
                 },
             )
         },

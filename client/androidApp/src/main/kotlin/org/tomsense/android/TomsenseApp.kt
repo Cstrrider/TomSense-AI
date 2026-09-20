@@ -15,6 +15,7 @@ import org.tomsense.data.ChatRepository
 import org.tomsense.db.TomsenseDb
 import org.tomsense.sync.ChatClient
 import org.tomsense.sync.EdgeApi
+import org.tomsense.sync.ProvidersApi
 import org.tomsense.sync.SyncEngine
 import java.util.UUID
 
@@ -33,6 +34,8 @@ class TomsenseApp : Application() {
     lateinit var repo: ChatRepository
         private set
     lateinit var chat: ChatClient
+        private set
+    lateinit var providers: ProvidersApi
         private set
     lateinit var sync: SyncEngine
         private set
@@ -63,6 +66,7 @@ class TomsenseApp : Application() {
         val token = { prefs.getString(KEY_DEVICE_TOKEN, null) }
 
         edge = EdgeApi(http, url, token)
+        providers = ProvidersApi(http, url, token)
         chat = ChatClient(http, url, token)
         sync = SyncEngine(db, edge, scope)
 

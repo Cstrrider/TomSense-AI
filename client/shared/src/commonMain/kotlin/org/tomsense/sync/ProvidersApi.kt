@@ -1,0 +1,125 @@
+package org.tomsense.sync
+
+import io.ktor.client.HttpClient
+import io.ktor.client.call.body
+import io.ktor.client.request.delete
+import io.ktor.client.request.get
+import io.ktor.client.request.header
+import io.ktor.client.request.patch
+import io.ktor.client.request.post
+import io.ktor.client.request.put
+import io.ktor.client.request.setBody
+import io.ktor.http.ContentType
+import io.ktor.http.contentType
+import kotlinx.serialization.Serializable
+
+/**
+ * BYO-key provider management.
+ *
+ * Note what is absent: any way to read a stored API key back. The server
+ * returns `hasKey` only, so the UI can show "key set" but can never display
+ * or re-send the secret. Editing a provider without touching the key field
+ * leaves it untouched server-side.
+ */
+class ProvidersApi(
+    private val http: HttpClient,
+    private val baseUrl: String,
+    private val deviceToken: () -> String?,
+) {
+    suspend fun list(): List<ProviderView> =
+        http.get("$baseUrl/providers") { auth() }.body()
+
+    suspend fun models(): ModelsResponse =
+        http.get("$baseUrl/models") { auth() }.body()
+
+    suspend fun create(req: CreateProvider): CreatedProvider =
+        http.post("$baseUrl/providers") {
+            auth(); contentType(ContentType.Application.Json); setBody(req)
+        }.body()
+
+    suspend fun update(id: String, req: UpdateProvider) {
+        http.patch("$baseUrl/providers/$id") {
+            auth(); contentType(ContentType.Application.Json); setBody(req)
+        }
+    }
+
+    suspend fun delete(id: String) {
+        http.delete("$baseUrl/providers/$id") { auth() }
+    }
+
+    suspend fun setDefaultModel(model: String) {
+        http.put("$baseUrl/me/default-model") {
+            auth(); contentType(ContentType.Application.Json); setBody(DefaultModel(model))
+        }
+    }
+
+    private fun io.ktor.client.request.HttpRequestBuilder.auth() {
+        deviceToken()?.let { header("Authorization", "Bearer $it") }
+    }
+}
+
+@Serializable
+data class ProviderView(
+    val id: String,
+    val name: String,
+    val kind: String,
+    val baseUrl: String,
+    val hasKey: Boolean,
+    val keyless: Boolean,
+    val models: List<WireModel> = emptyList(),
+    val enabled: Boolean,
+    val builtin: Boolean,
+)
+
+@Serializable
+data class WireModel(
+    val id: String,
+    val vision: Boolean = false,
+    val reasoning: Boolean = false,
+    val context: Int? = null,
+)
+
+@Serializable
+data class ModelOption(
+    val value: String,
+    val label: String,
+    val provider: String,
+    val vision: Boolean = false,
+    val reasoning: Boolean = false,
+    val context: Int? = null,
+)
+
+@Serializable
+data class Preset(val kind: String, val name: String, val baseUrl: String)
+
+@Serializable
+data class ModelsResponse(
+    val models: List<ModelOption> = emptyList(),
+    val defaultModel: String = "",
+    val presets: List<Preset> = emptyList(),
+)
+
+@Serializable
+data class CreateProvider(
+    val name: String,
+    val kind: String,
+    val baseUrl: String,
+    val apiKey: String,
+    val models: List<WireModel> = emptyList(),
+)
+
+@Serializable
+data class CreatedProvider(val id: String)
+
+@Serializable
+data class UpdateProvider(
+    val name: String? = null,
+    val baseUrl: String? = null,
+    /** null means "leave the stored key alone" — NOT "clear it". */
+    val apiKey: String? = null,
+    val models: List<WireModel>? = null,
+    val enabled: Boolean? = null,
+)
+
+@Serializable
+private data class DefaultModel(val model: String)

@@ -38,6 +38,11 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false"
+            android:label="Providers &amp; models" />
+
         <!-- Cloudflare Access login callback.
              The custom scheme is NOT treated as trusted: any app can claim
              it, so the redirect carries only a one-time code and the

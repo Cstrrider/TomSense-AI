@@ -88,6 +88,14 @@ class MainActivity : ComponentActivity() {
                             messages = messages,
                             syncLabel = syncStatus.label(),
                             onSend = ::send,
+                            onOpenSettings = {
+                                startActivity(
+                                    android.content.Intent(
+                                        this@MainActivity,
+                                        SettingsActivity::class.java,
+                                    ),
+                                )
+                            },
                         )
                     }
                 }

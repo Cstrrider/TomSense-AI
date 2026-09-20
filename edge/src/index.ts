@@ -12,6 +12,16 @@ import { authenticate, issueDeviceToken, issueAuthCode, redeemAuthCode } from ".
 import { parseModelStr, resolveProvider, chatCompletionsUrl } from "./providers";
 import { streamWithFallback } from "./stream";
 import { push, pull, type PushRequest } from "./sync";
+import {
+  listProviders,
+  createProvider,
+  updateProvider,
+  deleteProvider,
+  listModels,
+  getDefaultModel,
+  setDefaultModel,
+  PROVIDER_PRESETS,
+} from "./providers_api";
 
 export { VoiceSession } from "./do/voice";
 export { DetachedRun } from "./do/run";
@@ -74,6 +84,36 @@ export default {
       if (path === "/sync/pull" && req.method === "GET") return await syncPull(url, env, who);
       if (path === "/auth/device" && req.method === "POST") return await registerDevice(req, env, who);
       if (path === "/auth/mobile") return await authMobile(url, env, who);
+      if (path === "/providers") {
+        if (req.method === "GET") return json(await listProviders(env, who));
+        if (req.method === "POST") {
+          const r = await createProvider(env, who, await req.json());
+          return "error" in r ? json(r, 400) : json(r);
+        }
+      }
+      if (path.startsWith("/providers/")) {
+        const pid = decodeURIComponent(path.slice("/providers/".length));
+        if (req.method === "PATCH") {
+          const r = await updateProvider(env, who, pid, await req.json());
+          return "error" in r ? json(r, 400) : json(r);
+        }
+        if (req.method === "DELETE") {
+          const r = await deleteProvider(env, who, pid);
+          return "error" in r ? json(r, 400) : json(r);
+        }
+      }
+      if (path === "/models" && req.method === "GET") {
+        return json({
+          models: await listModels(env, who),
+          defaultModel: await getDefaultModel(env, who),
+          presets: PROVIDER_PRESETS,
+        });
+      }
+      if (path === "/me/default-model" && req.method === "PUT") {
+        const b = (await req.json()) as { model?: string };
+        await setDefaultModel(env, who, b.model ?? "");
+        return json({ ok: true });
+      }
       if (path === "/voice") return await voice(req, env, who);
       if (path.startsWith("/run/")) return await run(req, env, who, path);
       if (path === "/home/tools") return await homeTools(env);
@@ -100,7 +140,12 @@ async function chat(req: Request, env: Env, who: Principal): Promise<Response> {
     tools?: unknown[];
   };
 
-  const { providerId, modelId } = parseModelStr(body.model, env.TIER2_MODEL);
+  // Resolution order: what the client asked for → the user's saved default →
+  // the Worker's built-in tier-2. The env var is now only a last-resort
+  // bootstrap for an account that has chosen nothing, not the product's
+  // answer to "which model am I using".
+  const chosen = body.model || (await getDefaultModel(env, who)) || env.TIER2_MODEL;
+  const { providerId, modelId } = parseModelStr(chosen, env.TIER2_MODEL);
   const provider = await resolveProvider(env, who.userId, providerId);
   if (!provider) return json({ error: `unknown provider ${providerId}` }, 400);
 
