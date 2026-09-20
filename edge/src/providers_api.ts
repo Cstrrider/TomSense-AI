@@ -16,7 +16,7 @@
  */
 
 import type { Env, Principal, ModelEntry } from "./types";
-import { encryptKey } from "./crypto";
+import { encryptKey, decryptKey } from "./crypto";
 import { CF_MODELS } from "./cf_catalog";
 import { CF_BUILTIN_ID } from "./providers";
 
@@ -299,6 +299,159 @@ export async function listModels(env: Env, who: Principal): Promise<ModelOption[
     }
   }
   return out;
+}
+
+/** Is this provider currently usable — enabled, and keyed unless keyless? */
+async function usableProviderIds(env: Env, who: Principal): Promise<Set<string>> {
+  const list = await listProviders(env, who);
+  return new Set(
+    list.filter((p) => p.enabled && (p.keyless || p.hasKey)).map((p) => p.id),
+  );
+}
+
+/**
+ * Decide which model a chat request actually runs on.
+ *
+ * This exists because "Cloudflare is optional" was previously cosmetic: the
+ * toggle hid CF from the picker while TIER2_MODEL (a CF model) stayed the
+ * hardcoded default and TIER1_MODEL (also CF) stayed the hardcoded stall
+ * fallback. Disabling Cloudflare hid it from the UI and kept sending traffic
+ * there — the worst kind of setting, one that lies.
+ *
+ * Order: explicit request → saved default → first usable model → null.
+ * A saved default whose provider has since been disabled or had its key
+ * removed is ignored rather than attempted.
+ */
+export async function resolveChatModel(
+  env: Env,
+  who: Principal,
+  requested?: string | null,
+): Promise<{ model: string } | { error: string }> {
+  const usable = await usableProviderIds(env, who);
+
+  const isUsable = (spec: string): boolean => {
+    const sep = spec.indexOf("::");
+    const pid = sep === -1 ? CF_BUILTIN_ID : spec.slice(0, sep) || CF_BUILTIN_ID;
+    return usable.has(pid);
+  };
+
+  // An explicit request from the client is honoured only if it is usable;
+  // silently substituting a different model would be worse than failing.
+  if (requested) {
+    return isUsable(requested)
+      ? { model: requested }
+      : { error: `model ${requested} is not available (provider disabled or missing key)` };
+  }
+
+  const saved = await getDefaultModel(env, who);
+  if (saved && isUsable(saved)) return { model: saved };
+
+  const options = await listModels(env, who);
+  const first = options[0];
+  if (first) return { model: first.value };
+
+  return {
+    error:
+      "no usable model — enable Cloudflare or add a provider with an API key in settings",
+  };
+}
+
+/**
+ * Stall fallback, but only when it is legitimately available.
+ *
+ * Previously this was TIER1_MODEL unconditionally, i.e. always Cloudflare.
+ * Now it is skipped entirely if CF is disabled, and never returns the model
+ * that just stalled.
+ */
+export async function resolveFallbackModel(
+  env: Env,
+  who: Principal,
+  primary: string,
+): Promise<string | null> {
+  const usable = await usableProviderIds(env, who);
+
+  if (usable.has(CF_BUILTIN_ID) && env.TIER1_MODEL !== primary) {
+    return env.TIER1_MODEL;
+  }
+  const options = await listModels(env, who);
+  return options.find((m) => m.value !== primary)?.value ?? null;
+}
+
+/**
+ * Ask a provider what models it serves, via the OpenAI-shaped /models
+ * endpoint. Ported from `providers.discover_models` on stable.
+ *
+ * Best-effort by design: returns [] on any failure rather than throwing, so a
+ * provider without a /models endpoint degrades to manual entry instead of
+ * blocking the add-provider form.
+ */
+export async function discoverModels(
+  env: Env,
+  who: Principal,
+  body: { providerId?: string; baseUrl?: string; apiKey?: string },
+): Promise<{ models: string[] }> {
+  let baseUrl = "";
+  let apiKey = "";
+  let kind = "openai-compat";
+
+  if (body.providerId) {
+    const row = await env.DB.prepare(
+      `SELECT kind, base_url, api_key_enc FROM providers WHERE id = ? AND user_id = ?`,
+    )
+      .bind(body.providerId, who.userId)
+      .first<{ kind: string; base_url: string; api_key_enc: string }>();
+    if (!row) return { models: [] };
+    kind = row.kind;
+    baseUrl = row.base_url;
+    // A key supplied with the request means the form is ROTATING the key —
+    // discover with the new one, not the stored one, or the user can't
+    // validate a replacement before saving it.
+    apiKey = body.apiKey || (row.api_key_enc ? await decryptKey(env, row.api_key_enc) : "");
+  } else {
+    baseUrl = (body.baseUrl ?? "").trim();
+    apiKey = body.apiKey ?? "";
+  }
+
+  if (!/^https:\/\//i.test(baseUrl)) return { models: [] };
+
+  // Tolerate a base URL that already points at the completions endpoint.
+  let base = baseUrl.replace(/\/+$/, "");
+  if (base.endsWith("/chat/completions")) {
+    base = base.slice(0, -"/chat/completions".length);
+  }
+
+  const headers: Record<string, string> = {};
+  if (apiKey) {
+    if (kind === "anthropic") {
+      headers["x-api-key"] = apiKey;
+      headers["anthropic-version"] = "2023-06-01";
+    } else {
+      headers["authorization"] = `Bearer ${apiKey}`;
+    }
+  }
+
+  try {
+    const res = await fetch(`${base}/models`, {
+      headers,
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) return { models: [] };
+
+    const data = (await res.json()) as unknown;
+    const rows = Array.isArray(data)
+      ? data
+      : ((data as { data?: unknown[] })?.data ?? []);
+    if (!Array.isArray(rows)) return { models: [] };
+
+    const ids = new Set<string>();
+    for (const row of rows) {
+      const id = typeof row === "string" ? row : (row as { id?: unknown })?.id;
+      if (typeof id === "string" && id) ids.add(id);
+    }
+    return { models: [...ids].sort() };
+  } catch {
+    return { models: [] };
+  }
 }
 
 export async function getDefaultModel(env: Env, who: Principal): Promise<string> {

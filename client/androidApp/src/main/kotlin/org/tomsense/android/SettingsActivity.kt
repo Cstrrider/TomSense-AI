@@ -10,7 +10,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Checkbox
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
@@ -69,6 +73,7 @@ class SettingsActivity : ComponentActivity() {
                 var defaultModel by remember { mutableStateOf("") }
                 var error by remember { mutableStateOf<String?>(null) }
                 var adding by remember { mutableStateOf(false) }
+                var query by remember { mutableStateOf("") }
 
                 suspend fun refresh() {
                     runCatching {
@@ -96,6 +101,23 @@ class SettingsActivity : ComponentActivity() {
                         }
 
                         item { SectionHeader("Default model") }
+
+                        // Search matters more than it looks: OpenRouter alone
+                        // advertises 300+ models, so an unfiltered radio list
+                        // is unusable on a phone.
+                        item {
+                            OutlinedTextField(
+                                value = query,
+                                onValueChange = { query = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true,
+                                label = { Text("Search models") },
+                                placeholder = { Text("opus, vision, 70b…") },
+                            )
+                        }
+
+                        val filtered = models.filter { it.matches(query) }
+
                         if (models.isEmpty()) {
                             item {
                                 Text(
@@ -104,8 +126,17 @@ class SettingsActivity : ComponentActivity() {
                                     style = MaterialTheme.typography.bodySmall,
                                 )
                             }
+                        } else if (filtered.isEmpty()) {
+                            item {
+                                Text(
+                                    "No model matches \"$query\" " +
+                                        "(${models.size} available)",
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
                         }
-                        items(models, key = { it.value }) { m ->
+
+                        items(filtered, key = { it.value }) { m ->
                             ModelRow(
                                 model = m,
                                 selected = m.value == defaultModel,
@@ -155,6 +186,14 @@ class SettingsActivity : ComponentActivity() {
                 if (adding) {
                     AddProviderDialog(
                         presets = presets,
+                        onDiscover = { baseUrl, apiKey ->
+                            app.providers.discover(
+                                org.tomsense.sync.DiscoverRequest(
+                                    baseUrl = baseUrl,
+                                    apiKey = apiKey,
+                                ),
+                            ).models
+                        },
                         onDismiss = { adding = false },
                         onCreate = { req ->
                             adding = false
@@ -170,6 +209,24 @@ class SettingsActivity : ComponentActivity() {
             }
         }
     }
+}
+
+/**
+ * Match a model against the search box.
+ *
+ * Searches the provider name and capability tags as well as the id, so
+ * "vision", "anthropic" and "opus" all narrow usefully. Terms are ANDed, so
+ * "claude vision" works the way people expect.
+ */
+private fun ModelOption.matches(query: String): Boolean {
+    val q = query.trim()
+    if (q.isEmpty()) return true
+    val haystack = buildString {
+        append(label).append(' ').append(provider)
+        if (vision) append(" vision")
+        if (reasoning) append(" reasoning")
+    }.lowercase()
+    return q.lowercase().split(' ').filter { it.isNotEmpty() }.all { haystack.contains(it) }
 }
 
 @Composable
@@ -226,10 +283,19 @@ private fun ProviderCard(
     }
 }
 
+/**
+ * Add-provider form with model discovery.
+ *
+ * Ported from stable's `/me/providers/discover`: hit the provider's
+ * OpenAI-shaped `/models` endpoint and let the user tick what they want,
+ * instead of typing ids from memory. Manual entry stays as the fallback,
+ * because plenty of endpoints don't implement `/models`.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AddProviderDialog(
     presets: List<Preset>,
+    onDiscover: suspend (baseUrl: String, apiKey: String) -> List<String>,
     onDismiss: () -> Unit,
     onCreate: (CreateProvider) -> Unit,
 ) {
@@ -237,14 +303,25 @@ private fun AddProviderDialog(
     var kind by remember { mutableStateOf("openai-compat") }
     var baseUrl by remember { mutableStateOf("") }
     var apiKey by remember { mutableStateOf("") }
-    var modelIds by remember { mutableStateOf("") }
     var presetMenu by remember { mutableStateOf(false) }
+
+    var discovered by remember { mutableStateOf<List<String>>(emptyList()) }
+    var chosen by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var discovering by remember { mutableStateOf(false) }
+    var discoverNote by remember { mutableStateOf<String?>(null) }
+    var modelFilter by remember { mutableStateOf("") }
+    var manualIds by remember { mutableStateOf("") }
+
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Add provider") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.heightIn(max = 520.dp).verticalScroll(rememberScrollState()),
+            ) {
                 Row {
                     TextButton(onClick = { presetMenu = true }) { Text("Use a preset") }
                     DropdownMenu(expanded = presetMenu, onDismissRequest = { presetMenu = false }) {
@@ -267,29 +344,95 @@ private fun AddProviderDialog(
                     apiKey,
                     { apiKey = it },
                     label = { Text("API key") },
-                    // Masked: this is the only place the key is ever visible,
-                    // and it is never readable again after saving.
+                    // Masked, and this is the only moment it is ever visible —
+                    // the server never returns it again.
                     visualTransformation = PasswordVisualTransformation(),
                 )
-                OutlinedTextField(
-                    modelIds,
-                    { modelIds = it },
-                    label = { Text("Model IDs (one per line)") },
-                )
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Button(
+                        enabled = !discovering && baseUrl.startsWith("https://"),
+                        onClick = {
+                            discovering = true
+                            discoverNote = null
+                            scope.launch {
+                                val found = runCatching {
+                                    onDiscover(baseUrl.trim(), apiKey)
+                                }.getOrDefault(emptyList())
+                                discovered = found
+                                discovering = false
+                                discoverNote = if (found.isEmpty()) {
+                                    "No models returned — check the key, or enter ids manually below."
+                                } else {
+                                    "${found.size} models found"
+                                }
+                            }
+                        },
+                    ) { Text(if (discovering) "Fetching…" else "Fetch models") }
+
+                    discoverNote?.let {
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(start = 8.dp),
+                        )
+                    }
+                }
+
+                if (discovered.isNotEmpty()) {
+                    OutlinedTextField(
+                        modelFilter,
+                        { modelFilter = it },
+                        singleLine = true,
+                        label = { Text("Filter") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    // Cap the rendered list: OpenRouter returns 300+ and
+                    // composing them all inside a dialog janks badly.
+                    val shown = discovered
+                        .filter { it.contains(modelFilter.trim(), ignoreCase = true) }
+                        .take(60)
+                    shown.forEach { id ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = id in chosen,
+                                onCheckedChange = {
+                                    chosen = if (id in chosen) chosen - id else chosen + id
+                                },
+                            )
+                            Text(id, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    if (discovered.size > shown.size) {
+                        Text(
+                            "…${discovered.size - shown.size} more — narrow the filter",
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                    }
+                } else {
+                    OutlinedTextField(
+                        manualIds,
+                        { manualIds = it },
+                        label = { Text("Model IDs (one per line)") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
             }
         },
         confirmButton = {
             TextButton(onClick = {
+                val ids = if (chosen.isNotEmpty()) {
+                    chosen.toList().sorted()
+                } else {
+                    manualIds.lines().map { it.trim() }.filter { it.isNotEmpty() }
+                }
                 onCreate(
                     CreateProvider(
                         name = name.trim(),
                         kind = kind,
                         baseUrl = baseUrl.trim(),
                         apiKey = apiKey,
-                        models = modelIds.lines()
-                            .map { it.trim() }
-                            .filter { it.isNotEmpty() }
-                            .map { org.tomsense.sync.WireModel(id = it) },
+                        models = ids.map { org.tomsense.sync.WireModel(id = it) },
                     ),
                 )
             }) { Text("Add") }

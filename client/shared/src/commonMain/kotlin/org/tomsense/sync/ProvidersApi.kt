@@ -47,6 +47,16 @@ class ProvidersApi(
         http.delete("$baseUrl/providers/$id") { auth() }
     }
 
+    /**
+     * Ask a provider what it serves. Best-effort: the server returns an empty
+     * list rather than an error when a provider has no /models endpoint, so
+     * the form falls back to manual entry instead of blocking.
+     */
+    suspend fun discover(req: DiscoverRequest): DiscoverResponse =
+        http.post("$baseUrl/providers/discover") {
+            auth(); contentType(ContentType.Application.Json); setBody(req)
+        }.body()
+
     suspend fun setDefaultModel(model: String) {
         http.put("$baseUrl/me/default-model") {
             auth(); contentType(ContentType.Application.Json); setBody(DefaultModel(model))
@@ -110,6 +120,20 @@ data class CreateProvider(
 
 @Serializable
 data class CreatedProvider(val id: String)
+
+@Serializable
+data class DiscoverRequest(
+    /** Discover against a saved provider using its stored key… */
+    val providerId: String? = null,
+    /** …or against an in-progress form before it has been saved. */
+    val baseUrl: String? = null,
+    /** Supplying a key for a saved provider discovers with the NEW key,
+     *  so a rotation can be validated before it is committed. */
+    val apiKey: String? = null,
+)
+
+@Serializable
+data class DiscoverResponse(val models: List<String> = emptyList())
 
 @Serializable
 data class UpdateProvider(

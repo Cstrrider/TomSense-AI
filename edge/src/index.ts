@@ -20,6 +20,9 @@ import {
   listModels,
   getDefaultModel,
   setDefaultModel,
+  resolveChatModel,
+  resolveFallbackModel,
+  discoverModels,
   PROVIDER_PRESETS,
 } from "./providers_api";
 
@@ -91,6 +94,9 @@ export default {
           return "error" in r ? json(r, 400) : json(r);
         }
       }
+      if (path === "/providers/discover" && req.method === "POST") {
+        return json(await discoverModels(env, who, await req.json()));
+      }
       if (path.startsWith("/providers/")) {
         const pid = decodeURIComponent(path.slice("/providers/".length));
         if (req.method === "PATCH") {
@@ -140,19 +146,20 @@ async function chat(req: Request, env: Env, who: Principal): Promise<Response> {
     tools?: unknown[];
   };
 
-  // Resolution order: what the client asked for → the user's saved default →
-  // the Worker's built-in tier-2. The env var is now only a last-resort
-  // bootstrap for an account that has chosen nothing, not the product's
-  // answer to "which model am I using".
-  const chosen = body.model || (await getDefaultModel(env, who)) || env.TIER2_MODEL;
-  const { providerId, modelId } = parseModelStr(chosen, env.TIER2_MODEL);
+  // Honours which providers are actually enabled and keyed, so disabling
+  // Cloudflare genuinely stops Cloudflare traffic rather than just hiding it
+  // from the picker.
+  const picked = await resolveChatModel(env, who, body.model);
+  if ("error" in picked) return json(picked, 400);
+
+  const { providerId, modelId } = parseModelStr(picked.model, env.TIER2_MODEL);
   const provider = await resolveProvider(env, who.userId, providerId);
   if (!provider) return json({ error: `unknown provider ${providerId}` }, 400);
 
-  // Tier-1 is the fallback for a stalled tier-2/3 model: cheap, fast, and
-  // almost never the thing that stalls.
-  const fb = parseModelStr(env.TIER1_MODEL, env.TIER1_MODEL);
-  const fbProvider = await resolveProvider(env, who.userId, fb.providerId);
+  // Stall fallback, skipped entirely when nothing suitable is available.
+  const fbSpec = await resolveFallbackModel(env, who, picked.model);
+  const fb = fbSpec ? parseModelStr(fbSpec, fbSpec) : null;
+  const fbProvider = fb ? await resolveProvider(env, who.userId, fb.providerId) : null;
 
   const events = streamWithFallback(
     {
@@ -160,7 +167,7 @@ async function chat(req: Request, env: Env, who: Principal): Promise<Response> {
       modelId,
       messages: body.messages,
       tools: body.tools,
-      fallback: fbProvider ? { provider: fbProvider, modelId: fb.modelId } : undefined,
+      fallback: fbProvider && fb ? { provider: fbProvider, modelId: fb.modelId } : undefined,
       ai: env.AI,
     },
     (p) => chatCompletionsUrl(p),
