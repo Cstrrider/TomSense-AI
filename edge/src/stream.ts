@@ -278,27 +278,34 @@ export async function* streamRound(
     yield { type: "text", text: `\n\n[stream error: ${(e as Error).name}: ${(e as Error).message}]` };
   }
 
-  // A clean close with zero output is the other shape of "went silent".
+  // A clean close with zero output is the other shape of "went silent" — but
+  // a round that produced only tool calls emitted no text by design and must
+  // not be mistaken for one.
+  const calls = toolCalls.finish();
   yield {
     type: "done",
     content,
-    toolCalls: toolCalls.finish(),
+    toolCalls: calls,
     usage,
-    stalled: !sawAnything,
+    stalled: !sawAnything && calls.length === 0,
   };
 }
 
 /**
  * Cloudflare Workers AI via the `AI` binding.
  *
- * Workers AI does NOT speak OpenAI chunk format on the binding: it emits
- * `data: {"response":"…"}` rather than `choices[0].delta.content`, with usage
- * on the terminal frame. So this is a separate reader that normalises into the
- * same StreamEvent contract — the divergence is confined here, and everything
- * downstream stays format-agnostic.
+ * Workers AI emits a hybrid chunk: it carries BOTH a bare `response` string and
+ * an OpenAI-shaped `choices[0].delta`. The delta is the richer of the two — it
+ * is the only one that carries tool calls — so it wins where present, with
+ * `response` as the fallback for models that omit `choices`. Reading both and
+ * appending both would duplicate every token.
+ *
+ * Tool definitions are passed straight through. Without that, the default
+ * Cloudflare models silently cannot call tools at all, which would make every
+ * device tool a no-op on the out-of-the-box configuration.
  */
 async function* streamWorkersAi(opts: RoundOptions): AsyncGenerator<StreamEvent> {
-  const { ai, modelId, messages, temperature, maxTokens } = opts;
+  const { ai, modelId, messages, tools, temperature, maxTokens } = opts;
   if (!ai) {
     yield { type: "text", text: "\n\n[cf provider selected but no AI binding available]" };
     yield { type: "done", content: "", toolCalls: [], usage: emptyUsage() };
@@ -308,12 +315,14 @@ async function* streamWorkersAi(opts: RoundOptions): AsyncGenerator<StreamEvent>
   const caps = modelCapabilities(opts.provider, modelId);
   const msgs = caps.vision ? messages : flattenForTextModel(messages as never);
 
+  const toolCalls = new ToolCallAccumulator();
   let content = "";
   let usage = emptyUsage();
   let sawAnything = false;
 
   try {
     const input: Record<string, unknown> = { messages: msgs, stream: true };
+    if (tools?.length) input["tools"] = tools;
     if (temperature !== undefined) input["temperature"] = temperature;
     if (maxTokens !== undefined) input["max_tokens"] = maxTokens;
 
@@ -363,10 +372,26 @@ async function* streamWorkersAi(opts: RoundOptions): AsyncGenerator<StreamEvent>
           continue;
         }
 
+        // Intermediate frames carry per-chunk counts and the terminal frame
+        // carries the cumulative total, so last-write-wins is correct here.
         const u = chunk["usage"] as Record<string, unknown> | undefined;
         if (u) usage = readUsage(u);
 
-        const piece = chunk["response"];
+        const choices = chunk["choices"] as Record<string, unknown>[] | undefined;
+        const delta = choices?.[0]?.["delta"] as Record<string, unknown> | undefined;
+
+        if (delta?.["tool_calls"]) toolCalls.push(delta["tool_calls"]);
+
+        const reasoning = delta?.["reasoning_content"] ?? delta?.["reasoning"];
+        if (typeof reasoning === "string" && reasoning) {
+          sawAnything = true;
+          lastEmit = Date.now();
+          yield { type: "reasoning", text: reasoning };
+        }
+
+        // Prefer the delta; fall back to `response` only when there is no
+        // `choices` at all, or the same token is emitted twice.
+        const piece = delta ? delta["content"] : chunk["response"];
         if (typeof piece === "string" && piece) {
           const cleaned = stripTemplateTokens(piece);
           if (cleaned) {
@@ -382,7 +407,15 @@ async function* streamWorkersAi(opts: RoundOptions): AsyncGenerator<StreamEvent>
     yield { type: "text", text: `\n\n[workers-ai error: ${(e as Error).message}]` };
   }
 
-  yield { type: "done", content, toolCalls: [], usage, stalled: !sawAnything };
+  const calls = toolCalls.finish();
+  yield {
+    type: "done",
+    content,
+    toolCalls: calls,
+    usage,
+    // A round that produced only tool calls is a working round, not a stall.
+    stalled: !sawAnything && calls.length === 0,
+  };
 }
 
 /**

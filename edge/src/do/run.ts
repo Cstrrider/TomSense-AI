@@ -9,23 +9,83 @@
  * storage, survives eviction, and the phone can close the socket, sleep, or
  * change networks and still reattach by run_id — which is the behaviour you
  * actually want when a frontier model takes 90 seconds.
+ *
+ * The DO owns the *whole* generation, not one model call, because a generation
+ * with tools is inherently multi-round: model → tool calls → results → model
+ * again. Putting that loop in the Worker would mean the round trip dies with
+ * the request that started it, which is precisely the failure this object
+ * exists to prevent. One consequence worth stating plainly: the producer is
+ * here, so usage accounting is here too — a client that walks away mid-reply
+ * must still be billed for the tokens it caused.
  */
 
-import type { Env, StreamEvent } from "./../types";
+import type { Env, StreamEvent, ToolCall, ChatMessage, Usage } from "./../types";
+import { parseModelStr, resolveProvider, chatCompletionsUrl } from "./../providers";
+import { streamWithFallback } from "./../stream";
+
+/**
+ * Ceiling on model→tool→model cycles in a single run.
+ *
+ * A model that calls a tool, dislikes the result, and calls it again will do
+ * that forever given the chance, and every cycle is a paid request. Twelve is
+ * well past what a legitimate task needs while still bounding the bill.
+ */
+const MAX_ROUNDS = 12;
+
+/**
+ * Stop persisting replay text past this size.
+ *
+ * A DO storage value is capped at 128 KiB. Streaming is unaffected — this only
+ * bounds what a *reconnecting* client can be caught up on, and 96 KiB is far
+ * longer than any real reply. Silently exceeding the cap would make `put`
+ * throw mid-run and lose the run entirely, which is much worse than a
+ * truncated replay.
+ */
+const MAX_REPLAY_CHARS = 96_000;
+
+/** Persist no more often than this while tokens stream. */
+const PERSIST_INTERVAL_MS = 1_000;
+
+type RunStatus = "running" | "awaiting_tools" | "done" | "error" | "cancelled";
+
+interface CompletedRound {
+  content: string;
+  toolCalls: ToolCall[];
+  usage: Usage;
+  stalled?: boolean;
+}
 
 interface RunRecord {
   id: string;
   userId: string;
   convId: string;
-  status: "running" | "done" | "error" | "cancelled";
-  /** Everything emitted so far, so a late subscriber can be caught up. */
-  events: StreamEvent[];
+  /** Resolved at /chat time so model-selection errors surface synchronously. */
+  model: string;
+  fallbackModel: string | null;
+  status: RunStatus;
+  /** The running conversation — grows with each assistant turn and tool result. */
+  messages: ChatMessage[];
+  tools: unknown[];
+  /**
+   * Replay state, deliberately compacted rather than an event log. Storing
+   * every delta would blow the value limit on a long answer and replay
+   * hundreds of one-token frames to a reconnecting client for no benefit.
+   */
+  content: string;
+  reasoning: string;
+  rounds: CompletedRound[];
+  pendingToolCalls: ToolCall[];
   error?: string;
 }
 
 export class DetachedRun implements DurableObject {
-  private subscribers = new Set<WebSocket>();
+  /** SSE subscribers. A dead writer is dropped, never awaited. */
+  private subscribers = new Set<WritableStreamDefaultWriter<Uint8Array>>();
+  private sockets = new Set<WebSocket>();
   private record: RunRecord | null = null;
+  private abort: AbortController | null = null;
+  private lastPersist = 0;
+  private encoder = new TextEncoder();
 
   constructor(
     private readonly ctx: DurableObjectState,
@@ -34,13 +94,18 @@ export class DetachedRun implements DurableObject {
 
   async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
+    const tail = url.pathname.split("/").pop() ?? "";
 
-    if (url.pathname.endsWith("/attach")) return this.attach(req);
-    if (url.pathname.endsWith("/cancel")) return this.cancel();
-    if (url.pathname.endsWith("/start")) return this.start(req);
+    if (tail === "start") return this.start(req);
+    if (tail === "attach") return this.attach(req);
+    if (tail === "cancel") return this.cancel();
+    if (tail === "tool_result") return this.toolResult(req);
+    if (tail === "state") return this.state();
 
     return new Response("not found", { status: 404 });
   }
+
+  // ─── lifecycle ────────────────────────────────────────────────────────────
 
   private async load(): Promise<RunRecord | null> {
     if (this.record) return this.record;
@@ -48,84 +113,425 @@ export class DetachedRun implements DurableObject {
     return this.record;
   }
 
-  private async persist(): Promise<void> {
-    if (this.record) await this.ctx.storage.put("record", this.record);
+  private async persist(force = false): Promise<void> {
+    if (!this.record) return;
+    const now = Date.now();
+    if (!force && now - this.lastPersist < PERSIST_INTERVAL_MS) return;
+    this.lastPersist = now;
+
+    // Truncate the replay copy only; the live stream already went out intact.
+    const rec = this.record;
+    const safe: RunRecord =
+      rec.content.length > MAX_REPLAY_CHARS
+        ? { ...rec, content: rec.content.slice(0, MAX_REPLAY_CHARS) }
+        : rec;
+    await this.ctx.storage.put("record", safe);
   }
 
   private async start(req: Request): Promise<Response> {
-    const body = (await req.json()) as { id: string; userId: string; convId: string };
+    const body = (await req.json()) as {
+      id: string;
+      userId: string;
+      convId: string;
+      model: string;
+      fallbackModel: string | null;
+      messages: ChatMessage[];
+      tools?: unknown[];
+    };
+
     this.record = {
       id: body.id,
       userId: body.userId,
       convId: body.convId,
+      model: body.model,
+      fallbackModel: body.fallbackModel,
       status: "running",
-      events: [],
+      messages: body.messages,
+      tools: body.tools ?? [],
+      content: "",
+      reasoning: "",
+      rounds: [],
+      pendingToolCalls: [],
     };
-    await this.persist();
+    await this.persist(true);
+
+    // Not awaited: /start returns immediately so the caller can attach. The
+    // DO stays alive for the duration because of waitUntil.
+    this.ctx.waitUntil(this.runRounds());
     return Response.json({ ok: true, runId: body.id });
   }
 
+  private async state(): Promise<Response> {
+    const rec = await this.load();
+    if (!rec) return new Response("no such run", { status: 404 });
+    return Response.json({
+      id: rec.id,
+      status: rec.status,
+      model: rec.model,
+      content: rec.content,
+      pendingToolCalls: rec.pendingToolCalls,
+      error: rec.error,
+    });
+  }
+
+  // ─── subscribers ──────────────────────────────────────────────────────────
+
   /**
-   * Attach a subscriber. Replays everything already emitted BEFORE streaming
-   * live events — without the replay, a client that reconnects mid-run sees
-   * the tail of a sentence and no way to recover the beginning.
+   * Attach a subscriber. Replays what has already been produced BEFORE
+   * streaming live events — without the replay, a client that reconnects
+   * mid-run sees the tail of a sentence and no way to recover the beginning.
    */
   private async attach(req: Request): Promise<Response> {
     const rec = await this.load();
     if (!rec) return new Response("no such run", { status: 404 });
 
-    if (req.headers.get("upgrade") !== "websocket") {
-      return Response.json({ status: rec.status, events: rec.events });
+    if (req.headers.get("upgrade") === "websocket") return this.attachSocket(rec);
+
+    const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+    const writer = writable.getWriter();
+
+    // Queued, never awaited. Nothing is reading this stream yet — the Response
+    // carrying it has not been returned — and a default TransformStream has a
+    // readable highWaterMark of 0, so awaiting the first write here deadlocks
+    // the attach. Enqueue order is preserved without the await.
+    for (const ev of this.replayEvents(rec)) this.send(writer, ev);
+
+    if (rec.status === "running" || rec.status === "awaiting_tools") {
+      this.subscribers.add(writer);
+    } else {
+      this.finish(writer);
     }
 
+    return new Response(readable, {
+      headers: {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+        connection: "keep-alive",
+      },
+    });
+  }
+
+  private attachSocket(rec: RunRecord): Response {
     const pair = new WebSocketPair();
     const [client, server] = [pair[0], pair[1]];
     server.accept();
 
-    for (const ev of rec.events) server.send(JSON.stringify(ev));
+    for (const ev of this.replayEvents(rec)) server.send(JSON.stringify(ev));
 
-    if (rec.status === "running") {
-      this.subscribers.add(server);
-      server.addEventListener("close", () => this.subscribers.delete(server));
+    if (rec.status === "running" || rec.status === "awaiting_tools") {
+      this.sockets.add(server);
+      server.addEventListener("close", () => this.sockets.delete(server));
     } else {
       server.close();
     }
-
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  /** Called by the producer as the model streams. */
-  async emit(ev: StreamEvent): Promise<void> {
-    const rec = await this.load();
-    if (!rec || rec.status !== "running") return;
+  /**
+   * Reconstruct the stream a late subscriber missed.
+   *
+   * Reasoning comes first because that is the order it was produced in, and a
+   * client that renders reasoning in a separate pane relies on it.
+   */
+  private replayEvents(rec: RunRecord): StreamEvent[] {
+    const out: StreamEvent[] = [{ type: "run", runId: rec.id, status: rec.status }];
+    if (rec.reasoning) out.push({ type: "reasoning", text: rec.reasoning });
+    if (rec.content) out.push({ type: "text", text: rec.content });
+    for (const r of rec.rounds) {
+      out.push({
+        type: "done",
+        content: r.content,
+        toolCalls: r.toolCalls,
+        usage: r.usage,
+        stalled: r.stalled,
+      });
+    }
+    if (rec.status !== "running" && rec.status !== "awaiting_tools") {
+      out.push({ type: "end", status: rec.status, error: rec.error });
+    }
+    return out;
+  }
 
-    rec.events.push(ev);
-    if (ev.type === "done") rec.status = "done";
-    await this.persist();
+  /**
+   * Enqueue one SSE frame.
+   *
+   * The write is deliberately NOT awaited. Awaiting it means the generation
+   * proceeds at the speed of the slowest subscriber, so a phone that sleeps
+   * with the socket still open would stall the run — reintroducing the exact
+   * client dependency this object exists to remove. A failed write means that
+   * subscriber is gone, and only that subscriber is dropped.
+   */
+  private send(w: WritableStreamDefaultWriter<Uint8Array>, ev: StreamEvent): void {
+    w.write(this.encoder.encode(`data: ${JSON.stringify(ev)}\n\n`)).catch(() => {
+      this.subscribers.delete(w);
+    });
+  }
 
-    for (const ws of this.subscribers) {
+  /** Terminate one subscriber's stream: end-of-stream marker, then close. */
+  private finish(w: WritableStreamDefaultWriter<Uint8Array>): void {
+    w.write(this.encoder.encode("data: [DONE]\n\n")).catch(() => {});
+    w.close().catch(() => {});
+  }
+
+  /** Fan out to every subscriber. */
+  private emit(ev: StreamEvent): void {
+    for (const w of [...this.subscribers]) this.send(w, ev);
+    for (const ws of [...this.sockets]) {
       try {
         ws.send(JSON.stringify(ev));
       } catch {
-        this.subscribers.delete(ws);
+        this.sockets.delete(ws);
       }
     }
   }
 
-  private async cancel(): Promise<Response> {
-    const rec = await this.load();
-    if (rec && rec.status === "running") {
-      rec.status = "cancelled";
-      await this.persist();
-    }
-    for (const ws of this.subscribers) {
+  /** Terminal: tell every subscriber the run is over and close them out. */
+  private closeAll(status: RunStatus, error?: string): void {
+    this.emit({ type: "end", status, error });
+    for (const w of [...this.subscribers]) this.finish(w);
+    this.subscribers.clear();
+    for (const ws of [...this.sockets]) {
       try {
         ws.close();
       } catch {
         /* already gone */
       }
     }
-    this.subscribers.clear();
-    return Response.json({ ok: true });
+    this.sockets.clear();
+  }
+
+  // ─── the generation loop ──────────────────────────────────────────────────
+
+  /**
+   * Drive model rounds until the model stops asking for tools.
+   *
+   * Returns (rather than finishing the run) when tool calls are outstanding:
+   * the run parks in `awaiting_tools` and resumes from /tool_result. That park
+   * is the whole point — it is what lets the phone execute a device tool, take
+   * ten seconds over a permission prompt, and hand the result back.
+   */
+  private async runRounds(): Promise<void> {
+    const rec = await this.load();
+    if (!rec) return;
+
+    try {
+      while (rec.status === "running") {
+        if (rec.rounds.length >= MAX_ROUNDS) {
+          this.emit({
+            type: "text",
+            text: `\n\n*[stopped after ${MAX_ROUNDS} tool rounds]*`,
+          });
+          rec.status = "done";
+          break;
+        }
+
+        const round = await this.oneRound(rec);
+        if (!round) return; // cancelled mid-flight; cancel() owns the terminal
+
+        rec.rounds.push(round);
+
+        // The assistant turn must go into the transcript verbatim, tool calls
+        // included — a provider that receives tool results for calls it has no
+        // record of making will reject the request.
+        rec.messages.push({
+          role: "assistant",
+          content: round.content,
+          ...(round.toolCalls.length
+            ? {
+                tool_calls: round.toolCalls.map((t) => ({
+                  id: t.id,
+                  type: "function",
+                  function: { name: t.name, arguments: JSON.stringify(t.arguments ?? {}) },
+                })),
+              }
+            : {}),
+        } as ChatMessage);
+
+        this.emit({
+          type: "done",
+          content: round.content,
+          toolCalls: round.toolCalls,
+          usage: round.usage,
+          stalled: round.stalled,
+        });
+
+        if (round.toolCalls.length) {
+          rec.pendingToolCalls = round.toolCalls;
+          rec.status = "awaiting_tools";
+          await this.persist(true);
+          await this.syncStatus(rec);
+          return; // parked — /tool_result resumes us
+        }
+
+        rec.status = "done";
+      }
+    } catch (e) {
+      rec.status = "error";
+      rec.error = (e as Error).message;
+    }
+
+    await this.persist(true);
+    await this.syncStatus(rec);
+    this.closeAll(rec.status, rec.error);
+  }
+
+  /** One model call. Returns null if the run was cancelled while streaming. */
+  private async oneRound(rec: RunRecord): Promise<CompletedRound | null> {
+    const { providerId, modelId } = parseModelStr(rec.model, this.env.TIER2_MODEL);
+    const provider = await resolveProvider(this.env, rec.userId, providerId);
+    if (!provider) throw new Error(`unknown provider ${providerId}`);
+
+    let fallback: { provider: NonNullable<typeof provider>; modelId: string } | undefined;
+    if (rec.fallbackModel) {
+      const fb = parseModelStr(rec.fallbackModel, rec.fallbackModel);
+      const fbProvider = await resolveProvider(this.env, rec.userId, fb.providerId);
+      if (fbProvider) fallback = { provider: fbProvider, modelId: fb.modelId };
+    }
+
+    this.abort = new AbortController();
+    const events = streamWithFallback(
+      {
+        provider,
+        modelId,
+        messages: rec.messages,
+        tools: rec.tools.length ? rec.tools : undefined,
+        fallback,
+        signal: this.abort.signal,
+        ai: this.env.AI,
+      },
+      (p) => chatCompletionsUrl(p),
+    );
+
+    for await (const ev of events) {
+      if (rec.status === "cancelled") return null;
+
+      if (ev.type === "done") {
+        this.abort = null;
+        await this.recordUsage(rec, providerId, modelId, ev.usage);
+        return {
+          content: ev.content,
+          toolCalls: ev.toolCalls,
+          usage: ev.usage,
+          stalled: ev.stalled,
+        };
+      }
+
+      if (ev.type === "text") rec.content += ev.text;
+      if (ev.type === "reasoning") rec.reasoning += ev.text;
+      this.emit(ev);
+      if (ev.type !== "heartbeat") await this.persist();
+    }
+
+    this.abort = null;
+    return null;
+  }
+
+  // ─── client callbacks ─────────────────────────────────────────────────────
+
+  /**
+   * POST /tool_result — hand back what the client's tools produced and resume.
+   *
+   * Results are matched to outstanding calls by id and anything unrecognised is
+   * ignored: a stale retry from a client that reconnected twice must not be
+   * able to inject a tool message for a call the model never made.
+   */
+  private async toolResult(req: Request): Promise<Response> {
+    const rec = await this.load();
+    if (!rec) return new Response("no such run", { status: 404 });
+    if (rec.status !== "awaiting_tools") {
+      return Response.json({ error: `run is ${rec.status}, not awaiting tools` }, { status: 409 });
+    }
+
+    const body = (await req.json()) as {
+      results: { id: string; name?: string; content: string }[];
+    };
+    const outstanding = new Map(rec.pendingToolCalls.map((t) => [t.id, t]));
+
+    for (const r of body.results ?? []) {
+      const call = outstanding.get(r.id);
+      if (!call) continue;
+      rec.messages.push({
+        role: "tool",
+        content: r.content,
+        tool_call_id: r.id,
+        name: call.name,
+      });
+      outstanding.delete(r.id);
+    }
+
+    // A tool the client could not run still needs an answer, or the provider
+    // rejects the next request for an unanswered call and the run wedges.
+    for (const [, call] of outstanding) {
+      rec.messages.push({
+        role: "tool",
+        content: JSON.stringify({ error: "no result returned by client" }),
+        tool_call_id: call.id,
+        name: call.name,
+      });
+    }
+
+    rec.pendingToolCalls = [];
+    rec.status = "running";
+    await this.persist(true);
+    await this.syncStatus(rec);
+
+    this.ctx.waitUntil(this.runRounds());
+    return Response.json({ ok: true, round: rec.rounds.length });
+  }
+
+  private async cancel(): Promise<Response> {
+    const rec = await this.load();
+    if (!rec) return new Response("no such run", { status: 404 });
+
+    if (rec.status === "running" || rec.status === "awaiting_tools") {
+      rec.status = "cancelled";
+      // Abort first: the in-flight provider fetch keeps charging tokens until
+      // the socket actually closes, so "stop" has to reach the network.
+      this.abort?.abort();
+      this.abort = null;
+      await this.persist(true);
+      await this.syncStatus(rec);
+      this.closeAll("cancelled");
+    }
+    return Response.json({ ok: true, status: rec.status });
+  }
+
+  // ─── durable index ────────────────────────────────────────────────────────
+
+  /**
+   * Mirror status into D1 so a run remains discoverable after this object is
+   * evicted — the DO is the run, but D1 is how a cold client finds it.
+   */
+  private async syncStatus(rec: RunRecord): Promise<void> {
+    const ended = rec.status === "running" || rec.status === "awaiting_tools" ? null : Date.now();
+    await this.env.DB.prepare(
+      `UPDATE runs SET status = ?, ended_at = ?, error = ? WHERE id = ?`,
+    )
+      .bind(rec.status, ended, rec.error ?? null, rec.id)
+      .run()
+      .catch(() => {});
+  }
+
+  private async recordUsage(
+    rec: RunRecord,
+    providerId: string,
+    modelId: string,
+    usage: Usage,
+  ): Promise<void> {
+    const day = new Date().toISOString().slice(0, 10);
+    await this.env.DB.prepare(
+      `INSERT INTO usage_daily
+         (user_id, day, provider_id, model_id, tokens_in, tokens_out, cache_read, cache_write, requests)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+       ON CONFLICT(user_id, day, provider_id, model_id) DO UPDATE SET
+         tokens_in   = tokens_in   + excluded.tokens_in,
+         tokens_out  = tokens_out  + excluded.tokens_out,
+         cache_read  = cache_read  + excluded.cache_read,
+         cache_write = cache_write + excluded.cache_write,
+         requests    = requests    + 1`,
+    )
+      .bind(rec.userId, day, providerId, modelId, usage.in, usage.out, usage.cache_read, usage.cache_write)
+      .run()
+      .catch(() => {});
   }
 }

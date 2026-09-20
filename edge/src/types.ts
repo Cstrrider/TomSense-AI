@@ -38,13 +38,27 @@ export interface Principal {
  *   text       incremental assistant content
  *   reasoning  incremental reasoning trace (thinking models)
  *   heartbeat  liveness during a long silent stretch; carries no payload
- *   done       terminal, exactly once, carries tool_calls/content/usage
+ *   done       end of one model ROUND, carrying tool_calls/content/usage
+ *
+ * Two events are additions, both consequences of the generation living in a
+ * Durable Object rather than inside the request that started it:
+ *
+ *   run        first frame; carries the run id, so the client can reconnect,
+ *              stop, or return tool results for this generation
+ *   end        the run as a whole is finished — distinct from `done`, which is
+ *              now a round boundary. A generation that uses tools emits
+ *              several `done`s and exactly one `end`.
+ *
+ * A generation that calls no tools emits one `done` then `end`, so what a
+ * simple client sees is unchanged from main.
  */
 export type StreamEvent =
   | { type: "text"; text: string }
   | { type: "reasoning"; text: string }
   | { type: "heartbeat" }
-  | { type: "done"; content: string; toolCalls: ToolCall[]; usage: Usage; stalled?: boolean };
+  | { type: "run"; runId: string; status: string }
+  | { type: "done"; content: string; toolCalls: ToolCall[]; usage: Usage; stalled?: boolean }
+  | { type: "end"; status: string; error?: string };
 
 export interface ToolCall {
   id: string;
@@ -90,6 +104,13 @@ export interface Provider {
 export interface ChatMessage {
   role: "user" | "assistant" | "system" | "tool";
   content: unknown;
+  /**
+   * Present on an assistant turn that asked for tools. Kept in provider wire
+   * format rather than our `ToolCall` shape because it is replayed verbatim
+   * into the next request — providers reject tool results whose matching call
+   * is missing or reshaped.
+   */
+  tool_calls?: unknown[];
   tool_call_id?: string;
   name?: string;
 }

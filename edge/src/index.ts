@@ -9,8 +9,7 @@
 
 import type { Env, Principal, ChatMessage } from "./types";
 import { authenticate, issueDeviceToken, issueAuthCode, redeemAuthCode } from "./auth";
-import { parseModelStr, resolveProvider, chatCompletionsUrl } from "./providers";
-import { streamWithFallback } from "./stream";
+import { parseModelStr, resolveProvider } from "./providers";
 import { push, pull, type PushRequest } from "./sync";
 import {
   listProviders,
@@ -121,6 +120,7 @@ export default {
         return json({ ok: true });
       }
       if (path === "/voice") return await voice(req, env, who);
+      if (path === "/runs" && req.method === "GET") return await listRuns(url, env, who);
       if (path.startsWith("/run/")) return await run(req, env, who, path);
       if (path === "/home/tools") return await homeTools(env);
       if (path === "/home/call" && req.method === "POST") return await homeCall(req, env);
@@ -137,7 +137,18 @@ export default {
   },
 } satisfies ExportedHandler<Env>;
 
-/** POST /chat — streams the text/reasoning/heartbeat/done contract as SSE. */
+/**
+ * POST /chat — start a generation and stream it.
+ *
+ * The Worker no longer produces the stream; it creates a run, hands it to a
+ * DetachedRun DO, and attaches to the result. That indirection is what makes
+ * stop, reconnect, and the tool round trip possible at all: the request you
+ * see here can die at any moment without taking the generation with it.
+ *
+ * Model resolution stays HERE, before the run exists, so "no usable model"
+ * comes back as a 400 the user can act on rather than an error event inside a
+ * run that then has to be cleaned up.
+ */
 async function chat(req: Request, env: Env, who: Principal): Promise<Response> {
   const body = (await req.json()) as {
     conversationId: string;
@@ -152,77 +163,41 @@ async function chat(req: Request, env: Env, who: Principal): Promise<Response> {
   const picked = await resolveChatModel(env, who, body.model);
   if ("error" in picked) return json(picked, 400);
 
-  const { providerId, modelId } = parseModelStr(picked.model, env.TIER2_MODEL);
-  const provider = await resolveProvider(env, who.userId, providerId);
-  if (!provider) return json({ error: `unknown provider ${providerId}` }, 400);
+  const { providerId } = parseModelStr(picked.model, env.TIER2_MODEL);
+  if (!(await resolveProvider(env, who.userId, providerId))) {
+    return json({ error: `unknown provider ${providerId}` }, 400);
+  }
 
   // Stall fallback, skipped entirely when nothing suitable is available.
-  const fbSpec = await resolveFallbackModel(env, who, picked.model);
-  const fb = fbSpec ? parseModelStr(fbSpec, fbSpec) : null;
-  const fbProvider = fb ? await resolveProvider(env, who.userId, fb.providerId) : null;
+  const fallbackModel = await resolveFallbackModel(env, who, picked.model);
 
-  const events = streamWithFallback(
-    {
-      provider,
-      modelId,
-      messages: body.messages,
-      tools: body.tools,
-      fallback: fbProvider && fb ? { provider: fbProvider, modelId: fb.modelId } : undefined,
-      ai: env.AI,
-    },
-    (p) => chatCompletionsUrl(p),
+  const runId = crypto.randomUUID();
+  await env.DB.prepare(
+    `INSERT INTO runs (id, user_id, conv_id, status, model, started_at)
+     VALUES (?, ?, ?, 'running', ?, ?)`,
+  )
+    .bind(runId, who.userId, body.conversationId, picked.model, Date.now())
+    .run();
+
+  const stub = env.RUN.get(env.RUN.idFromName(runId));
+  await stub.fetch(
+    new Request("https://do/start", {
+      method: "POST",
+      body: JSON.stringify({
+        id: runId,
+        userId: who.userId,
+        convId: body.conversationId,
+        model: picked.model,
+        fallbackModel,
+        messages: body.messages,
+        tools: body.tools,
+      }),
+    }),
   );
 
-  const encoder = new TextEncoder();
-  const stream = new ReadableStream({
-    async start(controller) {
-      try {
-        for await (const ev of events) {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(ev)}\n\n`));
-          if (ev.type === "done") {
-            await recordUsage(env, who, providerId, modelId, ev.usage);
-          }
-        }
-      } catch (e) {
-        const msg = { type: "text", text: `\n\n[edge error: ${(e as Error).message}]` };
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(msg)}\n\n`));
-      } finally {
-        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-        controller.close();
-      }
-    },
-  });
-
-  return new Response(stream, {
-    headers: {
-      "content-type": "text/event-stream",
-      "cache-control": "no-cache",
-      connection: "keep-alive",
-    },
-  });
-}
-
-async function recordUsage(
-  env: Env,
-  who: Principal,
-  providerId: string,
-  modelId: string,
-  usage: { in: number; out: number; cache_read: number; cache_write: number },
-): Promise<void> {
-  const day = new Date().toISOString().slice(0, 10);
-  await env.DB.prepare(
-    `INSERT INTO usage_daily
-       (user_id, day, provider_id, model_id, tokens_in, tokens_out, cache_read, cache_write, requests)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
-     ON CONFLICT(user_id, day, provider_id, model_id) DO UPDATE SET
-       tokens_in   = tokens_in   + excluded.tokens_in,
-       tokens_out  = tokens_out  + excluded.tokens_out,
-       cache_read  = cache_read  + excluded.cache_read,
-       cache_write = cache_write + excluded.cache_write,
-       requests    = requests    + 1`,
-  )
-    .bind(who.userId, day, providerId, modelId, usage.in, usage.out, usage.cache_read, usage.cache_write)
-    .run();
+  // Returned straight through: the DO's SSE body streams to the client, and
+  // if the client vanishes the DO simply loses one subscriber.
+  return stub.fetch(new Request("https://do/attach"));
 }
 
 async function syncPush(req: Request, env: Env, who: Principal): Promise<Response> {
@@ -323,9 +298,18 @@ async function voice(req: Request, env: Env, who: Principal): Promise<Response> 
   return env.VOICE.get(id).fetch(fwd);
 }
 
+/**
+ * /run/{id}/{attach|cancel|tool_result|state} — reconnect, stop, feed tools.
+ *
+ * The action is re-derived and the request rebuilt rather than forwarded as-is,
+ * so nothing from the caller's URL or headers reaches the DO by accident.
+ */
+const RUN_ACTIONS = new Set(["attach", "cancel", "tool_result", "state"]);
+
 async function run(req: Request, env: Env, who: Principal, path: string): Promise<Response> {
-  const runId = path.split("/")[2];
+  const [, , runId, action = "attach"] = path.split("/");
   if (!runId) return json({ error: "missing run id" }, 400);
+  if (!RUN_ACTIONS.has(action)) return json({ error: `unknown run action ${action}` }, 404);
 
   // Verify ownership before addressing the DO — run ids are guessable enough
   // that reaching one directly should not be sufficient to read it.
@@ -334,7 +318,32 @@ async function run(req: Request, env: Env, who: Principal, path: string): Promis
     .first();
   if (!owned) return json({ error: "not found" }, 404);
 
-  return env.RUN.get(env.RUN.idFromName(runId)).fetch(req);
+  const init: RequestInit = { method: req.method };
+  if (req.method === "POST") init.body = await req.text();
+  const fwd = new Request(`https://do/${action}`, init);
+  // Preserved so /run/{id}/attach can still be upgraded to a WebSocket.
+  const upgrade = req.headers.get("upgrade");
+  if (upgrade) fwd.headers.set("upgrade", upgrade);
+
+  return env.RUN.get(env.RUN.idFromName(runId)).fetch(fwd);
+}
+
+/** GET /runs?conv={id} — find a reconnectable generation after a cold start. */
+async function listRuns(url: URL, env: Env, who: Principal): Promise<Response> {
+  const conv = url.searchParams.get("conv");
+  const stmt = conv
+    ? env.DB.prepare(
+        `SELECT id, conv_id, status, model, started_at, ended_at FROM runs
+          WHERE user_id = ? AND conv_id = ? ORDER BY started_at DESC LIMIT 20`,
+      ).bind(who.userId, conv)
+    : env.DB.prepare(
+        `SELECT id, conv_id, status, model, started_at, ended_at FROM runs
+          WHERE user_id = ? AND status IN ('running','awaiting_tools')
+          ORDER BY started_at DESC LIMIT 20`,
+      ).bind(who.userId);
+
+  const { results } = await stmt.all();
+  return json({ runs: results });
 }
 
 async function homeTools(env: Env): Promise<Response> {

@@ -143,23 +143,36 @@ export function chatCompletionsUrl(provider: Provider, accountId?: string): stri
  * Flatten multimodal turns to plain text for models that only accept a string
  * `content`. Non-vision models 400 on a content ARRAY rather than ignoring
  * it, so this is required, not cosmetic.
+ *
+ * Only `content` is flattened. The tool-linkage fields are carried through
+ * untouched: strip `tool_calls` off an assistant turn, or `tool_call_id` off a
+ * tool result, and the provider can no longer match a result to the call that
+ * asked for it — which fails as a 400 at best and a silently mismatched tool
+ * result at worst.
  */
+interface FlattenableMessage {
+  role: string;
+  content: unknown;
+  tool_calls?: unknown[];
+  tool_call_id?: string;
+  name?: string;
+}
+
 export function flattenForTextModel(
-  messages: { role: string; content: unknown }[],
+  messages: FlattenableMessage[],
   imageNote = "[image omitted — this model cannot see images]",
-): { role: string; content: string }[] {
+): FlattenableMessage[] {
   return messages.map((m) => {
-    if (typeof m.content === "string") {
-      return { role: m.role, content: m.content };
-    }
-    if (!Array.isArray(m.content)) {
-      return { role: m.role, content: String(m.content ?? "") };
-    }
+    const { content, ...rest } = m;
+
+    if (typeof content === "string") return { ...rest, content };
+    if (!Array.isArray(content)) return { ...rest, content: String(content ?? "") };
+
     const parts: string[] = [];
-    for (const p of m.content as { type?: string; text?: string }[]) {
+    for (const p of content as { type?: string; text?: string }[]) {
       if (p?.type === "text" && p.text) parts.push(p.text);
       else if (p?.type === "image_url") parts.push(imageNote);
     }
-    return { role: m.role, content: parts.join("\n") };
+    return { ...rest, content: parts.join("\n") };
   });
 }
