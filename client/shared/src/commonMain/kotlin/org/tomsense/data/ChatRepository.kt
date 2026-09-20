@@ -108,6 +108,23 @@ class ChatRepository(
             q.updateMessageContent(content, msgId)
         }
 
+    /** Same deal as [updateStreamingContent] — not dirtied until completion. */
+    suspend fun updateStreamingReasoning(msgId: String, reasoning: String) =
+        withContext(Dispatchers.Default) {
+            q.updateMessageReasoning(reasoning, msgId)
+        }
+
+    /**
+     * Empty an assistant turn so it can be generated again.
+     *
+     * Reuses the row instead of inserting a replacement: under last-writer-wins
+     * sync, two rows for the same answer means every other device ends up
+     * showing both.
+     */
+    suspend fun resetMessage(msgId: String) = withContext(Dispatchers.Default) {
+        q.resetMessage(msgId)
+    }
+
     suspend fun finishStreaming(msgId: String) = withContext(Dispatchers.Default) {
         db.transaction {
             q.bumpLamport()

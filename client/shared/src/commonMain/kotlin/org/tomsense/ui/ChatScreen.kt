@@ -19,11 +19,14 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -53,6 +56,10 @@ fun ChatScreen(
     modifier: Modifier = Modifier,
     /** Null on platforms with no settings surface yet (desktop). */
     onOpenSettings: (() -> Unit)? = null,
+    /** A generation is in flight — the send button becomes stop. */
+    isGenerating: Boolean = false,
+    onStop: () -> Unit = {},
+    onRegenerate: (() -> Unit)? = null,
 ) {
     var draft by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
@@ -103,6 +110,24 @@ fun ChatScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     items(messages, key = { it.id }) { MessageBubble(it) }
+
+                    // Offered only on the settled tail of the conversation:
+                    // regenerating anything earlier would orphan every turn
+                    // that followed it.
+                    if (!isGenerating && onRegenerate != null &&
+                        messages.lastOrNull()?.role == "assistant"
+                    ) {
+                        item {
+                            TextButton(onClick = onRegenerate) {
+                                Icon(
+                                    Icons.Filled.Refresh,
+                                    contentDescription = null,
+                                    modifier = Modifier.padding(end = 4.dp),
+                                )
+                                Text("Regenerate", style = MaterialTheme.typography.labelMedium)
+                            }
+                        }
+                    }
                 }
             }
 
@@ -117,16 +142,26 @@ fun ChatScreen(
                     placeholder = { Text("Message") },
                     maxLines = 6,
                 )
-                IconButton(
-                    onClick = {
-                        val text = draft.trim()
-                        if (text.isNotEmpty()) {
-                            draft = ""
-                            onSend(text)
-                        }
-                    },
-                ) {
-                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+                // One button, two jobs. Stop has to be exactly where send was,
+                // because the moment you want it is the moment you just
+                // pressed send — a separate control somewhere else is a
+                // control you hunt for while the model keeps going.
+                if (isGenerating) {
+                    IconButton(onClick = onStop) {
+                        Icon(Icons.Filled.Stop, contentDescription = "Stop generating")
+                    }
+                } else {
+                    IconButton(
+                        onClick = {
+                            val text = draft.trim()
+                            if (text.isNotEmpty()) {
+                                draft = ""
+                                onSend(text)
+                            }
+                        },
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+                    }
                 }
             }
         }

@@ -153,7 +153,11 @@ private suspend fun send(deps: Deps, convId: String, text: String) {
                     deps.repo.updateStreamingContent(assistantId, buffer.toString())
                 }
                 "heartbeat" -> Unit
-                "done" -> deps.repo.finishStreaming(assistantId)
+                // `done` is a round boundary now, not the end of the run —
+                // only `end` is terminal. Desktop has no tools, so in practice
+                // the two arrive together, but finishing on `done` would mark
+                // the message complete mid-generation the moment it does not.
+                "end" -> deps.repo.finishStreaming(assistantId)
             }
         }
     }.onFailure {
