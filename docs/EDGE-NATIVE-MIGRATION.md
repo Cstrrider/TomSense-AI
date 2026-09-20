@@ -47,10 +47,10 @@ sandbox gets dramatically harder.** Everything else is ordinary work.
 | Feature | Stable route(s) | Disposition | Size | Notes |
 |---|---|---|---|---|
 | Send / stream | `POST /chat/stream` | **Done** | — | |
-| Stop generation | `POST /chat/{id}/stop` | Rewrite | S | Becomes a DO message, not a process signal |
-| Detached run reconnect | `GET /chat/stream/{run_id}`, `/chat/{id}/live` | **Port** | S | `DetachedRun` DO already written, unused |
-| Tool-result round trip | `POST /chat/tool_result` | Port | M | Needed before ANY tool works |
-| Regenerate | `POST /chats/{id}/regenerate` | Port | S | |
+| Stop generation | `POST /chat/{id}/stop` | **Done** | — | `POST /run/{id}/cancel` — aborts the upstream fetch, not just the client |
+| Detached run reconnect | `GET /chat/stream/{run_id}`, `/chat/{id}/live` | **Done** | — | `GET /run/{id}/attach` — replays, then streams live |
+| Tool-result round trip | `POST /chat/tool_result` | **Done** | — | `POST /run/{id}/tool_result`; the run parks in `awaiting_tools` between rounds |
+| Regenerate | `POST /chats/{id}/regenerate` | **Done** | — | Client-side; reuses the row and drops the stale answer from history |
 | Branch conversation | `POST /chats/{id}/branch` | Port | M | Needs a sync-safe copy; watch lamport assignment |
 | Follow-up suggestions | `POST /chat/{id}/followups` | Port | S | Tier-1 model |
 | Checkpoints + restore | `GET/POST /chats/{id}/checkpoints/...` | Rewrite | M | Interacts badly with LWW sync — see §9 |
@@ -195,7 +195,7 @@ early rather than discovered late.
 
 | Phase | Contents | Why here |
 |---|---|---|
-| **A** | Tool-result round trip · detached-run reconnect · stop · regenerate | Unblocks every tool; all small |
+| ~~**A**~~ | ~~Tool-result round trip · detached-run reconnect · stop · regenerate~~ — **DONE 2026-09-20**, see §11 | Unblocks every tool; all small |
 | **B** | Device tools (20) · permission flow | Proves the native thesis; highest value per line |
 | **C** | Voice: wire `VoiceSession` end to end, measure on-device latency | Highest risk; must be validated before building on it |
 | **D** | Chat management: search (FTS5) · pin/folder/project · branch · export · share | Makes it a daily driver |
@@ -209,7 +209,51 @@ proving the same thesis.
 
 ---
 
-## 11. What this is not
+## 11. Phase A as built (2026-09-20)
+
+Generation moved into the `DetachedRun` DO. The Worker creates a run and
+attaches; it no longer produces the stream. Stop, reconnect and the tool round
+trip are all consequences of that one change rather than three features.
+
+Wire contract gained two events. `run` (first frame, carries the run id) and
+`end` (terminal). **`done` is now a round boundary** — a tool-using generation
+emits several. Anything that treats `done` as final will truncate replies once
+tools exist.
+
+| Route | Purpose |
+|---|---|
+| `POST /chat` | Create a run and attach to it |
+| `GET /run/{id}/attach` | Rejoin — replays what was missed, then streams live |
+| `POST /run/{id}/tool_result` | Answer outstanding calls; resumes the parked run |
+| `POST /run/{id}/cancel` | Stop, including aborting the upstream provider fetch |
+| `GET /run/{id}/state` · `GET /runs` | Find a run after a cold start |
+
+Four bugs surfaced, three of which would have made tools quietly useless:
+
+1. `streamWorkersAi` **dropped `tools` entirely** — the default Cloudflare
+   models could not call a tool at all. Verified against the live API that
+   Workers AI accepts OpenAI-wrapped tool schemas and streams OpenAI-shaped
+   deltas when tools are present, so one schema now serves CF and BYO alike.
+2. `flattenForTextModel` **dropped `tool_calls`/`tool_call_id`/`name`**,
+   severing a tool result from the call it answers on every non-vision model.
+3. A round producing only tool calls was marked `stalled` (it emits no text),
+   which would have fired the fallback model on every tool call.
+4. A default `TransformStream` has a readable highWaterMark of 0, so awaiting
+   the first replay write in `attach` deadlocked. Writes are never awaited now:
+   a subscriber that stops reading must not be able to stall the run.
+
+Verified live: tool round trip end to end (glm-5.2 → `get_weather` → result →
+answer), reconnect after a dropped connection (248-word reply finished with no
+client attached), cancel, D1 status mirroring, and usage still accounted now
+that the producer moved.
+
+**Carried into phase B:** the client answers any tool call with "not available
+on this device". That is the seam device tools plug into — 4a is now purely
+client work, with no edge changes needed.
+
+---
+
+## 12. What this is not
 
 This plan does **not** aim for 1:1 endpoint parity with `main`. Roughly 14 of
 the 98 routes are dropped or replaced outright, and several more collapse into
