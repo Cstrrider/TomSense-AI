@@ -500,16 +500,36 @@ capabilities; an empty list restored the full catalogue. On a custom provider,
 add and remove both worked and **the API key survived a model edit**. All test
 rows were removed and the database verified byte-identical to its prior state.
 
-### A latent bug found while testing, NOT fixed
+### A latent bug found while testing — fixed (migration 0005)
 
-`providers.id` is the primary key and Cloudflare's row uses the constant
-`'cf'` for every user. With more than one account, only the first can own that
-row — everyone else's writes hit `ON CONFLICT DO NOTHING` on insert and match
-zero rows on update, so their Cloudflare settings silently do nothing. This is
-invisible in a single-user deployment, which is what this is. The fix is a
-composite `(id, user_id)` key or a per-user synthetic id, and it needs a D1
-migration; it is not worth doing before there is a second user, but it should
-be done before there ever is one.
+`providers.id` was the primary key, and Cloudflare's row uses the constant
+`'cf'` for every user. So the first account to persist anything about
+Cloudflare owned that row globally: everyone else's insert hit
+`ON CONFLICT DO NOTHING`, and their update — correctly scoped by `user_id` —
+matched zero rows. Settings appeared to save and silently did not.
+
+The key is now `(id, user_id)`, which is the right shape regardless of the bug:
+a provider row is only ever meaningful inside one account, and every query in
+the Worker already scoped by `user_id`. The one exception was the Cloudflare
+upsert's `ON CONFLICT(id)`, now `ON CONFLICT(id, user_id)`.
+
+SQLite cannot alter a primary key, so 0005 is a table rebuild. That is safe
+here because **nothing references `providers` by foreign key** — checked
+before writing it. `usage_daily.provider_id` is a plain column, not a
+reference, and already carries `user_id` in its own composite key.
+
+Verified on a local SQLite first — the bug reproduced on the old schema (0 rows
+affected), then after the migration: data preserved including the encrypted
+key, both users' writes landing, one user's write not touching the other's row,
+repeat upserts still idempotent, a true duplicate still rejected, and the
+`ON DELETE CASCADE` surviving the rebuild. Then on the live Worker with two
+accounts curating Cloudflare simultaneously — independent model lists *and*
+independent enabled flags, three `cf` rows coexisting. Test users removed and
+the production row verified byte-identical to a snapshot taken beforehand.
+
+One thing worth copying: the migration originally carried a trailing comment
+containing a semicolon, which splits a statement in any naive SQL splitter.
+Avoid semicolons inside SQL comments in migration files.
 
 ---
 

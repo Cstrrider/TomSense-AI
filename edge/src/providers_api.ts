@@ -221,12 +221,19 @@ export async function updateProvider(
     // Materialise the synthetic row on first write. Until something is
     // actually persisted about Cloudflare it exists only as a view, so there
     // may be nothing here to update yet.
+    //
+    // The conflict target is `(id, user_id)`, matching the composite primary
+    // key. It was `(id)`, and since every user's Cloudflare row is literally
+    // `'cf'`, that made the row global: the first account to write one owned
+    // it, and everyone else's insert did nothing while their update — rightly
+    // scoped by user_id — matched no rows. Settings appeared to save and
+    // silently did not. See migration 0005.
     await env.DB.prepare(
       `INSERT INTO providers
          (id, user_id, name, kind, base_url, api_key_enc, models, extra_body,
           enabled, created_at, updated_at)
        VALUES (?, ?, 'Cloudflare Workers AI', 'cf', '', '', '[]', '{}', 1, ?, ?)
-       ON CONFLICT(id) DO NOTHING`,
+       ON CONFLICT(id, user_id) DO NOTHING`,
     )
       .bind(CF_BUILTIN_ID, who.userId, now, now)
       .run();
