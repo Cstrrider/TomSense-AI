@@ -54,6 +54,12 @@ class MainActivity : ComponentActivity() {
     /** Drives the send/stop button. Compose observes it; no event bus needed. */
     private var generating by mutableStateOf(false)
 
+    /** Routing overrides for the current turn, surfaced by the edge. */
+    private var notices by mutableStateOf<List<String>>(emptyList())
+
+    /** Think mode. Sticky across turns until switched off. */
+    private var think by mutableStateOf(false)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -206,6 +212,9 @@ class MainActivity : ComponentActivity() {
                                 title = conversations.firstOrNull { it.id == convId }
                                     ?.title.orEmpty(),
                                 onOpenDrawer = { scope.launch { drawerState.open() } },
+                                notices = notices,
+                                thinkEnabled = think,
+                                onThinkChange = { think = it },
                                 // Branching needs something to branch FROM,
                                 // and exporting an empty chat produces a file
                                 // with a heading and nothing under it.
@@ -247,7 +256,9 @@ class MainActivity : ComponentActivity() {
             val assistantId = app.repo.appendMessage(id, "assistant", "")
             val history = historyForModel()
             consume(assistantId) {
-                app.chat.stream(ChatRequest(id, history, tools = app.tools.schemas()))
+                app.chat.stream(
+                    ChatRequest(id, history, tools = app.tools.schemas(), think = think),
+                )
             }
         }
     }
@@ -359,7 +370,9 @@ class MainActivity : ComponentActivity() {
             app.repo.resetMessage(last.id)
             val history = historyForModel(exclude = last.id)
             consume(last.id) {
-                app.chat.stream(ChatRequest(id, history, tools = app.tools.schemas()))
+                app.chat.stream(
+                    ChatRequest(id, history, tools = app.tools.schemas(), think = think),
+                )
             }
         }
     }
@@ -415,6 +428,9 @@ class MainActivity : ComponentActivity() {
         source: () -> kotlinx.coroutines.flow.Flow<org.tomsense.sync.ChatEvent>,
     ) {
         generating = true
+        // Cleared per turn: a notice explains THIS reply, and leaving the last
+        // one up would attribute it to the wrong answer.
+        notices = emptyList()
         var runId = knownRun
         val buffer = StringBuilder()
         val thinking = StringBuilder()
@@ -437,6 +453,9 @@ class MainActivity : ComponentActivity() {
                     // heartbeat carries no payload; it exists so a long
                     // silent reasoning stretch isn't mistaken for a dead
                     // connection. Nothing to render.
+                    // A routing override the edge wants the user to see.
+                    "notice" -> ev.text?.let { notices = notices + it }
+
                     "heartbeat" -> Unit
 
                     // End of a ROUND, not of the run. Tool calls here mean the

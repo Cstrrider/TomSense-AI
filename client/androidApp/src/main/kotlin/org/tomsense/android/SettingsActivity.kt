@@ -4,6 +4,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -46,6 +47,9 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 import org.tomsense.sync.CreateProvider
 import org.tomsense.sync.ModelOption
+import org.tomsense.sync.PrefsPatch as UpdatePrefs
+import org.tomsense.sync.ToolModels
+import org.tomsense.sync.UserPrefs
 import org.tomsense.sync.Preset
 import org.tomsense.sync.ProviderView
 import org.tomsense.sync.UpdateProvider
@@ -75,6 +79,7 @@ class SettingsActivity : ComponentActivity() {
                 var adding by remember { mutableStateOf(false) }
                 var managing by remember { mutableStateOf<ProviderView?>(null) }
                 var query by remember { mutableStateOf("") }
+                var prefs by remember { mutableStateOf(UserPrefs()) }
 
                 suspend fun refresh() {
                     runCatching {
@@ -83,6 +88,7 @@ class SettingsActivity : ComponentActivity() {
                         models = m.models
                         presets = m.presets
                         defaultModel = m.defaultModel
+                        prefs = app.providers.prefs()
                     }.onFailure { error = it.message }
                 }
 
@@ -156,6 +162,83 @@ class SettingsActivity : ComponentActivity() {
                                     lifecycleScope.launch {
                                         runCatching { app.providers.setDefaultModel(m.value) }
                                             .onFailure { error = it.message }
+                                    }
+                                },
+                            )
+                        }
+
+                        item { HorizontalDivider(Modifier.padding(vertical = 8.dp)) }
+                        item { SectionHeader("Routing") }
+
+                        item {
+                            Text(
+                                "Which model answers depends on the turn. These slots decide, " +
+                                    "and anything left unset falls back to your default model.",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+
+                        // Order matters: it mirrors the precedence the edge
+                        // actually applies, so reading down the list explains
+                        // why a given turn picked a given model.
+                        items(SLOTS, key = { it.key }) { slot ->
+                            SlotRow(
+                                slot = slot,
+                                models = models,
+                                current = prefs.toolModels.slot(slot.key),
+                                onPick = { value ->
+                                    lifecycleScope.launch {
+                                        runCatching {
+                                            prefs = app.providers.setPrefs(
+                                                UpdatePrefs(toolModels = mapOf(slot.key to value)),
+                                            )
+                                        }.onFailure { error = it.message }
+                                    }
+                                },
+                            )
+                        }
+
+                        item {
+                            Row(
+                                Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("Auto-route hard turns", style = MaterialTheme.typography.bodyMedium)
+                                    Text(
+                                        "A small model rates each message; harder ones escalate " +
+                                            "to a heavier model. Short messages skip the check.",
+                                        style = MaterialTheme.typography.labelSmall,
+                                    )
+                                }
+                                Switch(
+                                    checked = prefs.autoRoute,
+                                    onCheckedChange = { on ->
+                                        lifecycleScope.launch {
+                                            runCatching {
+                                                prefs = app.providers.setPrefs(
+                                                    UpdatePrefs(autoRoute = on),
+                                                )
+                                            }.onFailure { error = it.message }
+                                        }
+                                    },
+                                )
+                            }
+                        }
+
+                        item {
+                            BudgetModeCard(
+                                configured = prefs.hasAnalyticsKey,
+                                onSave = { key, account ->
+                                    lifecycleScope.launch {
+                                        runCatching {
+                                            prefs = app.providers.setPrefs(
+                                                UpdatePrefs(
+                                                    cfAnalyticsKey = key,
+                                                    cfAccountId = account,
+                                                ),
+                                            )
+                                        }.onFailure { error = it.message }
                                     }
                                 },
                             )
@@ -628,4 +711,167 @@ private fun AddProviderDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
+}
+
+/**
+ * The routing slots, in the order the edge applies them.
+ *
+ * Listing them in precedence order is deliberate: read down the list and you
+ * have the answer to "why did that model reply?", which is the question the
+ * whole layered router exists to make answerable.
+ */
+private data class Slot(val key: String, val label: String, val help: String)
+
+private val SLOTS = listOf(
+    Slot(
+        "research",
+        "Think",
+        "Used when think mode is on. A reasoning model earns its keep here.",
+    ),
+    Slot(
+        "vision",
+        "Vision",
+        "Owns image turns — even if your chat model can also see images.",
+    ),
+    Slot(
+        "title",
+        "Utility",
+        "Titles, follow-ups and the auto-route check. Pick something small " +
+            "and NON-reasoning: a reasoning model spends the tiny budget " +
+            "thinking and returns nothing.",
+    ),
+    Slot(
+        "chat_fallback",
+        "Chat fallback",
+        "Used if the main model stalls, and where budget mode lands.",
+    ),
+    Slot("vision_fallback", "Vision fallback", "Used if the Vision model stalls."),
+)
+
+private fun ToolModels.slot(key: String): String? = when (key) {
+    "research" -> research
+    "vision" -> vision
+    "title" -> title
+    "chat_fallback" -> chatFallback
+    "vision_fallback" -> visionFallback
+    "title_fallback" -> titleFallback
+    else -> null
+}
+
+@Composable
+private fun SlotRow(
+    slot: Slot,
+    models: List<ModelOption>,
+    current: String?,
+    onPick: (String) -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(slot.label, style = MaterialTheme.typography.bodyMedium)
+                Text(slot.help, style = MaterialTheme.typography.labelSmall)
+            }
+            Box {
+                TextButton(onClick = { open = true }) {
+                    Text(current?.let { shortModelName(it) } ?: "Default")
+                }
+                DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                    // Clearing is a first-class choice, not the absence of one:
+                    // "no slot" is meaningfully different from "some model".
+                    DropdownMenuItem(
+                        text = { Text("Use default") },
+                        onClick = {
+                            open = false
+                            onPick("")
+                        },
+                    )
+                    models.forEach { m ->
+                        DropdownMenuItem(
+                            text = { Text(shortModelName(m.value), style = MaterialTheme.typography.bodySmall) },
+                            onClick = {
+                                open = false
+                                onPick(m.value)
+                            },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun shortModelName(spec: String): String =
+    spec.substringAfter("::").substringAfterLast('/')
+
+/**
+ * Budget mode setup.
+ *
+ * The token is write-only: the card reports whether one is stored and never
+ * shows it, because the server does not return it. Running inference needs no
+ * token at all — only READING usage does — which is why this is opt-in rather
+ * than something the app requires up front.
+ */
+@Composable
+private fun BudgetModeCard(configured: Boolean, onSave: (String, String) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    var key by remember { mutableStateOf("") }
+    var account by remember { mutableStateOf("") }
+
+    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Budget mode", style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    if (configured) {
+                        "On — heavy Cloudflare models downshift past 80% of the daily free neurons."
+                    } else {
+                        "Off. Needs a Cloudflare API token with Account Analytics: Read."
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                )
+            }
+            TextButton(onClick = { expanded = !expanded }) {
+                Text(if (configured) "Change" else "Set up")
+            }
+        }
+
+        if (expanded) {
+            OutlinedTextField(
+                account,
+                { account = it },
+                label = { Text("Cloudflare account ID") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                key,
+                { key = it },
+                label = { Text("API token (Analytics: Read)") },
+                singleLine = true,
+                // Stored encrypted and never returned, so this is the only
+                // moment it is ever visible.
+                visualTransformation = PasswordVisualTransformation(),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Row {
+                TextButton(
+                    onClick = {
+                        onSave(key.trim(), account.trim())
+                        key = ""
+                        expanded = false
+                    },
+                    enabled = key.isNotBlank() && account.isNotBlank(),
+                ) { Text("Save") }
+                if (configured) {
+                    TextButton(onClick = {
+                        onSave("", "")
+                        key = ""
+                        expanded = false
+                    }) { Text("Remove") }
+                }
+            }
+        }
+    }
 }

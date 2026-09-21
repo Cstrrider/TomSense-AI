@@ -129,6 +129,8 @@ data class ChatRequest(
     val model: String? = null,
     /** Omitted entirely when empty, so a model is never told about no tools. */
     val tools: List<JsonElement>? = null,
+    /** Route to the reasoning model and raise its effort. */
+    val think: Boolean? = null,
 )
 
 @Serializable

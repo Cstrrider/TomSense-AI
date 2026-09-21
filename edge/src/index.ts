@@ -148,7 +148,13 @@ export default {
               .bind(b.cfAccountId.trim(), who.userId)
               .run();
           }
-          return json(await setPrefs(env, who, b));
+          // Same shape as the GET, including the key flag. Omitting it made
+          // the client default (false) win, so saving an unrelated preference
+          // silently reported budget mode as unconfigured.
+          return json({
+            ...(await setPrefs(env, who, b)),
+            hasAnalyticsKey: await hasAnalyticsKey(env, who.userId),
+          });
         }
       }
       if (path === "/me/default-model" && req.method === "PUT") {

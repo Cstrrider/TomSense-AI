@@ -26,6 +26,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Lightbulb
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
@@ -72,6 +73,15 @@ fun ChatScreen(
     onBranch: (() -> Unit)? = null,
     onExport: (() -> Unit)? = null,
     onShare: (() -> Unit)? = null,
+    /**
+     * Routing overrides for the turn in flight — "answering with your Vision
+     * model", "budget mode". Shown above the input so the reason for an
+     * unexpected model is visible at the moment it applies.
+     */
+    notices: List<String> = emptyList(),
+    /** Think mode. Null hides the control entirely. */
+    thinkEnabled: Boolean? = null,
+    onThinkChange: (Boolean) -> Unit = {},
 ) {
     var draft by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
@@ -191,10 +201,36 @@ fun ChatScreen(
                 }
             }
 
+            // Routing notices sit directly above the composer, where the eye
+            // already is when a reply arrives.
+            notices.forEach { notice ->
+                Text(
+                    notice,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                )
+            }
+
             Row(
                 Modifier.fillMaxWidth().padding(12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                thinkEnabled?.let { on ->
+                    // A toggle rather than a per-send choice: "think about
+                    // this one" is usually a mode you stay in for a few turns.
+                    IconButton(onClick = { onThinkChange(!on) }) {
+                        Icon(
+                            Icons.Filled.Lightbulb,
+                            contentDescription = if (on) "Think mode on" else "Think mode off",
+                            tint = if (on) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                        )
+                    }
+                }
                 OutlinedTextField(
                     value = draft,
                     onValueChange = { draft = it },

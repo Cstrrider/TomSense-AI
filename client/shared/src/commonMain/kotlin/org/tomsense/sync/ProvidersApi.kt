@@ -11,6 +11,7 @@ import io.ktor.client.request.put
 import io.ktor.client.request.setBody
 import io.ktor.http.ContentType
 import io.ktor.http.contentType
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 /**
@@ -54,6 +55,19 @@ class ProvidersApi(
      */
     suspend fun discover(req: DiscoverRequest): DiscoverResponse =
         http.post("$baseUrl/providers/discover") {
+            auth(); contentType(ContentType.Application.Json); setBody(req)
+        }.body()
+
+    /** Routing preferences: model slots, auto-route, analytics key state. */
+    suspend fun prefs(): UserPrefs =
+        http.get("$baseUrl/me/prefs") { auth() }.body()
+
+    /**
+     * Patch preferences. Omitted fields are left alone, and an omitted slot is
+     * NOT cleared — only an explicit empty string clears one.
+     */
+    suspend fun setPrefs(req: PrefsPatch): UserPrefs =
+        http.put("$baseUrl/me/prefs") {
             auth(); contentType(ContentType.Application.Json); setBody(req)
         }.body()
 
@@ -147,3 +161,37 @@ data class UpdateProvider(
 
 @Serializable
 private data class DefaultModel(val model: String)
+
+/**
+ * Model slots. Each holds a full "provider::model" string, so a slot can point
+ * at any configured provider rather than being limited to Cloudflare.
+ */
+@Serializable
+data class ToolModels(
+    /** Owns image turns outright, even over a vision-capable chat model. */
+    val vision: String? = null,
+    /** Think mode. */
+    val research: String? = null,
+    /** Utility tier: titles, follow-ups, the auto-route classifier. */
+    val title: String? = null,
+    @SerialName("chat_fallback") val chatFallback: String? = null,
+    @SerialName("vision_fallback") val visionFallback: String? = null,
+    @SerialName("title_fallback") val titleFallback: String? = null,
+)
+
+@Serializable
+data class UserPrefs(
+    @SerialName("tool_models") val toolModels: ToolModels = ToolModels(),
+    @SerialName("auto_route") val autoRoute: Boolean = true,
+    /** Whether an analytics key is SET. The key itself is never returned. */
+    val hasAnalyticsKey: Boolean = false,
+)
+
+/** Slots are sent as a plain map so one can be cleared with an empty string. */
+@Serializable
+data class PrefsPatch(
+    @SerialName("tool_models") val toolModels: Map<String, String>? = null,
+    @SerialName("auto_route") val autoRoute: Boolean? = null,
+    val cfAnalyticsKey: String? = null,
+    val cfAccountId: String? = null,
+)

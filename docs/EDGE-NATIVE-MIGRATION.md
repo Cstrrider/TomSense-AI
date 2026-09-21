@@ -533,7 +533,85 @@ Avoid semicolons inside SQL comments in migration files.
 
 ---
 
-## 15. What this is not
+## 15. Model routing (2026-09-21)
+
+Stable decides which model answers in **six layers**, spread across
+`main.py` (~3130–3235), `_route_model`, `_budget_downshift` and
+`_vision_model`. The beta had two: explicit pick, and saved default.
+
+Ported into one file (`edge/src/routing.ts`), in precedence order:
+
+| # | Layer | Trigger |
+|---|---|---|
+| 1 | Explicit pick | `model` on the request — always wins |
+| 2 | Think mode | `think: true` → research slot, `reasoning_effort: high` |
+| 3 | Vision override | an image is attached |
+| 4 | Auto-route | tiny model rates EASY/HARD; HARD escalates |
+| 5 | Saved default | the pre-existing beta behaviour |
+| 6 | Budget downshift | applied LAST, over whatever won above |
+
+Gathering them is most of the value: on stable the precedence is implicit in
+the order the statements happen to appear, which is why "why did *that* model
+reply?" was hard to answer. Budget mode is last deliberately — it is a cost
+ceiling, so it must be able to override the router's own escalation.
+
+Two behaviours carried over because each encodes a real incident:
+
+- **The Vision slot owns image turns**, even when the chat model can also see
+  (stable comment dated 2026-07-11: a model chosen for landmark recognition
+  lost a photo turn to a merely vision-*capable* chat model). The exception is
+  an explicit per-request pick that can see.
+- **Auto-route short-circuits** messages under 60 characters with no code
+  fence, so the common case never pays for the classifier call.
+
+**Notices are a first-class stream event**, persisted on the run and replayed
+on reconnect. A model swap the user never sees is one they will eventually be
+confused by.
+
+### Where the credential question landed
+
+Budget mode needs neuron usage, which is CF's GraphQL analytics API and does
+need an account token — unlike *running* inference, which the AI binding bills
+directly. Rather than a Worker secret, the token is a **per-user setting**,
+encrypted with the same envelope as provider keys and never returned by the
+API. Budget mode stays dormant until one is supplied, and the Worker holds
+nothing but its bindings by default.
+
+### Two bugs found while testing
+
+- The utility tier defaulted to `TIER1_MODEL`, which is **gemma-4 — a
+  reasoning model**. Given a 4-token classifier budget it spent all four
+  thinking and returned empty, silently disabling auto-routing entirely.
+  Added `TASK_MODEL` (llama-3.2-3b, matching stable's `MODEL_TITLE`). The
+  Utility slot in settings warns about this explicitly.
+- Saving any preference returned a payload without `hasAnalyticsKey`, so the
+  client default (`false`) won and budget mode reported itself unconfigured.
+
+### Verified live, per layer
+
+```
+vision slot wins an image turn          -> llama-4-scout + notice
+explicit pick beats the vision slot     -> gemma-4, no notice
+think mode                              -> research slot (gpt-oss-120b)
+induction proof (auto-route)            -> kimi-k2.7-code
+casual chat of the same length          -> stays on default
+message under 60 chars                  -> classifier never called
+budget mode over cap, heavy model       -> downshifts to chat_fallback,
+                                           notice with real neuron counts
+budget mode, light model                -> untouched
+analytics key                           -> encrypted at rest, never returned
+prefs merge                             -> one slot set leaves others intact;
+                                           empty string clears
+```
+
+Also threaded cache affinity through: `x-session-affinity` for Workers AI,
+`x-session-id` for OpenRouter — keyed by conversation for chat and by
+`(user, purpose)` for the utility tier, so each purpose lands on its own warm
+prefix. Stable measured the CF hit ratio going ~60% → 80%.
+
+---
+
+## 16. What this is not
 
 This plan does **not** aim for 1:1 endpoint parity with `main`. Roughly 14 of
 the 98 routes are dropped or replaced outright, and several more collapse into
