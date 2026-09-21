@@ -334,18 +334,62 @@ what the data layer supported. The list had to exist first.
 | Export | `data/Export.kt` → Android share sheet |
 | Share links | `edge/src/share.ts`, `POST /chats/{id}/share`, `GET /share/{token}` |
 
-### SQLDelight cannot do FTS5
+### FTS5 does not exist on Android — beta7 could not start
 
-The plan said "local SQLite FTS5". That is what shipped, but **not** through
-SQLDelight: its 2.0.2 SQLite dialect has no fts5 module, so a virtual table's
-columns have no type. Selecting one fails to compile, and merely *referencing*
-the table in a subquery sends the code generator into infinite recursion
-(`StackOverflowError`). Confirmed there is no dialect artifact that adds it.
+**beta7 shipped broken and had to be replaced by beta8.** It is worth writing
+down exactly why, because the mistake was in the testing, not the code.
 
-So every FTS5 statement lives in `MessageSearch.kt` as raw driver SQL — the
-only queries in the client the compiler does not check, deliberately gathered
-into one file rather than scattered. The table itself is created normally in a
-migration, which SQLDelight passes through without needing to type it.
+Android's system SQLite is **not compiled with FTS5**. This is why Room itself
+supports only FTS3/FTS4 and recommends FTS4, and it is a known SQLDelight issue
+(#1977). `CREATE VIRTUAL TABLE ... USING fts5` throws `no such module: fts5`.
+
+That statement was in the v1→v2 migration, and migrations run from
+`Application.onCreate` — so the database never opened and the app died before
+drawing a frame. Not "search is broken": *nothing* worked.
+
+It passed every test here because the tests ran against the **desktop** JDBC
+driver (xerial), which bundles its own SQLite with FTS5 compiled in. Validating
+a mobile code path on the desktop engine proved only that the SQL was
+well-formed. The fix for that is not more tests of the same kind — it is that
+**a device-specific capability must be verified on the device, or not relied
+on.**
+
+Three changes came out of it:
+
+1. **The index is no longer created by a migration.** `1.sqm` now does only
+   the schema changes the app cannot run without. The index is built at runtime
+   in `MessageSearch`, where failure is caught rather than fatal. The governing
+   rule: an optional feature must never be able to stop the app from starting.
+   Search is a convenience; the conversations are the product.
+2. **FTS4 instead of FTS5.** Available on Android since API 11. The cost is
+   relevance ranking — FTS4 has no `bm25()` — so results are newest-first,
+   which for one's own chat history is arguably the better order anyway.
+3. **A real fallback.** If even FTS4 is missing (some AOSP-derived builds strip
+   it), `MessageSearch.isAvailable` reports false, indexing no-ops, and the
+   repository falls back to a `LIKE` scan with an excerpt built in Kotlin.
+   Slower on a long history, never broken.
+
+The backfill also moved off the constructor into `prepareSearchIndex()`, called
+from a background scope at startup: an `INSERT ... SELECT` across a long
+history in `Application.onCreate` is an ANR, which is the same mistake more
+slowly.
+
+Note on recovery: `SQLiteOpenHelper` wraps `onUpgrade` in a transaction and
+SQLite rolls DDL back, so beta7's failed migration left the database **fully
+intact at v1** — verified. No data was lost and beta8 upgrades cleanly from
+beta6 or from a beta7 install.
+
+### SQLDelight cannot do FTS at all
+
+Separately from the Android problem: SQLDelight 2.0.2 cannot generate code
+against a virtual table of any kind. Its SQLite dialect has no FTS module, so
+the columns have no type — selecting one fails to compile, and merely
+*referencing* the table in a subquery sends the generator into infinite
+recursion (`StackOverflowError`). No dialect artifact adds it.
+
+So every FTS statement lives in `MessageSearch.kt` as raw driver SQL — the only
+queries in the client the compiler does not check, deliberately gathered into
+one file rather than scattered.
 
 ### The schema now lives in migrations
 
@@ -382,16 +426,25 @@ edge mints it and every device still sees it.
 Migrations were replayed against real SQLite 3.45.2, both paths:
 
 ```
-fresh install   0.sqm + 1.sqm apply clean
-upgrade (beta6) v1 + data -> 1.sqm: 3 messages preserved, 2 indexed
-                (the tombstoned one correctly skipped), new columns
-                defaulted on old rows, pre-migration history searchable
-search          "dentist" -> 2 hits, "dent"* prefix -> same 2,
-                "los angeles" multi-term -> 1, snippet() highlights,
-                bm25 ranks
-quoting         "it's", "multi-word", "OR" all safe — unquoted these
-                are FTS5 syntax errors, i.e. a crash per keystroke
+upgrade (beta6) v1 + data -> 1.sqm: 3 messages preserved, migration
+                creates 0 virtual tables, new columns defaulted on
+                old rows
+runtime index   backfilled 2 of 3 (tombstone skipped), idempotent on
+                a second launch, pre-migration history searchable
+search          "sourdough" -> hit, "sour" prefix -> same hit,
+                snippet() highlights with the FTS3/4 argument order
+tokenising      "it's" -> `it* s*` (matches), "multi-word" ->
+                `multi* word*` (matches), "OR" treated as a term not
+                an operator, "((" yields no tokens and is skipped
+notindexed      searching a msg_id matches 0 rows, as intended
+rollback        a migration that throws leaves columns AND
+                user_version untouched — so beta7's failure was
+                non-destructive
 ```
+
+The gap this list still has: **none of it runs on Android.** That is the
+condition that produced the beta7 crash, and it is not closed by any test in
+this repo.
 
 Share links were tested against the live Worker: minted with a device token,
 read with **no credential**, `<script>` in a title and `<b>` in a body both

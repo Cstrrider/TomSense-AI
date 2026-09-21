@@ -102,6 +102,19 @@ WHERE deleted = 0 AND title LIKE ('%' || ? || '%')
 ORDER BY pinned DESC, updated_at DESC
 LIMIT ?;
 
+-- Fallback for devices whose SQLite has no usable FTS module at all. Slower
+-- than the index on a large history, but it touches only real tables, so it
+-- is compile-checked and works everywhere. See MessageSearch.isAvailable.
+searchMessagesLike:
+SELECT m.id AS msgId, m.conv_id AS convId, c.title AS title,
+       m.role AS role, m.created_at AS createdAt, m.content AS content
+FROM message m
+JOIN conversation c ON c.id = m.conv_id
+WHERE m.deleted = 0 AND c.deleted = 0
+  AND m.content LIKE ('%' || ? || '%')
+ORDER BY m.created_at DESC
+LIMIT ?;
+
 -- Streaming writes bypass the dirty flag deliberately; see
 -- ChatRepository.updateStreamingContent for why.
 updateMessageContent:

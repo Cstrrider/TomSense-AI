@@ -20,34 +20,16 @@ CREATE INDEX IF NOT EXISTS conversation_pinned_updated
   ON conversation(pinned DESC, updated_at DESC);
 CREATE INDEX IF NOT EXISTS conversation_project ON conversation(project_id);
 
--- Full-text search over message bodies (migration doc §3).
+-- The search index is deliberately NOT created here. See MessageSearch.kt.
 --
--- On stable this was a Postgres query; local-first makes it strictly better,
--- because searching the device's own copy is instant and works on a plane.
+-- It was, in beta7, and it made the app unlaunchable: this migration runs from
+-- `Application.onCreate`, and `CREATE VIRTUAL TABLE ... USING fts5` throws
+-- "no such module: fts5" on Android's system SQLite, which is not built with
+-- FTS5. A migration that cannot complete means the database never opens, which
+-- means the app dies before it draws a frame.
 --
--- Two deliberate choices:
---
--- 1. NOT an external-content table, and NO triggers. Triggers would fire on
---    every `updateMessageContent`, and that runs once per streamed token —
---    re-tokenising a growing answer hundreds of times per reply. Indexing is
---    therefore explicit and happens once, at completion, from the same place
---    that already marks a row dirty. The streaming path stays cheap, which is
---    the same reasoning that keeps `dirty = 0` while tokens arrive.
---
--- 2. `msg_id`/`conv_id` are UNINDEXED — they are payload for joining back to
---    the real row, not search terms. Indexing them would let a stray UUID
---    fragment match a query.
---
--- FTS5 needs SQLite 3.9+; minSdk is 29 (API 26 is the floor for FTS5) and the
--- desktop JDBC driver bundles its own, so both targets are safe.
-CREATE VIRTUAL TABLE message_fts USING fts5(
-  msg_id UNINDEXED,
-  conv_id UNINDEXED,
-  content
-);
-
--- Backfill every message that already exists, or search would return nothing
--- for the entire history predating this migration — a failure that looks
--- exactly like "search is broken" and would be blamed on the query.
-INSERT INTO message_fts(msg_id, conv_id, content)
-SELECT id, conv_id, content FROM message WHERE deleted = 0;
+-- The lesson is not "use FTS4". It is that **an optional feature must never be
+-- able to stop the app from starting.** A search index is a convenience; the
+-- conversations are the product. So the index is now built at runtime where a
+-- failure can be caught and degraded, and this file only does the schema
+-- changes the app genuinely cannot run without.

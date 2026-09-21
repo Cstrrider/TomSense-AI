@@ -86,6 +86,9 @@ private class Deps {
         chat = ChatClient(http, baseUrl, token)
         sync = SyncEngine(db, EdgeApi(http, baseUrl, token), scope, driver)
         sync.start()
+
+        // Background, unawaited — see the same call in TomsenseApp.
+        scope.launch { repo.prepareSearchIndex() }
     }
 
     private fun propsFile() = File(dataDir, "config.properties")

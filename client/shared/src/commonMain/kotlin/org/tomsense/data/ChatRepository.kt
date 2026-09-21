@@ -33,6 +33,17 @@ class ChatRepository(
     private val q = db.schemaQueries
     private val fts = MessageSearch(driver)
 
+    /**
+     * Build the search index for history that predates it.
+     *
+     * Call once at startup from a background scope — never on the main
+     * thread. Cheap and idempotent after the first run; see
+     * [MessageSearch.backfillIfNeeded].
+     */
+    suspend fun prepareSearchIndex() = withContext(Dispatchers.Default) {
+        fts.backfillIfNeeded()
+    }
+
     fun conversations(): Flow<List<Conversation>> =
         q.conversationList().asFlow().mapToList(Dispatchers.Default)
 
@@ -299,23 +310,64 @@ class ChatRepository(
      */
     suspend fun search(query: String, limit: Long = 50): SearchResults =
         withContext(Dispatchers.Default) {
-            val match = ftsMatchExpression(query)
-            val messages = if (match == null) {
-                emptyList()
-            } else {
-                // A malformed MATCH expression THROWS rather than returning
-                // nothing, and this runs on every keystroke — an unguarded
-                // call here would crash the app mid-word. The quoting in
-                // ftsMatchExpression should prevent it; this is the belt to
-                // that braces, because the cost of being wrong is a crash
-                // and the cost of the guard is nothing.
-                runCatching { fts.search(match, limit) }.getOrDefault(emptyList())
-            }
             SearchResults(
-                messages = messages,
+                messages = searchMessages(query, limit),
                 conversations = q.searchConversationTitles(query, limit).executeAsList(),
             )
         }
+
+    /**
+     * Message-body search, by whichever means this device supports.
+     *
+     * Every path is wrapped: this runs on each keystroke, and a malformed FTS
+     * expression THROWS rather than returning nothing. `ftsMatchExpression`
+     * should make that impossible, but the cost of being wrong is a crash
+     * while the user is typing and the cost of the guard is nothing.
+     */
+    private fun searchMessages(query: String, limit: Long): List<MessageHit> {
+        if (query.isBlank()) return emptyList()
+
+        if (fts.isAvailable) {
+            val match = ftsMatchExpression(query) ?: return emptyList()
+            return runCatching { fts.search(match, limit) }.getOrDefault(emptyList())
+        }
+
+        // No FTS module on this device — scan instead. The excerpt has to be
+        // built here because there is no snippet() to do it.
+        return runCatching {
+            q.searchMessagesLike(query, limit).executeAsList().map { row ->
+                MessageHit(
+                    msgId = row.msgId,
+                    convId = row.convId,
+                    title = row.title,
+                    role = row.role,
+                    createdAt = row.createdAt,
+                    excerpt = excerptAround(row.content, query),
+                )
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    /**
+     * A readable fragment around the first match, mimicking `snippet()`.
+     *
+     * Case-insensitive, because the FTS path matches that way and results
+     * should not change character depending on which engine answered.
+     */
+    private fun excerptAround(content: String, query: String, window: Int = 60): String {
+        val at = content.indexOf(query, ignoreCase = true)
+        if (at < 0) return content.take(window * 2)
+
+        val start = (at - window).coerceAtLeast(0)
+        val end = (at + query.length + window).coerceAtMost(content.length)
+        return buildString {
+            if (start > 0) append("...")
+            append(content, start, at)
+            append('[').append(content, at, at + query.length).append(']')
+            append(content, at + query.length, end)
+            if (end < content.length) append("...")
+        }
+    }
 
     /**
      * Bump this device's logical clock and return the new value.

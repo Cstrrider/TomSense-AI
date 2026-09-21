@@ -83,6 +83,11 @@ class TomsenseApp : Application() {
         // Fire-and-forget on purpose. If this threw or blocked, the app would
         // still open and still work offline — which is the requirement.
         sync.start()
+
+        // Off the main thread, and deliberately not awaited: indexing old
+        // messages is a convenience, and nothing about startup may depend on
+        // it finishing — or on it succeeding.
+        scope.launch { repo.prepareSearchIndex() }
     }
 
     /** Base URL the client talks to; also what the login flow opens. */

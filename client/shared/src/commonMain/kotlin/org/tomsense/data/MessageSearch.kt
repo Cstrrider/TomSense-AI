@@ -6,31 +6,110 @@ import app.cash.sqldelight.db.SqlDriver
 /**
  * Full-text search over message bodies, on the device (migration doc §3).
  *
- * ## Why this file is hand-written SQL
+ * ## Why this is raw SQL, built at runtime
  *
- * SQLDelight 2.0.2 cannot generate code against an FTS5 table. Its SQLite
- * dialect ships no fts5 module, so a virtual table's columns carry no type:
- * selecting one fails to compile, and merely referencing the table inside a
- * subquery sends the generator into infinite recursion. The table is still
- * created normally in `1.sqm` — migrations are passed through without being
- * typed — so the schema is fine and only the queries have to come here.
+ * Two separate constraints land in the same place.
  *
- * Every FTS5 statement in the app is therefore in this one class, deliberately.
- * These are the only queries in the codebase the compiler does not check, and
- * keeping them together means there is exactly one file to look at when search
- * misbehaves, instead of raw SQL scattered through the repository.
+ * **SQLDelight cannot generate code against a virtual table.** Its 2.0.2
+ * SQLite dialect has no FTS module, so the columns have no type: selecting one
+ * fails to compile, and merely referencing the table in a subquery sends the
+ * generator into infinite recursion. So these statements are hand-written and
+ * gathered here rather than scattered — they are the only queries in the
+ * client the compiler does not check.
  *
- * Writes go through the same driver the rest of the app uses, so calling these
- * inside a `db.transaction { }` block enrolls them in that transaction — which
- * is what keeps the index and the `message` table from disagreeing when a
- * write fails halfway.
+ * **The index must not be created by a migration.** beta7 did exactly that and
+ * the app could not start: migrations run from `Application.onCreate`, so a
+ * statement that throws there means the database never opens. Building the
+ * index at runtime is what lets a failure be caught, recorded, and degraded
+ * around instead of being fatal.
+ *
+ * ## Why FTS4 rather than FTS5
+ *
+ * Android's system SQLite is not compiled with FTS5 — this is why Room itself
+ * supports only FTS3/FTS4 and recommends FTS4. FTS5 works on the desktop JDBC
+ * driver, which bundles its own SQLite, and that discrepancy is exactly what
+ * made beta7 pass every test here and die on the phone.
+ *
+ * The cost is relevance ranking: FTS4 has no `bm25()`, so results come back
+ * newest-first. For searching one's own chat history that is arguably the
+ * better order anyway — the usual question is "the recent conversation where I
+ * mentioned X", not "the most lexically relevant".
+ *
+ * ## If even FTS4 is missing
+ *
+ * Some AOSP-derived builds strip more than others. [isAvailable] reports
+ * honestly, indexing becomes a no-op, and the repository falls back to a LIKE
+ * scan. Slower on a large history, but it always works and it never crashes.
  */
 internal class MessageSearch(private val driver: SqlDriver) {
 
+    /**
+     * False when this device's SQLite has no usable FTS module.
+     *
+     * Checked by the repository to pick a search strategy. It is set once, at
+     * construction, so the answer cannot change midway through a session and
+     * leave the index half-populated.
+     */
+    var isAvailable: Boolean = false
+        private set
+
+    init {
+        // Creating the table is cheap and has to happen before anything can
+        // index into it, so it runs here. Populating it does NOT — see
+        // [backfillIfNeeded].
+        //
+        // `runCatching` is load-bearing rather than defensive habit: on a
+        // device with no FTS module this throws, and this constructor runs
+        // inside Application.onCreate. Letting it propagate is precisely the
+        // beta7 crash, one layer up.
+        isAvailable = runCatching {
+            exec(
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS message_index USING fts4(
+                  msg_id, conv_id, content, notindexed=msg_id, notindexed=conv_id
+                )
+                """.trimIndent(),
+            )
+        }.isSuccess
+    }
+
+    /**
+     * Populate the index from existing messages, if it is empty and history
+     * is not.
+     *
+     * **Call this off the main thread.** It is separated from the constructor
+     * for exactly that reason: the constructor runs in `Application.onCreate`,
+     * and an `INSERT ... SELECT` across a long history there is an ANR on a
+     * cold start — a slower repeat of the mistake that made the index fatal in
+     * the first place.
+     *
+     * Guarded by the row counts rather than a "did I just create it" flag, so
+     * it is idempotent and self-healing: an index that was wiped or half-built
+     * repairs itself on the next launch instead of staying empty forever.
+     *
+     * Without it, search returns nothing for the entire history predating the
+     * index — indistinguishable, to the user, from search being broken.
+     */
+    fun backfillIfNeeded() {
+        if (!isAvailable) return
+        runCatching {
+            if (countOf("message_index") == 0L && countOf("message") > 0L) {
+                exec(
+                    """
+                    INSERT INTO message_index(msg_id, conv_id, content)
+                    SELECT id, conv_id, content FROM message
+                     WHERE deleted = 0 AND content <> ''
+                    """.trimIndent(),
+                )
+            }
+        }
+    }
+
     fun index(msgId: String, convId: String, content: String) {
+        if (!isAvailable) return
         driver.execute(
             identifier = null,
-            sql = "INSERT INTO message_fts(msg_id, conv_id, content) VALUES (?, ?, ?)",
+            sql = "INSERT INTO message_index(msg_id, conv_id, content) VALUES (?, ?, ?)",
             parameters = 3,
         ) {
             bindString(0, msgId)
@@ -39,11 +118,12 @@ internal class MessageSearch(private val driver: SqlDriver) {
         }
     }
 
-    /** FTS5 has no upsert, so re-indexing is always delete-then-insert. */
+    /** FTS has no upsert, so re-indexing is always delete-then-insert. */
     fun unindex(msgId: String) {
+        if (!isAvailable) return
         driver.execute(
             identifier = null,
-            sql = "DELETE FROM message_fts WHERE msg_id = ?",
+            sql = "DELETE FROM message_index WHERE msg_id = ?",
             parameters = 1,
         ) {
             bindString(0, msgId)
@@ -51,9 +131,10 @@ internal class MessageSearch(private val driver: SqlDriver) {
     }
 
     fun unindexConversation(convId: String) {
+        if (!isAvailable) return
         driver.execute(
             identifier = null,
-            sql = "DELETE FROM message_fts WHERE conv_id = ?",
+            sql = "DELETE FROM message_index WHERE conv_id = ?",
             parameters = 1,
         ) {
             bindString(0, convId)
@@ -61,30 +142,31 @@ internal class MessageSearch(private val driver: SqlDriver) {
     }
 
     /**
-     * Search, ranked by relevance.
-     *
-     * `bm25()` rather than the `rank` shorthand — same function, but spelled
-     * in a way that does not depend on FTS5's hidden-column sugar. Lower is
-     * better, hence ASC. `snippet()` returns the matched fragment with the hit
-     * wrapped in the markers, which is what makes a result readable without
-     * opening the conversation.
+     * Search, newest first.
      *
      * The join back to `message` and `conversation` is what filters out
-     * tombstoned rows: the index is maintained explicitly, and a row deleted
+     * tombstoned rows: the index is maintained explicitly, so a row deleted
      * while the app was closed could otherwise still be in it.
+     *
+     * `snippet()` here uses the FTS3/4 argument order —
+     * `(table, start, end, ellipsis, column, tokens)` — which is NOT the FTS5
+     * order. Getting these two confused produces plausible-looking output
+     * rather than an error.
      */
     fun search(match: String, limit: Long): List<MessageHit> {
+        if (!isAvailable) return emptyList()
+
         val sql = """
             SELECT m.id, m.conv_id, c.title, m.role, m.created_at,
-                   snippet(message_fts, 2, '[', ']', '...', 12)
-            FROM message_fts
-            JOIN message m      ON m.id = message_fts.msg_id
-            JOIN conversation c ON c.id = m.conv_id
-            WHERE message_fts MATCH ?
-              AND m.deleted = 0
-              AND c.deleted = 0
-            ORDER BY bm25(message_fts) ASC
-            LIMIT ?
+                   snippet(message_index, '[', ']', '...', 2, 12)
+              FROM message_index
+              JOIN message m      ON m.id = message_index.msg_id
+              JOIN conversation c ON c.id = m.conv_id
+             WHERE message_index MATCH ?
+               AND m.deleted = 0
+               AND c.deleted = 0
+             ORDER BY m.created_at DESC
+             LIMIT ?
         """.trimIndent()
 
         return driver.executeQuery(
@@ -95,22 +177,37 @@ internal class MessageSearch(private val driver: SqlDriver) {
                 bindString(0, match)
                 bindLong(1, limit)
             },
-            mapper = { cursor ->
-                val hits = mutableListOf<MessageHit>()
-                while (cursor.next().value) {
-                    hits += MessageHit(
-                        msgId = cursor.getString(0).orEmpty(),
-                        convId = cursor.getString(1).orEmpty(),
-                        title = cursor.getString(2).orEmpty(),
-                        role = cursor.getString(3).orEmpty(),
-                        createdAt = cursor.getLong(4) ?: 0L,
-                        excerpt = cursor.getString(5).orEmpty(),
-                    )
-                }
-                QueryResult.Value(hits.toList())
-            },
+            mapper = ::readHits,
         ).value
     }
+
+    private fun readHits(cursor: app.cash.sqldelight.db.SqlCursor): QueryResult.Value<List<MessageHit>> {
+        val hits = mutableListOf<MessageHit>()
+        while (cursor.next().value) {
+            hits += MessageHit(
+                msgId = cursor.getString(0).orEmpty(),
+                convId = cursor.getString(1).orEmpty(),
+                title = cursor.getString(2).orEmpty(),
+                role = cursor.getString(3).orEmpty(),
+                createdAt = cursor.getLong(4) ?: 0L,
+                excerpt = cursor.getString(5).orEmpty(),
+            )
+        }
+        return QueryResult.Value(hits.toList())
+    }
+
+    private fun exec(sql: String) =
+        driver.execute(identifier = null, sql = sql, parameters = 0)
+
+    private fun countOf(table: String): Long =
+        driver.executeQuery(
+            identifier = null,
+            sql = "SELECT COUNT(*) FROM $table",
+            parameters = 0,
+            mapper = { c ->
+                QueryResult.Value(if (c.next().value) c.getLong(0) ?: 0L else 0L)
+            },
+        ).value
 }
 
 /** One search result: enough to render a row and open the right conversation. */
@@ -125,19 +222,24 @@ data class MessageHit(
 )
 
 /**
- * Turn what the user typed into an FTS5 MATCH expression, or null if there is
- * nothing to search for.
+ * Turn what the user typed into an FTS4 MATCH expression, or null if there is
+ * nothing searchable in it.
  *
- * Each term is quoted and given a trailing `*`, so results appear while a word
- * is still being typed. The quoting is the important part: without it, FTS5
- * reads `-`, `"`, `OR` and `NEAR` as operators, and searching for a hyphenated
- * word or an apostrophe is a syntax error rather than a search. Quoting turns
- * the whole term back into literal text.
+ * Only letters and digits survive, and each resulting token gets a trailing
+ * `*` so results appear while a word is still being typed. Emitting nothing
+ * else is what makes this safe: FTS treats `-`, `"`, `*`, `(`, `OR` and `NEAR`
+ * as operators, and a malformed expression THROWS rather than returning no
+ * rows — on a search-as-you-type field that is a crash per keystroke.
+ *
+ * Splitting on non-alphanumerics also matches how the default tokenizer
+ * indexed the text, so "it's" becomes `it* s*` and still finds the original.
  */
 internal fun ftsMatchExpression(raw: String): String? {
-    val terms = raw.split(' ', '\t', '\n', ',')
-        .map { it.replace("\"", "").trim() }
+    val tokens = raw
+        .map { if (it.isLetterOrDigit()) it else ' ' }
+        .joinToString("")
+        .split(' ')
         .filter { it.isNotEmpty() }
-    if (terms.isEmpty()) return null
-    return terms.joinToString(" ") { "\"$it\"*" }
+    if (tokens.isEmpty()) return null
+    return tokens.joinToString(" ") { "$it*" }
 }
