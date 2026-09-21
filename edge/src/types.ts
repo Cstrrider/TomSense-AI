@@ -4,6 +4,8 @@ export interface Env {
    *  the deploy token currently lacks Vectorize permission. */
   VECTORS?: VectorizeIndex;
   FILES: R2Bucket;
+  /** Cloudflare Images, for resizing edit sources under the 512px input cap. */
+  IMAGES?: ImagesBinding;
   AI: Ai;
 
   VOICE: DurableObjectNamespace;

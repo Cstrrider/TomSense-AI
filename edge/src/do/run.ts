@@ -82,6 +82,14 @@ interface RunRecord {
   notices: string[];
   /** R2 keys produced during this run — generated images and the like. */
   attachments: string[];
+  /**
+   * Image keys the CLIENT attached, in order.
+   *
+   * Carried separately because the messages reaching this DO have already had
+   * their attachments expanded into data URLs, so the keys are no longer
+   * recoverable from them — and edit_image needs a key, not a data URL.
+   */
+  sourceImageKeys: string[];
   /** "high" when think mode routed this turn. */
   reasoningEffort: "high" | null;
   error?: string;
@@ -146,6 +154,7 @@ export class DetachedRun implements DurableObject {
       fallbackModel: string | null;
       messages: ChatMessage[];
       tools?: unknown[];
+      sourceImageKeys?: string[];
       notices?: string[];
       reasoningEffort?: "high" | null;
     };
@@ -165,6 +174,7 @@ export class DetachedRun implements DurableObject {
       pendingToolCalls: [],
       notices: body.notices ?? [],
       attachments: [],
+      sourceImageKeys: body.sourceImageKeys ?? [],
       reasoningEffort: body.reasoningEffort ?? null,
     };
     await this.persist(true);
@@ -383,12 +393,21 @@ export class DetachedRun implements DurableObject {
 
           for (const call of serverCalls) {
             const prefs = await getPrefs(this.env, rec.userId);
-            const result = await runServerTool(
-              this.env,
-              rec.userId,
-              call,
-              prefs.tool_models.image,
-            );
+            const result = await runServerTool(this.env, rec.userId, call, {
+              imageModel: prefs.tool_models.image,
+              // Oldest first: what the user attached on this turn, then
+              // anything generated since. edit_image takes the last, which is
+              // what "make it red" refers to.
+              recentImageKeys: [...rec.sourceImageKeys, ...rec.attachments],
+            });
+
+            // Surfaced to the user, not just to the model: a tool that failed
+            // for a concrete reason should say so rather than being relayed as
+            // a vague apology.
+            if (result.error) {
+              rec.notices.push(result.error);
+              this.emit({ type: "notice", text: result.error });
+            }
 
             if (result.attachmentKey) {
               rec.attachments.push(result.attachmentKey);

@@ -119,6 +119,12 @@ data class Preset(val kind: String, val name: String, val baseUrl: String)
 @Serializable
 data class ModelsResponse(
     val models: List<ModelOption> = emptyList(),
+    /**
+     * Text-to-image models, kept apart from chat models on purpose: they
+     * cannot answer a message, and mixing them in is how flux ends up picked
+     * as the default model.
+     */
+    val imageModels: List<ModelOption> = emptyList(),
     val defaultModel: String = "",
     val presets: List<Preset> = emptyList(),
 )

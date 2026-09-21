@@ -20,6 +20,7 @@ import {
   updateProvider,
   deleteProvider,
   listModels,
+  listImageModels,
   getDefaultModel,
   setDefaultModel,
   resolveChatModel,
@@ -122,6 +123,11 @@ export default {
       if (path === "/models" && req.method === "GET") {
         return json({
           models: await listModels(env, who),
+          // Image models are a different KIND of thing, not chat models, so
+          // they travel in their own list. Mixing them into `models` would
+          // put flux in the default-model picker, where choosing it produces
+          // a provider error on the next message.
+          imageModels: await listImageModels(env),
           defaultModel: await getDefaultModel(env, who),
           presets: PROVIDER_PRESETS,
         });
@@ -274,6 +280,10 @@ async function chat(req: Request, env: Env, who: Principal): Promise<Response> {
         // Merging here rather than in the client means a new server tool does
         // not need an app update to exist.
         tools: [...(body.tools ?? []), ...serverToolSchemas()],
+        // The DO receives messages with attachments already expanded into
+        // data URLs, so the keys are gone by then — and edit_image needs a
+        // key, not a data URL.
+        sourceImageKeys: body.messages.flatMap((m) => m.attachments ?? []),
         reasoningEffort: routed.reasoningEffort,
         // Rendered as the first chunks, so a surprising model choice is
         // never silent. That visibility is the point of the override.

@@ -85,12 +85,14 @@ class SettingsActivity : ComponentActivity() {
                 var adding by remember { mutableStateOf(false) }
                 var query by remember { mutableStateOf("") }
                 var prefs by remember { mutableStateOf(UserPrefs()) }
+                var imageModels by remember { mutableStateOf<List<ModelOption>>(emptyList()) }
 
                 suspend fun refresh() {
                     runCatching {
                         providers = app.providers.list()
                         val m = app.providers.models()
                         models = m.models
+                        imageModels = m.imageModels
                         presets = m.presets
                         defaultModel = m.defaultModel
                         prefs = app.providers.prefs()
@@ -154,7 +156,9 @@ class SettingsActivity : ComponentActivity() {
                         items(SLOTS, key = { it.key }) { slot ->
                             SlotRow(
                                 slot = slot,
-                                models = models,
+                                // The image slot picks from text-to-image
+                                // models; every other slot from chat models.
+                                models = if (slot.key == "image") imageModels else models,
                                 current = prefs.toolModels.slot(slot.key),
                                 onPick = { value ->
                                     lifecycleScope.launch {
@@ -749,8 +753,8 @@ private val SLOTS = listOf(
     Slot(
         "image",
         "Image",
-        "Draws pictures when you ask for one. Must be a text-to-image model — " +
-            "the flux-2-klein family will not work, it takes a different request shape.",
+        "Draws pictures when you ask for one. Editing needs a flux-2 model; " +
+            "the others can only generate from scratch.",
     ),
     Slot(
         "title",

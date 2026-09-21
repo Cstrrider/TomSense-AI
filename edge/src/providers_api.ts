@@ -382,6 +382,38 @@ function caps(p: ProviderView, modelId: string) {
   );
 }
 
+/**
+ * Text-to-image models Cloudflare currently serves.
+ *
+ * Kept apart from [listModels] deliberately. These are not chat models: they
+ * cannot answer a message, and putting them in the same list is how flux ends
+ * up selected as the default model. Discovery in the provider card is
+ * chat-only for the same reason — the Image slot draws from here instead, so
+ * there is no need to add an image model to a provider's chat list, which was
+ * the only way to reach one before and produced an error when it was used.
+ */
+export async function listImageModels(env: Env): Promise<ModelOption[]> {
+  try {
+    const listed = await env.AI.models({ task: "Text-to-Image", per_page: 200 });
+    return listed
+      .map((m) => m.name)
+      .filter((n): n is string => typeof n === "string" && n.startsWith("@cf/"))
+      .sort()
+      .map((id) => ({
+        value: `${CF_BUILTIN_ID}::${id}`,
+        label: id,
+        provider: "Cloudflare Workers AI",
+        vision: false,
+        reasoning: false,
+        context: null,
+      }));
+  } catch {
+    // Better an empty picker than a failed settings screen: the slot falls
+    // back to the default model when unset.
+    return [];
+  }
+}
+
 /** Is this provider currently usable — enabled, and keyed unless keyless? */
 async function usableProviderIds(env: Env, who: Principal): Promise<Set<string>> {
   const list = await listProviders(env, who);

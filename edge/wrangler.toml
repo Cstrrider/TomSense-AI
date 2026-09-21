@@ -76,3 +76,8 @@ ACCESS_AUD = "513c6e4e878c148e6774ee322bf616d0506e2f134f7e03ef3c7b8b437ab51e50"
 # Secrets (wrangler secret put):
 #   KEY_ENC_SECRET   — wraps provider api_key_enc at rest in D1
 #   HOME_AGENT_TOKEN — shared secret the home agent presents to HomeLink
+
+# Image resizing, used to bring an edit source under the 512x512 input cap that
+# flux-2 enforces by SILENTLY IGNORING anything larger.
+[images]
+binding = "IMAGES"
