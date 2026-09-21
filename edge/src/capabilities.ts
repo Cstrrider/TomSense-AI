@@ -27,6 +27,12 @@ const REASONING_HINTS = [
   "kimi",
   "deepseek-r1",
   "glm-4.7",
+  // Added once Cloudflare discovery started returning the live catalogue
+  // instead of the bundled one: these became selectable and were reported as
+  // non-reasoning. glm-5.3 was observed streaming a reasoning channel
+  // directly, and QwQ is a reasoning model by definition.
+  "glm-5",
+  "qwq",
 ] as const;
 
 /**

@@ -19,6 +19,7 @@ import type { Env, Principal, ModelEntry } from "./types";
 import { encryptKey, decryptKey } from "./crypto";
 import { CF_MODELS } from "./cf_catalog";
 import { CF_BUILTIN_ID } from "./providers";
+import { isReasoningModel, isVisionModel } from "./capabilities";
 
 export interface ProviderView {
   id: string;
@@ -349,12 +350,19 @@ export async function listModels(env: Env, who: Principal): Promise<ModelOption[
     if (!p.keyless && !p.hasKey) continue;
 
     for (const m of p.models) {
+      // Declared capabilities win; otherwise fall back to the heuristics in
+      // capabilities.ts. This list used to read the declared value ONLY, so a
+      // model with nothing declared was reported as having no capabilities at
+      // all — which became visible the moment Cloudflare discovery started
+      // returning models the bundled catalogue has no entry for. A reasoning
+      // model shown as non-reasoning is worse than an unknown one: it is a
+      // confident wrong answer, and the picker is where people decide.
       out.push({
         value: `${p.id}::${m.id}`,
         label: m.id,
         provider: p.name,
-        vision: Boolean(m.vision),
-        reasoning: Boolean(m.reasoning),
+        vision: m.vision ?? isVisionModel(m.id),
+        reasoning: m.reasoning ?? isReasoningModel(m.id),
         context: m.context ?? null,
       });
     }
@@ -455,11 +463,37 @@ export async function discoverModels(
   let apiKey = "";
   let kind = "openai-compat";
 
-  // Cloudflare has no `/models` endpoint reachable from here — the Worker
-  // holds an AI *binding*, not an account API token — so "what's available"
-  // is the bundled catalogue. Curating it still matters: the catalogue is
-  // long, and a user who wants three models should not scroll thirty.
+  // Ask Workers AI what it ACTUALLY serves.
+  //
+  // This used to return the bundled catalogue, which was wrong in exactly the
+  // way discovery exists to fix: `cf_catalog.ts` is generated and goes stale,
+  // and it lists 10 models where the platform serves 31. Offering it as
+  // "available" answered "what we already knew about" — so models that plainly
+  // exist (glm-5.3, kimi-k2.7, gpt-oss-120b, the qwen line) were unreachable
+  // and looked like they did not exist.
+  //
+  // The AI *binding* can list them, so this needs no account API token and no
+  // new secret. That matters: the alternative was giving the Worker a token
+  // far more powerful than the binding it already has.
+  //
+  // Everything the platform reports is returned, including LoRA and guard
+  // models. Filtering by guesswork would recreate the original problem one
+  // level down — the user is asking what is available, and curation is what
+  // the checkboxes are for.
   if (body.providerId === CF_BUILTIN_ID) {
+    try {
+      const listed = await env.AI.models({
+        task: "Text Generation",
+        per_page: 200,
+      });
+      const ids = listed
+        .map((m) => m.name)
+        .filter((n): n is string => typeof n === "string" && n.startsWith("@cf/"));
+      if (ids.length) return { models: [...new Set(ids)].sort() };
+    } catch {
+      // Fall through — a discovery outage should degrade to the catalogue,
+      // not leave the user with an empty list and no way to pick anything.
+    }
     return { models: cfCatalogModels().map((m) => m.id).sort() };
   }
 
