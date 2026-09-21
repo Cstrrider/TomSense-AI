@@ -9,6 +9,7 @@
 
 import type { Env, Principal, ChatMessage } from "./types";
 import { authenticate, issueDeviceToken, issueAuthCode, redeemAuthCode } from "./auth";
+import { readShared, setShare } from "./share";
 import { parseModelStr, resolveProvider } from "./providers";
 import { push, pull, type PushRequest } from "./sync";
 import {
@@ -74,6 +75,13 @@ export default {
       return await authExchange(req, env);
     }
 
+    // Public share links. MUST be resolved before `authenticate`, because the
+    // whole point is that a recipient has no credential — the token in the
+    // path is the entire authorisation. See share.ts.
+    if (path.startsWith("/share/") && req.method === "GET") {
+      return await readShared(env, decodeURIComponent(path.slice("/share/".length)));
+    }
+
     // Access config gates ONLY the browser JWT path (enforced inside
     // authenticate). Device-token auth is ours end to end and works without
     // it, which is what makes the native app testable before Access exists.
@@ -118,6 +126,16 @@ export default {
         const b = (await req.json()) as { model?: string };
         await setDefaultModel(env, who, b.model ?? "");
         return json({ ok: true });
+      }
+      // Minting and revoking a link is the owner's action, so unlike the
+      // public read above this one sits behind authentication.
+      if (path.startsWith("/chats/") && path.endsWith("/share") && req.method === "POST") {
+        const convId = decodeURIComponent(
+          path.slice("/chats/".length, path.length - "/share".length),
+        );
+        const body = (await req.json()) as { shared?: boolean };
+        const r = await setShare(env, who, convId, body.shared !== false);
+        return "error" in r ? json(r, 400) : json(r);
       }
       if (path === "/voice") return await voice(req, env, who);
       if (path === "/runs" && req.method === "GET") return await listRuns(url, env, who);

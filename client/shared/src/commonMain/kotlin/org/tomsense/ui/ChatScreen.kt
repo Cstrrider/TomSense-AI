@@ -13,6 +13,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -24,6 +26,8 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
@@ -60,6 +64,14 @@ fun ChatScreen(
     isGenerating: Boolean = false,
     onStop: () -> Unit = {},
     onRegenerate: (() -> Unit)? = null,
+    /** Shown in the bar so the open chat is identifiable without the drawer. */
+    title: String = "TomSense",
+    /** Null hides the menu button — used where there is no drawer to open. */
+    onOpenDrawer: (() -> Unit)? = null,
+    /** Fork from the last turn. Null while there is nothing to fork. */
+    onBranch: (() -> Unit)? = null,
+    onExport: (() -> Unit)? = null,
+    onShare: (() -> Unit)? = null,
 ) {
     var draft by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
@@ -75,7 +87,20 @@ fun ChatScreen(
         modifier = modifier,
         topBar = {
             TopAppBar(
-                title = { Text("TomSense") },
+                title = {
+                    Text(
+                        title.ifBlank { "New chat" },
+                        maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    )
+                },
+                navigationIcon = {
+                    onOpenDrawer?.let {
+                        IconButton(onClick = it) {
+                            Icon(Icons.Filled.Menu, contentDescription = "Chats")
+                        }
+                    }
+                },
                 actions = {
                     // Sync state is ambient, not a blocking dialog. Being
                     // offline is a normal condition here, not an error.
@@ -84,6 +109,41 @@ fun ChatScreen(
                         style = MaterialTheme.typography.labelSmall,
                         modifier = Modifier.padding(end = 4.dp),
                     )
+                    // Branch, export and share act on the OPEN conversation,
+                    // so they live here rather than in the drawer's per-row
+                    // menu — that menu acts on whichever row was long-pressed,
+                    // which is not necessarily the one on screen.
+                    if (onBranch != null || onExport != null || onShare != null) {
+                        var menuOpen by remember { mutableStateOf(false) }
+                        Box {
+                            IconButton(onClick = { menuOpen = true }) {
+                                Icon(Icons.Filled.MoreVert, contentDescription = "Chat actions")
+                            }
+                            DropdownMenu(
+                                expanded = menuOpen,
+                                onDismissRequest = { menuOpen = false },
+                            ) {
+                                onBranch?.let { action ->
+                                    DropdownMenuItem(
+                                        text = { Text("Branch from here") },
+                                        onClick = { menuOpen = false; action() },
+                                    )
+                                }
+                                onExport?.let { action ->
+                                    DropdownMenuItem(
+                                        text = { Text("Export as markdown") },
+                                        onClick = { menuOpen = false; action() },
+                                    )
+                                }
+                                onShare?.let { action ->
+                                    DropdownMenuItem(
+                                        text = { Text("Share link") },
+                                        onClick = { menuOpen = false; action() },
+                                    )
+                                }
+                            }
+                        }
+                    }
                     onOpenSettings?.let {
                         IconButton(onClick = it) {
                             Icon(Icons.Filled.Settings, contentDescription = "Providers and models")

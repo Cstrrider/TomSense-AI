@@ -54,12 +54,12 @@ sandbox gets dramatically harder.** Everything else is ordinary work.
 | Branch conversation | `POST /chats/{id}/branch` | Port | M | Needs a sync-safe copy; watch lamport assignment |
 | Follow-up suggestions | `POST /chat/{id}/followups` | Port | S | Tier-1 model |
 | Checkpoints + restore | `GET/POST /chats/{id}/checkpoints/...` | Rewrite | M | Interacts badly with LWW sync — see §9 |
-| Chat CRUD, rename, delete, batch | `/chats*` | Port | M | Mostly local-first already; needs UI |
-| Pin / folder / project / model | `PUT /chats/{id}/*` | Port | S | Add columns to the sync set |
-| Per-chat system prompt | `PUT /chats/{id}/system_prompt` | Port | S | |
-| Search | `GET /chats/search` | **Rewrite** | M | Local SQLite FTS5, not a server query |
-| Export | `GET /chats/{id}/export` | Port | S | |
-| Public share links | `POST /chats/{id}/share`, `GET /share/{token}` | Port | M | Works naturally — Access only guards `/auth/mobile` |
+| Chat CRUD, rename, delete, batch | `/chats*` | **Done** | — | The UI it needed did not exist; see §13 |
+| Pin / project / model | `PUT /chats/{id}/*` | **Done** | — | `folder` deliberately not ported — §13 |
+| Per-chat system prompt | `PUT /chats/{id}/system_prompt` | **Done** | — | Column + repo; no UI surface yet |
+| Search | `GET /chats/search` | **Done** | — | FTS5, but NOT via SQLDelight — §13 |
+| Export | `GET /chats/{id}/export` | **Done** | — | Local markdown → share sheet |
+| Public share links | `POST /chats/{id}/share`, `GET /share/{token}` | **Done** | — | Verified live, logged-out read works |
 
 **Search is the interesting one.** On stable it's a Postgres query. Local-first
 makes it strictly better: FTS5 over the device's own SQLite is instant and works
@@ -204,7 +204,7 @@ early rather than discovered late.
 | ~~**A**~~ | ~~Tool-result round trip · detached-run reconnect · stop · regenerate~~ — **DONE 2026-09-20**, see §11 | Unblocks every tool; all small |
 | ~~**B**~~ | ~~Device tools (20) · permission flow~~ — **DONE 2026-09-21** (19/20), see §12 | Proves the native thesis; highest value per line |
 | **C** | Voice: wire `VoiceSession` end to end, measure on-device latency | Highest risk; must be validated before building on it |
-| **D** | Chat management: search (FTS5) · pin/folder/project · branch · export · share | Makes it a daily driver |
+| ~~**D**~~ | ~~Chat management: search (FTS5) · pin/project · branch · export · share~~ — **DONE 2026-09-21**, see §13 | Makes it a daily driver |
 | **E** | Memory + uploads + RAG *(needs Vectorize)* · artifacts | Depth; externally blocked |
 | **F** | Web tools (Brave/Tavily) · images · MCP client + server | Breadth |
 | **G** | Schedules · push notifications · secrets · personas · starters | Long tail |
@@ -317,7 +317,93 @@ late…")` → *"ready to go, just hit send."*
 
 ---
 
-## 13. What this is not
+## 13. Phase D as built (2026-09-21)
+
+Chat management. The headline discovery was that this was not five small ports
+onto an existing surface: **the app had no conversation list at all.** It
+opened whatever chat was most recent (`MainActivity.kt:73`) and offered no way
+to reach another, so every feature in this phase was unreachable regardless of
+what the data layer supported. The list had to exist first.
+
+| Feature | Where it landed |
+|---|---|
+| Conversation list, switcher, new chat | `ui/ConversationDrawer.kt` (shared) |
+| Rename · pin · delete | Drawer row menu → `ChatRepository` |
+| Search (FTS5 + titles) | `data/MessageSearch.kt` + drawer, debounced 150ms |
+| Branch | `ChatRepository.branchConversation` |
+| Export | `data/Export.kt` → Android share sheet |
+| Share links | `edge/src/share.ts`, `POST /chats/{id}/share`, `GET /share/{token}` |
+
+### SQLDelight cannot do FTS5
+
+The plan said "local SQLite FTS5". That is what shipped, but **not** through
+SQLDelight: its 2.0.2 SQLite dialect has no fts5 module, so a virtual table's
+columns have no type. Selecting one fails to compile, and merely *referencing*
+the table in a subquery sends the code generator into infinite recursion
+(`StackOverflowError`). Confirmed there is no dialect artifact that adds it.
+
+So every FTS5 statement lives in `MessageSearch.kt` as raw driver SQL — the
+only queries in the client the compiler does not check, deliberately gathered
+into one file rather than scattered. The table itself is created normally in a
+migration, which SQLDelight passes through without needing to type it.
+
+### The schema now lives in migrations
+
+`deriveSchemaFromMigrations` is on: `Schema.sq` holds only queries, and `0.sqm`
+(the beta1–beta6 schema) plus `1.sqm` define the tables. beta6 is installed
+with real conversations on it, so the upgrade path is the one that has to be
+right, and this makes a fresh install *be* that path replayed.
+
+`JdbcSqliteDriver` needed matching work — unlike the Android driver it neither
+creates nor upgrades, and would have opened an old desktop database and thrown
+"no such column" on the first query. It now tracks `PRAGMA user_version`.
+
+### Indexing is explicit, not trigger-driven
+
+Triggers on `message` would fire once per streamed token, re-tokenising a
+growing answer hundreds of times per reply. Indexing happens once, at
+completion, from the same place that already marks a row dirty — the same
+reasoning that keeps `dirty = 0` while tokens arrive.
+
+### Two decisions that shape the data
+
+**`folder` was not ported.** Stable carried both a free-text `chats.folder` and
+`project_id`, and already ran a one-time migration folding every folder into a
+project (`backend/app/db.py:140`). Porting it would have resurrected a grouping
+stable had retired; `project_id` is the one that survives.
+
+**`share_token` is pull-only.** It is absent from `SYNCABLE` in `sync.ts`, so
+`push` never writes it while `pull` (a `SELECT *`) still returns it. A client
+that could push a token could choose a short or guessable one; this way the
+edge mints it and every device still sees it.
+
+### Verified
+
+Migrations were replayed against real SQLite 3.45.2, both paths:
+
+```
+fresh install   0.sqm + 1.sqm apply clean
+upgrade (beta6) v1 + data -> 1.sqm: 3 messages preserved, 2 indexed
+                (the tombstoned one correctly skipped), new columns
+                defaulted on old rows, pre-migration history searchable
+search          "dentist" -> 2 hits, "dent"* prefix -> same 2,
+                "los angeles" multi-term -> 1, snippet() highlights,
+                bm25 ranks
+quoting         "it's", "multi-word", "OR" all safe — unquoted these
+                are FTS5 syntax errors, i.e. a crash per keystroke
+```
+
+Share links were tested against the live Worker: minted with a device token,
+read with **no credential**, `<script>` in a title and `<b>` in a body both
+escaped, `cache-control: private, no-store` + `x-robots-tag: noindex`, revoke
+returns the link to 404, and another user's conversation is "not found" rather
+than forbidden. Test rows were removed from D1 afterwards.
+
+**Not yet verified on a device.** Phase C (voice) is next.
+
+---
+
+## 14. What this is not
 
 This plan does **not** aim for 1:1 endpoint parity with `main`. Roughly 14 of
 the 98 routes are dropped or replaced outright, and several more collapse into

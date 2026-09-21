@@ -10,6 +10,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.Serializable
+import app.cash.sqldelight.db.SqlDriver
+import org.tomsense.data.MessageSearch
 import org.tomsense.db.TomsenseDb
 
 /**
@@ -24,7 +26,11 @@ class SyncEngine(
     private val db: TomsenseDb,
     private val api: EdgeApi,
     private val scope: CoroutineScope,
+    /** Needed for the FTS5 statements SQLDelight cannot generate. */
+    driver: SqlDriver,
 ) {
+    private val fts = MessageSearch(driver)
+
     private val _status = MutableStateFlow<SyncStatus>(SyncStatus.Idle)
     val status: StateFlow<SyncStatus> = _status
 
@@ -127,6 +133,9 @@ class SyncEngine(
                 project_id = o.stringOrNull("project_id"),
                 title = o.string("title"),
                 model = o.string("model"),
+                system_prompt = o.stringOrNull("system_prompt"),
+                pinned = o.longOrNull("pinned") ?: 0L,
+                share_token = o.stringOrNull("share_token"),
                 created_at = o.long("created_at"),
                 updated_at = o.long("updated_at"),
                 deleted = o.long("deleted"),
@@ -134,21 +143,35 @@ class SyncEngine(
                 device_id = o.string("device_id"),
                 dirty = 0,
             )
-            "messages" -> q.upsertMessage(
-                id = o.string("id"),
-                conv_id = o.string("conv_id"),
-                role = o.string("role"),
-                content = o.string("content"),
-                encrypted = o.long("encrypted"),
-                reasoning = o.stringOrNull("reasoning"),
-                tool_calls = o.stringOrNull("tool_calls"),
-                attachments = o.stringOrNull("attachments"),
-                created_at = o.long("created_at"),
-                deleted = o.long("deleted"),
-                lamport = lamport,
-                device_id = o.string("device_id"),
-                dirty = 0,
-            )
+            "messages" -> {
+                val msgId = o.string("id")
+                val convId = o.string("conv_id")
+                val content = o.string("content")
+                val deleted = o.long("deleted")
+                q.upsertMessage(
+                    id = msgId,
+                    conv_id = convId,
+                    role = o.string("role"),
+                    content = content,
+                    encrypted = o.long("encrypted"),
+                    reasoning = o.stringOrNull("reasoning"),
+                    tool_calls = o.stringOrNull("tool_calls"),
+                    attachments = o.stringOrNull("attachments"),
+                    created_at = o.long("created_at"),
+                    deleted = deleted,
+                    lamport = lamport,
+                    device_id = o.string("device_id"),
+                    dirty = 0,
+                )
+                // Keep search consistent with what arrived. Without this a
+                // message written on the laptop is readable on the phone but
+                // unfindable there — the worst kind of search bug, because
+                // the data is visibly present and the index simply disagrees.
+                fts.unindex(msgId)
+                if (deleted == 0L && content.isNotEmpty()) {
+                    fts.index(msgId, convId, content)
+                }
+            }
             // projects / memories handled once their local tables land (M7).
         }
     }

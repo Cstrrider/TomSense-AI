@@ -1,0 +1,56 @@
+-- v0 → v1: the original schema, as shipped in beta1–beta6.
+--
+-- This file is a verbatim record of what those builds created, and it must
+-- keep matching them forever. `deriveSchemaFromMigrations` means a fresh
+-- install is this file plus every later migration replayed in order, so
+-- editing it would make new installs diverge from upgraded ones — the exact
+-- drift the migration chain exists to prevent. Change the schema by adding a
+-- migration, never by editing an old one.
+--
+-- `lamport` is a per-device logical clock, NOT a timestamp. Device clocks are
+-- wrong often enough (travel, reboots, manual changes) that ordering on them
+-- produces lost writes that are almost impossible to debug after the fact.
+
+CREATE TABLE conversation (
+  id          TEXT NOT NULL PRIMARY KEY,
+  project_id  TEXT,
+  title       TEXT NOT NULL DEFAULT '',
+  model       TEXT NOT NULL DEFAULT '',
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL,
+  deleted     INTEGER NOT NULL DEFAULT 0,
+  lamport     INTEGER NOT NULL,
+  device_id   TEXT NOT NULL,
+  dirty       INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX conversation_updated ON conversation(updated_at DESC);
+CREATE INDEX conversation_dirty ON conversation(dirty);
+
+CREATE TABLE message (
+  id          TEXT NOT NULL PRIMARY KEY,
+  conv_id     TEXT NOT NULL,
+  role        TEXT NOT NULL,
+  content     TEXT NOT NULL,
+  encrypted   INTEGER NOT NULL DEFAULT 0,
+  reasoning   TEXT,
+  tool_calls  TEXT,
+  attachments TEXT,
+  created_at  INTEGER NOT NULL,
+  deleted     INTEGER NOT NULL DEFAULT 0,
+  lamport     INTEGER NOT NULL,
+  device_id   TEXT NOT NULL,
+  dirty       INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX message_conv ON message(conv_id, created_at);
+CREATE INDEX message_dirty ON message(dirty);
+
+-- Single-row table holding sync state. `cursor` is the server seq we have
+-- consumed up to; `lamport` is this device's logical clock.
+CREATE TABLE sync_state (
+  id        INTEGER NOT NULL PRIMARY KEY CHECK (id = 0),
+  device_id TEXT NOT NULL,
+  cursor    INTEGER NOT NULL DEFAULT 0,
+  lamport   INTEGER NOT NULL DEFAULT 0
+);

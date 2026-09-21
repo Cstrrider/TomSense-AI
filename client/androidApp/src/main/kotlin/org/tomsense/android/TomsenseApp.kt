@@ -63,7 +63,7 @@ class TomsenseApp : Application() {
         }
         db.schemaQueries.initSyncState(deviceId)
 
-        repo = ChatRepository(db, deviceId)
+        repo = ChatRepository(db, deviceId, driver)
         tools = AndroidToolset(this)
 
         val http = HttpClient(OkHttp) {
@@ -78,7 +78,7 @@ class TomsenseApp : Application() {
         edge = EdgeApi(http, url, token)
         providers = ProvidersApi(http, url, token)
         chat = ChatClient(http, url, token)
-        sync = SyncEngine(db, edge, scope)
+        sync = SyncEngine(db, edge, scope, driver)
 
         // Fire-and-forget on purpose. If this threw or blocked, the app would
         // still open and still work offline — which is the requirement.
@@ -90,7 +90,9 @@ class TomsenseApp : Application() {
         get() = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getString(KEY_BASE_URL, DEFAULT_BASE_URL)!!
 
-    private lateinit var edge: EdgeApi
+    /** Also used directly for share links, which are not part of sync. */
+    lateinit var edge: EdgeApi
+        private set
 
     /**
      * Redeem a login code off the main thread and persist the token.

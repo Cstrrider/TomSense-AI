@@ -1,70 +1,39 @@
--- Local store — the SOURCE OF TRUTH (spec §5).
+-- Queries against the local store — the SOURCE OF TRUTH (spec §5).
 --
--- Mirrors the D1 schema, with one addition per table: `dirty`. A row is dirty
--- when it has local changes not yet acknowledged by the edge. That single flag
--- is what makes the app work offline: writes land here immediately, the UI
--- renders from here, and the sync engine drains dirty rows whenever it can.
+-- The SCHEMA is not here. `deriveSchemaFromMigrations` is on, so the tables
+-- are defined by the numbered `.sqm` migrations in this directory and a fresh
+-- install is those migrations replayed in order. That is deliberate: the app
+-- is already installed on a device with real conversations on it, and making
+-- the upgrade path authoritative is the only way a new install and an upgraded
+-- one are guaranteed to end up with the same database.
 --
--- `lamport` is a per-device logical clock, NOT a timestamp. Device clocks are
--- wrong often enough (travel, reboots, manual changes) that ordering on them
--- produces lost writes that are almost impossible to debug after the fact.
-
-CREATE TABLE conversation (
-  id          TEXT NOT NULL PRIMARY KEY,
-  project_id  TEXT,
-  title       TEXT NOT NULL DEFAULT '',
-  model       TEXT NOT NULL DEFAULT '',
-  created_at  INTEGER NOT NULL,
-  updated_at  INTEGER NOT NULL,
-  deleted     INTEGER NOT NULL DEFAULT 0,
-  lamport     INTEGER NOT NULL,
-  device_id   TEXT NOT NULL,
-  dirty       INTEGER NOT NULL DEFAULT 1
-);
-
-CREATE INDEX conversation_updated ON conversation(updated_at DESC);
-CREATE INDEX conversation_dirty ON conversation(dirty);
-
-CREATE TABLE message (
-  id          TEXT NOT NULL PRIMARY KEY,
-  conv_id     TEXT NOT NULL,
-  role        TEXT NOT NULL,
-  content     TEXT NOT NULL,
-  encrypted   INTEGER NOT NULL DEFAULT 0,
-  reasoning   TEXT,
-  tool_calls  TEXT,
-  attachments TEXT,
-  created_at  INTEGER NOT NULL,
-  deleted     INTEGER NOT NULL DEFAULT 0,
-  lamport     INTEGER NOT NULL,
-  device_id   TEXT NOT NULL,
-  dirty       INTEGER NOT NULL DEFAULT 1
-);
-
-CREATE INDEX message_conv ON message(conv_id, created_at);
-CREATE INDEX message_dirty ON message(dirty);
-
--- Single-row table holding sync state. `cursor` is the server seq we have
--- consumed up to; `lamport` is this device's logical clock.
-CREATE TABLE sync_state (
-  id        INTEGER NOT NULL PRIMARY KEY CHECK (id = 0),
-  device_id TEXT NOT NULL,
-  cursor    INTEGER NOT NULL DEFAULT 0,
-  lamport   INTEGER NOT NULL DEFAULT 0
-);
+-- The local schema mirrors D1's with one addition per table: `dirty`. A row is
+-- dirty when it has local changes the edge has not acknowledged. That single
+-- flag is what makes the app work offline — writes land here immediately, the
+-- UI renders from here, and the sync engine drains dirty rows when it can.
 
 -- ─── queries ────────────────────────────────────────────────────────────────
 
+-- Pinned first, then most recent — the same order stable settled on
+-- (`ORDER BY is_pinned DESC, updated_at DESC`, backend/app/db.py:407).
 conversationList:
-SELECT * FROM conversation WHERE deleted = 0 ORDER BY updated_at DESC;
+SELECT * FROM conversation WHERE deleted = 0
+ORDER BY pinned DESC, updated_at DESC;
+
+conversationById:
+SELECT * FROM conversation WHERE id = ?;
 
 messagesFor:
 SELECT * FROM message WHERE conv_id = ? AND deleted = 0 ORDER BY created_at;
 
+messageById:
+SELECT * FROM message WHERE id = ?;
+
 upsertConversation:
 INSERT OR REPLACE INTO conversation(
-  id, project_id, title, model, created_at, updated_at, deleted, lamport, device_id, dirty
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+  id, project_id, title, model, system_prompt, pinned, share_token,
+  created_at, updated_at, deleted, lamport, device_id, dirty
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 upsertMessage:
 INSERT OR REPLACE INTO message(
@@ -74,6 +43,64 @@ INSERT OR REPLACE INTO message(
 
 upsertConversationTimestamp:
 UPDATE conversation SET updated_at = ?, dirty = 1 WHERE id = ?;
+
+-- ─── chat management ────────────────────────────────────────────────────────
+--
+-- Every one of these takes the caller's freshly bumped lamport and sets
+-- `dirty = 1`. A mutation that forgets either is invisible to sync: it shows
+-- correctly on this device and never reaches any other, which is close to
+-- impossible to notice locally and the reason they all look alike.
+--
+-- `updated_at` is deliberately NOT touched by pin — pinning a year-old chat
+-- should not make it look freshly used once it is unpinned again.
+
+renameConversation:
+UPDATE conversation SET title = ?, updated_at = ?, lamport = ?, dirty = 1 WHERE id = ?;
+
+setConversationPinned:
+UPDATE conversation SET pinned = ?, lamport = ?, dirty = 1 WHERE id = ?;
+
+setConversationProject:
+UPDATE conversation SET project_id = ?, updated_at = ?, lamport = ?, dirty = 1 WHERE id = ?;
+
+setConversationSystemPrompt:
+UPDATE conversation SET system_prompt = ?, updated_at = ?, lamport = ?, dirty = 1 WHERE id = ?;
+
+setConversationModel:
+UPDATE conversation SET model = ?, updated_at = ?, lamport = ?, dirty = 1 WHERE id = ?;
+
+-- Written from the edge's response after a link is minted or revoked.
+setConversationShareToken:
+UPDATE conversation SET share_token = ?, lamport = ?, dirty = 1 WHERE id = ?;
+
+-- Tombstone, never a real DELETE: a row that simply vanishes locally is
+-- indistinguishable from one this device has not pulled yet, so the next sync
+-- would cheerfully restore it.
+tombstoneConversation:
+UPDATE conversation SET deleted = 1, lamport = ?, dirty = 1 WHERE id = ?;
+
+-- Messages carry their own tombstones so other devices drop the bodies too,
+-- rather than keeping orphans attached to a deleted conversation.
+tombstoneMessagesFor:
+UPDATE message SET deleted = 1, lamport = ?, dirty = 1 WHERE conv_id = ?;
+
+-- ─── search ─────────────────────────────────────────────────────────────────
+--
+-- Only the TITLE search lives here. Everything touching `message_fts` is in
+-- MessageSearch.kt as raw SQL, because SQLDelight 2.0.2 cannot generate code
+-- against an FTS5 table at all — its SQLite dialect ships no fts5 module, so
+-- a virtual table's columns have no types. Selecting one fails to compile, and
+-- merely referencing the table in a subquery sends the generator into infinite
+-- recursion (StackOverflowError). The table itself is fine: it is created in
+-- 1.sqm, which SQLDelight passes through without needing to type it.
+--
+-- Titles are short and few, so LIKE genuinely is the right tool here — a
+-- second index to maintain would cost more than it saves.
+searchConversationTitles:
+SELECT * FROM conversation
+WHERE deleted = 0 AND title LIKE ('%' || ? || '%')
+ORDER BY pinned DESC, updated_at DESC
+LIMIT ?;
 
 -- Streaming writes bypass the dirty flag deliberately; see
 -- ChatRepository.updateStreamingContent for why.

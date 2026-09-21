@@ -23,6 +23,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
+import app.cash.sqldelight.db.QueryResult
 import org.tomsense.data.ChatRepository
 import org.tomsense.db.Message
 import org.tomsense.db.TomsenseDb
@@ -60,10 +61,12 @@ private class Deps {
         val dbFile = File(dataDir, "tomsense.db")
         val fresh = !dbFile.exists()
         val driver = JdbcSqliteDriver("jdbc:sqlite:${dbFile.absolutePath}")
-        // JdbcSqliteDriver does not create the schema implicitly the way the
-        // Android driver does — without this a fresh install throws on the
-        // first query instead of starting empty.
-        if (fresh) TomsenseDb.Schema.create(driver)
+        // JdbcSqliteDriver manages neither creation nor upgrades the way the
+        // Android driver does: it will happily open a database at the wrong
+        // version and then throw "no such column" on the first query that
+        // touches anything new. So both paths are explicit here, and the
+        // version is tracked in SQLite's own `user_version` pragma.
+        migrateDesktopDb(driver, fresh)
         db = TomsenseDb(driver)
 
         val props = loadProps()
@@ -72,7 +75,7 @@ private class Deps {
             saveProps(props)
         }
         db.schemaQueries.initSyncState(deviceId)
-        repo = ChatRepository(db, deviceId)
+        repo = ChatRepository(db, deviceId, driver)
 
         val http = HttpClient(CIO) {
             install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
@@ -81,7 +84,7 @@ private class Deps {
         val token = { props.getProperty("device_token") }
 
         chat = ChatClient(http, baseUrl, token)
-        sync = SyncEngine(db, EdgeApi(http, baseUrl, token), scope)
+        sync = SyncEngine(db, EdgeApi(http, baseUrl, token), scope, driver)
         sync.start()
     }
 
@@ -98,6 +101,50 @@ private class Deps {
     companion object {
         const val DEFAULT_BASE_URL = "https://edge.cstrrider.org"
     }
+}
+
+/**
+ * Create or upgrade the desktop database.
+ *
+ * The Android driver does this itself; the JDBC one does not, and the failure
+ * mode if it is skipped is an upgraded app opening an old database and
+ * throwing "no such column" on the first query that touches a new one.
+ *
+ * `user_version` is SQLite's own per-file integer, which makes it the right
+ * place to record this: it travels WITH the database file, so copying or
+ * restoring a database cannot separate it from its version number the way a
+ * value kept alongside in the properties file could.
+ */
+private fun migrateDesktopDb(driver: JdbcSqliteDriver, fresh: Boolean) {
+    val target = TomsenseDb.Schema.version
+
+    if (fresh) {
+        TomsenseDb.Schema.create(driver).value
+        setUserVersion(driver, target)
+        return
+    }
+
+    val current = userVersion(driver)
+    if (current < target) {
+        TomsenseDb.Schema.migrate(driver, current, target).value
+        setUserVersion(driver, target)
+    }
+}
+
+private fun userVersion(driver: JdbcSqliteDriver): Long =
+    driver.executeQuery(
+        identifier = null,
+        sql = "PRAGMA user_version",
+        parameters = 0,
+        mapper = { cursor ->
+            QueryResult.Value(if (cursor.next().value) cursor.getLong(0) ?: 0L else 0L)
+        },
+    ).value
+
+private fun setUserVersion(driver: JdbcSqliteDriver, version: Long) {
+    // PRAGMA does not accept a bound parameter, so the value is interpolated.
+    // It is a Long from our own schema, never user input.
+    driver.execute(identifier = null, sql = "PRAGMA user_version = $version", parameters = 0)
 }
 
 fun main() = application {

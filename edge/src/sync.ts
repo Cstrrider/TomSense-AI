@@ -18,10 +18,22 @@
 
 import type { Env, Principal } from "./types";
 
-/** Tables that participate in sync, and their syncable columns. */
+/**
+ * Tables that participate in sync, and their syncable columns.
+ *
+ * Note the asymmetry: `push` writes exactly these columns, while `pull` does
+ * `SELECT *`. So a column left OUT of this list is pull-only — the edge can
+ * set it and every device will see it, but no client can write it.
+ *
+ * `share_token` is deliberately in that category. It is minted by the Worker,
+ * and a client that could push one could choose its own value: a short or
+ * guessable token, or a collision attempt against the UNIQUE index. Leaving it
+ * off this list means the `ON CONFLICT DO UPDATE` never touches it, so an
+ * edge-minted token also survives an unrelated push of the same row.
+ */
 const SYNCABLE = {
   conversations: [
-    "id", "user_id", "project_id", "title", "model",
+    "id", "user_id", "project_id", "title", "model", "system_prompt", "pinned",
     "created_at", "updated_at", "deleted", "lamport", "device_id",
   ],
   messages: [

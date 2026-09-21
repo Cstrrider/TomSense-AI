@@ -3,8 +3,13 @@ package org.tomsense.android
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -20,7 +25,10 @@ import androidx.lifecycle.lifecycleScope
 import org.tomsense.android.auth.Login
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import org.tomsense.data.SearchResults
 import org.tomsense.data.deviceSystemPrompt
+import org.tomsense.data.exportFileName
+import org.tomsense.data.exportMarkdown
 import org.tomsense.db.Message
 import org.tomsense.sync.ChatRequest
 import org.tomsense.sync.SyncStatus
@@ -28,11 +36,20 @@ import org.tomsense.sync.WireMessage
 import org.tomsense.android.tools.PermissionGate
 import org.tomsense.tools.schemas
 import org.tomsense.ui.ChatScreen
+import org.tomsense.ui.ConversationDrawer
 
 class MainActivity : ComponentActivity() {
 
     private val app by lazy { application as TomsenseApp }
-    private lateinit var convId: String
+
+    /**
+     * The open conversation.
+     *
+     * Compose state rather than a plain field: switching chats from the drawer
+     * has to recompose the message list, and it is null only for the instant
+     * before the first one is resolved at startup.
+     */
+    private var convId by mutableStateOf<String?>(null)
 
     /** Drives the send/stop button. Compose observes it; no event bus needed. */
     private var generating by mutableStateOf(false)
@@ -65,18 +82,37 @@ class MainActivity : ComponentActivity() {
                 val messagesFlow = remember { MutableStateFlow<List<Message>>(emptyList()) }
                 val messages by messagesFlow.collectAsState()
                 val syncStatus by app.sync.status.collectAsState()
+                val conversations by app.repo.conversations()
+                    .collectAsState(initial = emptyList())
 
                 androidx.compose.runtime.LaunchedEffect(Unit) {
-                    // Reuse the most recent conversation, or start one. Both
-                    // paths are local — opening the app never waits on a
-                    // network round trip.
+                    // Reopen whatever was last open, falling back to the most
+                    // recent chat and then to a new one. All three paths are
+                    // local — opening the app never waits on the network.
+                    //
+                    // The remembered id is checked against the table rather
+                    // than trusted: the chat may have been deleted on another
+                    // device, and a dangling id would open an empty screen
+                    // with no way back to a real conversation.
                     val existing = app.db.schemaQueries.conversationList().executeAsList()
-                    convId = existing.firstOrNull()?.id ?: app.repo.createConversation()
+                    val remembered = prefs().getString(LAST_CONV, null)
+                    convId = existing.firstOrNull { it.id == remembered }?.id
+                        ?: existing.firstOrNull()?.id
+                        ?: app.repo.createConversation()
                     ready = true
                     // Before rendering steady state: a reply may still be
                     // being written on the edge from a previous launch.
                     resumeActiveRun()
-                    app.repo.messages(convId).collect { messagesFlow.value = it }
+                }
+
+                // Re-subscribed whenever the open chat changes. Keyed on
+                // convId so switching chats swaps the message list instead of
+                // leaving the previous conversation's collector running.
+                androidx.compose.runtime.LaunchedEffect(convId) {
+                    val id = convId ?: return@LaunchedEffect
+                    prefs().edit().putString(LAST_CONV, id).apply()
+                    messagesFlow.value = emptyList()
+                    app.repo.messages(id).collect { messagesFlow.value = it }
                 }
 
                 // Chat renders regardless of sign-in — history is local and
@@ -94,26 +130,98 @@ class MainActivity : ComponentActivity() {
                     // imePadding for the same reason: edge-to-edge means the
                     // keyboard overlaps content, and adjustResize alone no
                     // longer lifts the input row on Android 15.
-                    Column(Modifier.statusBarsPadding().imePadding()) {
-                        if (!signedIn) {
-                            SignInBanner(onSignIn = { Login.start(this@MainActivity, app.baseUrl) })
+                    val drawerState = rememberDrawerState(DrawerValue.Closed)
+                    val scope = rememberCoroutineScope()
+                    var query by remember { mutableStateOf("") }
+                    var results by remember { mutableStateOf<SearchResults?>(null) }
+
+                    // Debounced so a fast typist does not run a query per
+                    // keystroke. Restarting on every change cancels the
+                    // previous wait, so only the last pause actually searches.
+                    androidx.compose.runtime.LaunchedEffect(query) {
+                        val q = query.trim()
+                        if (q.isEmpty()) {
+                            results = null
+                        } else {
+                            kotlinx.coroutines.delay(150)
+                            results = app.repo.search(q)
                         }
-                        ChatScreen(
-                            messages = messages,
-                            syncLabel = syncStatus.label(),
-                            onSend = ::send,
-                            isGenerating = generating,
-                            onStop = ::stop,
-                            onRegenerate = ::regenerate,
-                            onOpenSettings = {
-                                startActivity(
-                                    android.content.Intent(
-                                        this@MainActivity,
-                                        SettingsActivity::class.java,
-                                    ),
+                    }
+
+                    ModalNavigationDrawer(
+                        drawerState = drawerState,
+                        drawerContent = {
+                            ModalDrawerSheet {
+                                ConversationDrawer(
+                                    conversations = conversations,
+                                    selectedId = convId,
+                                    query = query,
+                                    onQueryChange = { query = it },
+                                    results = results,
+                                    onSelect = { id ->
+                                        convId = id
+                                        query = ""
+                                        scope.launch { drawerState.close() }
+                                    },
+                                    // Opening a hit only opens its chat for
+                                    // now; scrolling to the exact message
+                                    // needs the list to expose a scroll
+                                    // target, which it does not yet.
+                                    onOpenMessage = { cid, _ ->
+                                        convId = cid
+                                        query = ""
+                                        scope.launch { drawerState.close() }
+                                    },
+                                    onNew = {
+                                        scope.launch {
+                                            convId = app.repo.createConversation()
+                                            query = ""
+                                            drawerState.close()
+                                        }
+                                    },
+                                    onRename = { id, title ->
+                                        scope.launch { app.repo.rename(id, title) }
+                                    },
+                                    onPin = { id, pinned ->
+                                        scope.launch { app.repo.setPinned(id, pinned) }
+                                    },
+                                    onDelete = ::deleteConversation,
                                 )
-                            },
-                        )
+                            }
+                        },
+                    ) {
+                        Column(Modifier.statusBarsPadding().imePadding()) {
+                            if (!signedIn) {
+                                SignInBanner(
+                                    onSignIn = { Login.start(this@MainActivity, app.baseUrl) },
+                                )
+                            }
+                            ChatScreen(
+                                messages = messages,
+                                syncLabel = syncStatus.label(),
+                                onSend = ::send,
+                                isGenerating = generating,
+                                onStop = ::stop,
+                                onRegenerate = ::regenerate,
+                                title = conversations.firstOrNull { it.id == convId }
+                                    ?.title.orEmpty(),
+                                onOpenDrawer = { scope.launch { drawerState.open() } },
+                                // Branching needs something to branch FROM,
+                                // and exporting an empty chat produces a file
+                                // with a heading and nothing under it.
+                                onBranch = if (messages.isNotEmpty()) ::branchHere else null,
+                                onExport = if (messages.isNotEmpty()) ::exportChat else null,
+                                onShare = if (messages.isNotEmpty()) ::shareChat else null,
+                                onOpenSettings = {
+                                    startActivity(
+                                        android.content.Intent(
+                                            this@MainActivity,
+                                            SettingsActivity::class.java,
+                                        ),
+                                    )
+                                },
+                            )
+                        }
                     }
                 }
             }
@@ -133,12 +241,105 @@ class MainActivity : ComponentActivity() {
      * syncs later. The generation is a separate concern that may fail.
      */
     private fun send(text: String) {
+        val id = convId ?: return
         lifecycleScope.launch {
-            app.repo.appendMessage(convId, "user", text)
-            val assistantId = app.repo.appendMessage(convId, "assistant", "")
+            app.repo.appendMessage(id, "user", text)
+            val assistantId = app.repo.appendMessage(id, "assistant", "")
             val history = historyForModel()
             consume(assistantId) {
-                app.chat.stream(ChatRequest(convId, history, tools = app.tools.schemas()))
+                app.chat.stream(ChatRequest(id, history, tools = app.tools.schemas()))
+            }
+        }
+    }
+
+    /**
+     * Fork the open conversation at its last turn.
+     *
+     * The fork is opened immediately — branching and then staying in the
+     * original is a reliable way to type the next message into the wrong one.
+     */
+    private fun branchHere() {
+        val id = convId ?: return
+        lifecycleScope.launch {
+            val last = app.db.schemaQueries.messagesFor(id).executeAsList().lastOrNull()
+                ?: return@launch
+            app.repo.branchConversation(id, last.id)?.let { convId = it }
+        }
+    }
+
+    /**
+     * Export the open conversation as markdown, via the system share sheet.
+     *
+     * Shared as EXTRA_TEXT rather than written to a file: a chat export is
+     * usually on its way into a note, a message or an issue, and going through
+     * a file would mean a FileProvider, a cache directory and a cleanup story
+     * for something the user wants to paste.
+     */
+    private fun exportChat() {
+        val id = convId ?: return
+        lifecycleScope.launch {
+            val conv = app.db.schemaQueries.conversationById(id).executeAsOneOrNull()
+                ?: return@launch
+            val msgs = app.db.schemaQueries.messagesFor(id).executeAsList()
+            val markdown = exportMarkdown(conv, msgs)
+
+            val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(android.content.Intent.EXTRA_TITLE, exportFileName(conv))
+                putExtra(android.content.Intent.EXTRA_SUBJECT, conv.title.ifBlank { "Conversation" })
+                putExtra(android.content.Intent.EXTRA_TEXT, markdown)
+            }
+            startActivity(android.content.Intent.createChooser(send, "Export chat"))
+        }
+    }
+
+    /**
+     * Publish the open conversation and hand the link to the share sheet.
+     *
+     * Unlike everything else in this class this one REQUIRES the network —
+     * the token is minted at the edge, because a client that could choose its
+     * own could choose a guessable one. So it reports failure rather than
+     * optimistically showing a link that resolves to nothing.
+     */
+    private fun shareChat() {
+        val id = convId ?: return
+        lifecycleScope.launch {
+            val result = runCatching { app.edge.setShared(id, shared = true) }.getOrNull()
+            val token = result?.shareToken
+            if (token == null) {
+                android.widget.Toast.makeText(
+                    this@MainActivity,
+                    result?.error ?: "Couldn't create a link — check your connection.",
+                    android.widget.Toast.LENGTH_SHORT,
+                ).show()
+                return@launch
+            }
+
+            // Mirror it locally so the chat shows as shared while offline.
+            app.repo.setShareToken(id, token)
+
+            val link = "${app.baseUrl}/share/$token"
+            val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(android.content.Intent.EXTRA_TEXT, link)
+            }
+            startActivity(android.content.Intent.createChooser(send, "Share chat"))
+        }
+    }
+
+    /**
+     * Delete a conversation, and leave the user somewhere valid.
+     *
+     * Deleting the OPEN chat has to move them off it — otherwise the screen
+     * keeps rendering a conversation that no longer exists and the next
+     * message would be written into a tombstoned row.
+     */
+    private fun deleteConversation(id: String) {
+        lifecycleScope.launch {
+            app.repo.deleteConversation(id)
+            if (convId == id) {
+                val remaining = app.db.schemaQueries.conversationList().executeAsList()
+                convId = remaining.firstOrNull()?.id ?: app.repo.createConversation()
             }
         }
     }
@@ -150,14 +351,15 @@ class MainActivity : ComponentActivity() {
      * its own previous attempt as context and tends to simply agree with it.
      */
     private fun regenerate() {
+        val id = convId ?: return
         lifecycleScope.launch {
-            val last = app.db.schemaQueries.messagesFor(convId).executeAsList().lastOrNull()
+            val last = app.db.schemaQueries.messagesFor(id).executeAsList().lastOrNull()
             if (last == null || last.role != "assistant") return@launch
 
             app.repo.resetMessage(last.id)
             val history = historyForModel(exclude = last.id)
             consume(last.id) {
-                app.chat.stream(ChatRequest(convId, history, tools = app.tools.schemas()))
+                app.chat.stream(ChatRequest(id, history, tools = app.tools.schemas()))
             }
         }
     }
@@ -192,11 +394,13 @@ class MainActivity : ComponentActivity() {
      * Rebuilt per request rather than stored, because the clock inside it is
      * only true at the moment of sending.
      */
-    private fun historyForModel(exclude: String? = null): List<WireMessage> =
-        listOf(WireMessage("system", deviceSystemPrompt())) +
-            app.db.schemaQueries.messagesFor(convId).executeAsList()
+    private fun historyForModel(exclude: String? = null): List<WireMessage> {
+        val id = convId ?: return listOf(WireMessage("system", deviceSystemPrompt()))
+        return listOf(WireMessage("system", deviceSystemPrompt())) +
+            app.db.schemaQueries.messagesFor(id).executeAsList()
                 .filter { it.id != exclude && it.content.isNotBlank() }
                 .map { WireMessage(it.role, it.content) }
+    }
 
     /**
      * Drive one generation into [assistantId], whether newly started or rejoined.
@@ -314,6 +518,7 @@ class MainActivity : ComponentActivity() {
 
     private companion object {
         const val ACTIVE_RUN = "active_run"
+        const val LAST_CONV = "last_conv"
     }
 }
 

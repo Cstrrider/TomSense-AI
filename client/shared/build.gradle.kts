@@ -77,6 +77,14 @@ sqldelight {
     databases {
         create("TomsenseDb") {
             packageName.set("org.tomsense.db")
+
+            // The .sqm migrations define the schema; Schema.sq holds only
+            // queries. This removes the drift a separate CREATE-statement file
+            // invites, where new installs get one schema and upgraded devices
+            // get another, and the difference shows up only on a device that
+            // has actually been upgraded. The app is already deployed with
+            // real data, so the upgrade path is the one that has to be right.
+            deriveSchemaFromMigrations.set(true)
         }
     }
 }

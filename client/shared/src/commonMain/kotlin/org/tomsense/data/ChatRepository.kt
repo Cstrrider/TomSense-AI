@@ -2,6 +2,8 @@ package org.tomsense.data
 
 import app.cash.sqldelight.coroutines.asFlow
 import app.cash.sqldelight.coroutines.mapToList
+import app.cash.sqldelight.coroutines.mapToOneOrNull
+import app.cash.sqldelight.db.SqlDriver
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
@@ -25,8 +27,11 @@ import org.tomsense.db.TomsenseDb
 class ChatRepository(
     private val db: TomsenseDb,
     private val deviceId: String,
+    /** Needed for the FTS5 statements SQLDelight cannot generate; see [MessageSearch]. */
+    driver: SqlDriver,
 ) {
     private val q = db.schemaQueries
+    private val fts = MessageSearch(driver)
 
     fun conversations(): Flow<List<Conversation>> =
         q.conversationList().asFlow().mapToList(Dispatchers.Default)
@@ -34,22 +39,26 @@ class ChatRepository(
     fun messages(convId: String): Flow<List<Message>> =
         q.messagesFor(convId).asFlow().mapToList(Dispatchers.Default)
 
+    fun conversation(convId: String): Flow<Conversation?> =
+        q.conversationById(convId).asFlow().mapToOneOrNull(Dispatchers.Default)
+
     suspend fun createConversation(title: String = "", model: String = ""): String =
         withContext(Dispatchers.Default) {
             val id = randomId()
             val now = nowMillis()
             db.transaction {
-                q.bumpLamport()
-                val lamport = q.syncState().executeAsOne().lamport
                 q.upsertConversation(
                     id = id,
                     project_id = null,
                     title = title,
                     model = model,
+                    system_prompt = null,
+                    pinned = 0,
+                    share_token = null,
                     created_at = now,
                     updated_at = now,
                     deleted = 0,
-                    lamport = lamport,
+                    lamport = nextLamport(),
                     device_id = deviceId,
                     dirty = 1,
                 )
@@ -73,8 +82,6 @@ class ChatRepository(
         val id = randomId()
         val now = nowMillis()
         db.transaction {
-            q.bumpLamport()
-            val lamport = q.syncState().executeAsOne().lamport
             q.upsertMessage(
                 id = id,
                 conv_id = convId,
@@ -86,11 +93,15 @@ class ChatRepository(
                 attachments = null,
                 created_at = now,
                 deleted = 0,
-                lamport = lamport,
+                lamport = nextLamport(),
                 device_id = deviceId,
                 dirty = 1,
             )
             q.upsertConversationTimestamp(now, convId)
+            // A user turn is complete the moment it is written, so it is
+            // searchable immediately. Assistant turns start empty and are
+            // indexed by finishStreaming instead.
+            if (content.isNotEmpty()) fts.index(id, convId, content)
         }
         id
     }
@@ -122,16 +133,210 @@ class ChatRepository(
      * showing both.
      */
     suspend fun resetMessage(msgId: String) = withContext(Dispatchers.Default) {
-        q.resetMessage(msgId)
-    }
-
-    suspend fun finishStreaming(msgId: String) = withContext(Dispatchers.Default) {
         db.transaction {
-            q.bumpLamport()
-            val lamport = q.syncState().executeAsOne().lamport
-            q.markMessageDirty(lamport, msgId)
+            q.resetMessage(msgId)
+            // Drop the superseded answer from search straight away. Leaving it
+            // would make a discarded reply findable, and tapping the result
+            // would open a conversation that no longer contains those words.
+            fts.unindex(msgId)
         }
     }
+
+    /**
+     * Mark a finished answer for sync — and index it for search.
+     *
+     * This is the single point where a streamed answer becomes "real", which
+     * is why both the dirty flag and the search index are set here rather than
+     * anywhere in the token loop.
+     */
+    suspend fun finishStreaming(msgId: String) = withContext(Dispatchers.Default) {
+        db.transaction {
+            q.markMessageDirty(nextLamport(), msgId)
+            val msg = q.messageById(msgId).executeAsOneOrNull()
+            if (msg != null && msg.content.isNotEmpty()) {
+                fts.unindex(msgId)
+                fts.index(msgId, msg.conv_id, msg.content)
+            }
+        }
+    }
+
+    // ─── chat management (migration doc phase D) ────────────────────────────
+
+    suspend fun rename(convId: String, title: String) = withContext(Dispatchers.Default) {
+        db.transaction { q.renameConversation(title, nowMillis(), nextLamport(), convId) }
+    }
+
+    suspend fun setPinned(convId: String, pinned: Boolean) = withContext(Dispatchers.Default) {
+        db.transaction { q.setConversationPinned(if (pinned) 1 else 0, nextLamport(), convId) }
+    }
+
+    suspend fun setProject(convId: String, projectId: String?) =
+        withContext(Dispatchers.Default) {
+            db.transaction {
+                q.setConversationProject(projectId, nowMillis(), nextLamport(), convId)
+            }
+        }
+
+    /** Pass null to fall back to the global prompt; '' means a deliberately empty one. */
+    suspend fun setSystemPrompt(convId: String, prompt: String?) =
+        withContext(Dispatchers.Default) {
+            db.transaction {
+                q.setConversationSystemPrompt(prompt, nowMillis(), nextLamport(), convId)
+            }
+        }
+
+    suspend fun setModel(convId: String, model: String) = withContext(Dispatchers.Default) {
+        db.transaction { q.setConversationModel(model, nowMillis(), nextLamport(), convId) }
+    }
+
+    suspend fun setShareToken(convId: String, token: String?) =
+        withContext(Dispatchers.Default) {
+            db.transaction { q.setConversationShareToken(token, nextLamport(), convId) }
+        }
+
+    /**
+     * Delete a conversation and everything in it.
+     *
+     * Tombstones rather than DELETEs, so the removal actually propagates —
+     * see the note on `tombstoneConversation`. Messages are tombstoned too;
+     * otherwise another device keeps their bodies and only learns that the
+     * parent is gone.
+     *
+     * Every message shares ONE lamport here. They are a single user action,
+     * and spending a thousand ticks on a thousand-message chat would inflate
+     * the device's clock far ahead of its peers for no benefit.
+     */
+    suspend fun deleteConversation(convId: String) = withContext(Dispatchers.Default) {
+        db.transaction {
+            val lamport = nextLamport()
+            q.tombstoneMessagesFor(lamport, convId)
+            q.tombstoneConversation(lamport, convId)
+            fts.unindexConversation(convId)
+        }
+    }
+
+    /**
+     * Fork a conversation, keeping everything up to and including [throughMsgId].
+     *
+     * Returns the new conversation's id, or null if the message does not
+     * belong to that conversation.
+     *
+     * Every copied row gets a FRESH id and a FRESH lamport. Reusing either is
+     * the trap the migration doc calls out (risk §9.2): a copied message that
+     * keeps its id is not a copy at all under last-writer-wins — it is a
+     * competing version of the original, and whichever lamport is higher wins
+     * on every other device. The fork would silently overwrite its own source.
+     *
+     * `created_at` IS preserved, so the fork reads in its original order and
+     * timestamps still mean when the thing was actually said.
+     */
+    suspend fun branchConversation(convId: String, throughMsgId: String): String? =
+        withContext(Dispatchers.Default) {
+            val source = q.conversationById(convId).executeAsOneOrNull()
+                ?: return@withContext null
+            val history = q.messagesFor(convId).executeAsList()
+            val cut = history.indexOfFirst { it.id == throughMsgId }
+            if (cut < 0) return@withContext null
+
+            val newConvId = randomId()
+            val now = nowMillis()
+            db.transaction {
+                q.upsertConversation(
+                    id = newConvId,
+                    project_id = source.project_id,
+                    title = branchTitle(source.title),
+                    model = source.model,
+                    system_prompt = source.system_prompt,
+                    // A fork starts unpinned and unshared. Inheriting the
+                    // share token would be a data leak: the original's public
+                    // link would resolve to a conversation the reader was
+                    // never given.
+                    pinned = 0,
+                    share_token = null,
+                    created_at = now,
+                    updated_at = now,
+                    deleted = 0,
+                    lamport = nextLamport(),
+                    device_id = deviceId,
+                    dirty = 1,
+                )
+                for (msg in history.take(cut + 1)) {
+                    val newMsgId = randomId()
+                    q.upsertMessage(
+                        id = newMsgId,
+                        conv_id = newConvId,
+                        role = msg.role,
+                        content = msg.content,
+                        encrypted = msg.encrypted,
+                        reasoning = msg.reasoning,
+                        tool_calls = msg.tool_calls,
+                        attachments = msg.attachments,
+                        created_at = msg.created_at,
+                        deleted = 0,
+                        lamport = nextLamport(),
+                        device_id = deviceId,
+                        dirty = 1,
+                    )
+                    if (msg.content.isNotEmpty()) {
+                        fts.index(newMsgId, newConvId, msg.content)
+                    }
+                }
+            }
+            newConvId
+        }
+
+    private fun branchTitle(original: String): String =
+        if (original.isBlank()) "Branch" else "$original (branch)"
+
+    // ─── search ─────────────────────────────────────────────────────────────
+
+    /**
+     * Search message bodies and conversation titles.
+     *
+     * Runs entirely against local SQLite, so it is instant and works offline —
+     * the reason the migration doc says not to port stable's `/chats/search`
+     * endpoint at all.
+     */
+    suspend fun search(query: String, limit: Long = 50): SearchResults =
+        withContext(Dispatchers.Default) {
+            val match = ftsMatchExpression(query)
+            val messages = if (match == null) {
+                emptyList()
+            } else {
+                // A malformed MATCH expression THROWS rather than returning
+                // nothing, and this runs on every keystroke — an unguarded
+                // call here would crash the app mid-word. The quoting in
+                // ftsMatchExpression should prevent it; this is the belt to
+                // that braces, because the cost of being wrong is a crash
+                // and the cost of the guard is nothing.
+                runCatching { fts.search(match, limit) }.getOrDefault(emptyList())
+            }
+            SearchResults(
+                messages = messages,
+                conversations = q.searchConversationTitles(query, limit).executeAsList(),
+            )
+        }
+
+    /**
+     * Bump this device's logical clock and return the new value.
+     *
+     * MUST be called inside a `db.transaction` — read-modify-write on the
+     * lamport is only atomic within one. Every mutation goes through here so
+     * that no write can reach the sync engine with a stale clock and lose to
+     * the row it was meant to replace.
+     */
+    private fun nextLamport(): Long {
+        q.bumpLamport()
+        return q.syncState().executeAsOne().lamport
+    }
+}
+
+/** Message hits and title hits are ranked differently, so they stay separate. */
+data class SearchResults(
+    val messages: List<MessageHit>,
+    val conversations: List<Conversation>,
+) {
+    val isEmpty: Boolean get() = messages.isEmpty() && conversations.isEmpty()
 }
 
 /** Platform clock and id source — trivial, but they differ per target. */

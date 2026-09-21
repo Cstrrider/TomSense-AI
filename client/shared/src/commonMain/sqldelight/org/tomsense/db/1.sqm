@@ -1,0 +1,53 @@
+-- v1 → v2: chat management (migration doc phase D).
+--
+-- This migration is not optional housekeeping. beta6 is installed with real
+-- conversations on it, so a device upgrading from that build runs exactly this
+-- file, while a fresh install replays 0.sqm and then this one. Both paths have
+-- to land on the same schema.
+
+-- Per-chat override. NULL means "inherit the global prompt", which is NOT the
+-- same as '' (a deliberately empty prompt), so this stays nullable.
+ALTER TABLE conversation ADD COLUMN system_prompt TEXT;
+ALTER TABLE conversation ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+-- Set by the edge when a public link is minted; NULL means not shared.
+-- Mirrored locally so the list can show a "shared" marker while offline.
+ALTER TABLE conversation ADD COLUMN share_token TEXT;
+
+-- The list now orders by (pinned, updated_at), so the old single-column index
+-- can no longer serve it.
+DROP INDEX IF EXISTS conversation_updated;
+CREATE INDEX IF NOT EXISTS conversation_pinned_updated
+  ON conversation(pinned DESC, updated_at DESC);
+CREATE INDEX IF NOT EXISTS conversation_project ON conversation(project_id);
+
+-- Full-text search over message bodies (migration doc §3).
+--
+-- On stable this was a Postgres query; local-first makes it strictly better,
+-- because searching the device's own copy is instant and works on a plane.
+--
+-- Two deliberate choices:
+--
+-- 1. NOT an external-content table, and NO triggers. Triggers would fire on
+--    every `updateMessageContent`, and that runs once per streamed token —
+--    re-tokenising a growing answer hundreds of times per reply. Indexing is
+--    therefore explicit and happens once, at completion, from the same place
+--    that already marks a row dirty. The streaming path stays cheap, which is
+--    the same reasoning that keeps `dirty = 0` while tokens arrive.
+--
+-- 2. `msg_id`/`conv_id` are UNINDEXED — they are payload for joining back to
+--    the real row, not search terms. Indexing them would let a stray UUID
+--    fragment match a query.
+--
+-- FTS5 needs SQLite 3.9+; minSdk is 29 (API 26 is the floor for FTS5) and the
+-- desktop JDBC driver bundles its own, so both targets are safe.
+CREATE VIRTUAL TABLE message_fts USING fts5(
+  msg_id UNINDEXED,
+  conv_id UNINDEXED,
+  content
+);
+
+-- Backfill every message that already exists, or search would return nothing
+-- for the entire history predating this migration — a failure that looks
+-- exactly like "search is broken" and would be blamed on the query.
+INSERT INTO message_fts(msg_id, conv_id, content)
+SELECT id, conv_id, content FROM message WHERE deleted = 0;

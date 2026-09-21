@@ -48,10 +48,29 @@ class EdgeApi(
             setBody(ExchangeRequest(code, verifier, platform))
         }.body()
 
+    /**
+     * Mint or revoke a public link for a conversation.
+     *
+     * The token is minted at the edge, never here — see the SYNCABLE note in
+     * edge/src/sync.ts for why a client cannot choose its own.
+     */
+    suspend fun setShared(convId: String, shared: Boolean): ShareResult =
+        http.post("$baseUrl/chats/$convId/share") {
+            auth()
+            contentType(ContentType.Application.Json)
+            setBody(ShareRequest(shared))
+        }.body()
+
     private fun io.ktor.client.request.HttpRequestBuilder.auth() {
         deviceToken()?.let { header("Authorization", "Bearer $it") }
     }
 }
+
+@kotlinx.serialization.Serializable
+data class ShareRequest(val shared: Boolean)
+
+@kotlinx.serialization.Serializable
+data class ShareResult(val shareToken: String? = null, val error: String? = null)
 
 @kotlinx.serialization.Serializable
 data class ExchangeRequest(val code: String, val verifier: String, val platform: String)
