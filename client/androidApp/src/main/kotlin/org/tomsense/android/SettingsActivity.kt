@@ -13,9 +13,15 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
@@ -41,6 +47,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
@@ -107,74 +114,39 @@ class SettingsActivity : ComponentActivity() {
                             item { Text("Error: $it", color = MaterialTheme.colorScheme.error) }
                         }
 
-                        item { SectionHeader("Default model") }
-
-                        // Search matters more than it looks: OpenRouter alone
-                        // advertises 300+ models, so an unfiltered radio list
-                        // is unusable on a phone.
-                        item {
-                            OutlinedTextField(
-                                value = query,
-                                onValueChange = { query = it },
-                                modifier = Modifier.fillMaxWidth(),
-                                singleLine = true,
-                                label = { Text("Search models") },
-                                placeholder = { Text("opus, vision, 70b…") },
-                                // This searches the models each provider is
-                                // CONFIGURED to offer, not everything it could
-                                // serve. Saying so is the difference between
-                                // "that model doesn't exist" and "I haven't
-                                // added it yet" — which is exactly the wrong
-                                // conclusion this box used to invite.
-                                supportingText = {
-                                    Text("Searches configured models — add more under Providers.")
-                                },
-                            )
-                        }
-
-                        val filtered = models.filter { it.matches(query) }
-
-                        if (models.isEmpty()) {
-                            item {
-                                Text(
-                                    "No usable models. Add a provider with an API key, " +
-                                        "or enable Cloudflare.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                )
-                            }
-                        } else if (filtered.isEmpty()) {
-                            item {
-                                Text(
-                                    "No configured model matches \"$query\" " +
-                                        "(${models.size} configured). If the provider offers " +
-                                        "it, add it under Providers → Models.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                )
-                            }
-                        }
-
-                        items(filtered, key = { it.value }) { m ->
-                            ModelRow(
-                                model = m,
-                                selected = m.value == defaultModel,
-                                onSelect = {
-                                    defaultModel = m.value
-                                    lifecycleScope.launch {
-                                        runCatching { app.providers.setDefaultModel(m.value) }
-                                            .onFailure { error = it.message }
-                                    }
-                                },
-                            )
-                        }
-
-                        item { HorizontalDivider(Modifier.padding(vertical = 8.dp)) }
                         item { SectionHeader("Routing") }
 
                         item {
                             Text(
-                                "Which model answers depends on the turn. These slots decide, " +
-                                    "and anything left unset falls back to your default model.",
+                                "Which model answers depends on the turn. These decide, in this " +
+                                    "order — anything left unset falls through to the default.",
                                 style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+
+                        // The default is routing too — it is the layer every
+                        // unset slot falls through to. Keeping it here rather
+                        // than only on a provider card also means it stays
+                        // visible when its provider is switched off, which is
+                        // exactly when a stale default is confusing.
+                        item {
+                            SlotRow(
+                                slot = Slot(
+                                    "default",
+                                    "Default",
+                                    "Answers anything the slots below do not claim.",
+                                ),
+                                models = models,
+                                current = defaultModel.ifBlank { null },
+                                allowClear = false,
+                                emptyLabel = "First available",
+                                onPick = { value ->
+                                    defaultModel = value
+                                    lifecycleScope.launch {
+                                        runCatching { app.providers.setDefaultModel(value) }
+                                            .onFailure { error = it.message }
+                                    }
+                                },
                             )
                         }
 
@@ -245,17 +217,65 @@ class SettingsActivity : ComponentActivity() {
                         }
 
                         item { HorizontalDivider(Modifier.padding(vertical = 8.dp)) }
-                        item { SectionHeader("Providers") }
+                        item { SectionHeader("Providers & models") }
+
+                        // Search matters more than it looks: OpenRouter alone
+                        // advertises 300+ models. With the lists now nested in
+                        // their provider, a query also EXPANDS the cards that
+                        // match — otherwise searching would appear to find
+                        // nothing while the hits sat inside collapsed cards.
+                        item {
+                            OutlinedTextField(
+                                value = query,
+                                onValueChange = { query = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true,
+                                label = { Text("Search models") },
+                                placeholder = { Text("opus, vision, 70b…") },
+                                // Searches what each provider is CONFIGURED to
+                                // offer, not everything it could serve. Saying
+                                // so is the difference between "that model
+                                // doesn't exist" and "I haven't added it yet".
+                                supportingText = {
+                                    Text("Searches configured models — open a provider to add more.")
+                                },
+                            )
+                        }
+
+                        if (models.isEmpty()) {
+                            item {
+                                Text(
+                                    "No usable models. Add a provider with an API key, " +
+                                        "or enable Cloudflare.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+                        }
 
                         items(providers, key = { it.id }) { p ->
+                            val mine = models.filter { it.value.startsWith("${p.id}::") }
+                            val matching = mine.filter { it.matches(query) }
                             ProviderCard(
                                 provider = p,
+                                models = if (query.isBlank()) mine else matching,
+                                defaultModel = defaultModel,
+                                // A search forces every card with a hit open,
+                                // and hides the ones without.
+                                forceExpanded = query.isNotBlank() && matching.isNotEmpty(),
+                                dimmed = query.isNotBlank() && matching.isEmpty(),
                                 onToggle = { on ->
                                     lifecycleScope.launch {
                                         runCatching {
                                             app.providers.update(p.id, UpdateProvider(enabled = on))
                                             refresh()
                                         }.onFailure { error = it.message }
+                                    }
+                                },
+                                onSelectDefault = { value ->
+                                    defaultModel = value
+                                    lifecycleScope.launch {
+                                        runCatching { app.providers.setDefaultModel(value) }
+                                            .onFailure { error = it.message }
                                     }
                                 },
                                 onManageModels = { managing = p },
@@ -364,28 +384,60 @@ private fun ModelRow(model: ModelOption, selected: Boolean, onSelect: () -> Unit
         RadioButton(selected = selected, onClick = onSelect)
         Column(Modifier.weight(1f)) {
             Text(model.label, style = MaterialTheme.typography.bodyMedium)
+            // The provider name is no longer a tag — the row now sits inside
+            // that provider's card, so repeating it is noise.
             val tags = buildList {
-                add(model.provider)
                 if (model.vision) add("vision")
                 if (model.reasoning) add("reasoning")
                 model.context?.let { add("${it / 1000}k") }
             }
-            Text(tags.joinToString(" · "), style = MaterialTheme.typography.labelSmall)
+            if (tags.isNotEmpty()) {
+                Text(tags.joinToString(" · "), style = MaterialTheme.typography.labelSmall)
+            }
         }
     }
 }
 
+/**
+ * A provider, with its models folded inside it.
+ *
+ * The models used to be one flat list of everything across every provider,
+ * above a separate list of providers. That made two things awkward at once:
+ * which provider a model came from was a tag rather than its location, and the
+ * only way to reach a provider's own settings was to scroll past every model
+ * in the account. Nesting them puts a provider's key, its enabled state, its
+ * model list and the default it supplies in one place.
+ *
+ * Collapsed by default because most of the time you are looking for a
+ * provider, not a model — and an expanded OpenRouter is 300 rows.
+ */
 @Composable
 private fun ProviderCard(
     provider: ProviderView,
+    models: List<ModelOption>,
+    defaultModel: String,
+    forceExpanded: Boolean,
+    dimmed: Boolean,
     onToggle: (Boolean) -> Unit,
+    onSelectDefault: (String) -> Unit,
     onManageModels: () -> Unit,
     onDelete: () -> Unit,
 ) {
-    Card(Modifier.fillMaxWidth()) {
+    var open by remember { mutableStateOf(false) }
+    // A search overrides the manual state, but does not destroy it: clearing
+    // the query returns each card to however the user had left it.
+    val expanded = open || forceExpanded
+
+    val holdsDefault = models.any { it.value == defaultModel }
+
+    Card(
+        Modifier.fillMaxWidth().alpha(if (dimmed) 0.4f else 1f),
+    ) {
         Column(Modifier.fillMaxWidth().padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
+                Column(
+                    Modifier.weight(1f).clickable { open = !open },
+                ) {
                     Text(provider.name, style = MaterialTheme.typography.bodyLarge)
                     val status = when {
                         // Cloudflare's "no key" is correct, not a missing setup step.
@@ -394,13 +446,57 @@ private fun ProviderCard(
                         else -> "no key — add one to use this provider"
                     }
                     Text(status, style = MaterialTheme.typography.labelSmall)
+
+                    // Surfaced while collapsed, so the default model is
+                    // findable without opening every card to hunt for it.
+                    if (holdsDefault && !expanded) {
+                        Text(
+                            "default: ${shortModelName(defaultModel)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                }
+                IconButton(onClick = { open = !open }) {
+                    Icon(
+                        if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                        contentDescription = if (expanded) "Hide models" else "Show models",
+                    )
                 }
                 Switch(checked = provider.enabled, onCheckedChange = onToggle)
             }
-            Row {
-                TextButton(onClick = onManageModels) { Text("Models") }
-                if (!provider.builtin) {
-                    TextButton(onClick = onDelete) { Text("Delete") }
+
+            if (expanded) {
+                if (models.isEmpty()) {
+                    Text(
+                        if (provider.enabled) {
+                            "No models configured. Add some below."
+                        } else {
+                            "Provider is off — its models are hidden from the picker."
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(vertical = 8.dp),
+                    )
+                } else {
+                    Text(
+                        "Tap a model to make it the default.",
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                    models.forEach { m ->
+                        ModelRow(
+                            model = m,
+                            selected = m.value == defaultModel,
+                            onSelect = { onSelectDefault(m.value) },
+                        )
+                    }
+                }
+
+                Row {
+                    TextButton(onClick = onManageModels) { Text("Add or remove models") }
+                    if (!provider.builtin) {
+                        TextButton(onClick = onDelete) { Text("Delete") }
+                    }
                 }
             }
         }
@@ -764,6 +860,10 @@ private fun SlotRow(
     models: List<ModelOption>,
     current: String?,
     onPick: (String) -> Unit,
+    /** False for the default, which has nothing to fall through TO. */
+    allowClear: Boolean = true,
+    /** Shown when nothing is set. "Default" reads as nonsense on the default row. */
+    emptyLabel: String = "Default",
 ) {
     var open by remember { mutableStateOf(false) }
 
@@ -775,18 +875,20 @@ private fun SlotRow(
             }
             Box {
                 TextButton(onClick = { open = true }) {
-                    Text(current?.let { shortModelName(it) } ?: "Default")
+                    Text(current?.let { shortModelName(it) } ?: emptyLabel)
                 }
                 DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
                     // Clearing is a first-class choice, not the absence of one:
                     // "no slot" is meaningfully different from "some model".
-                    DropdownMenuItem(
-                        text = { Text("Use default") },
-                        onClick = {
-                            open = false
-                            onPick("")
-                        },
-                    )
+                    if (allowClear) {
+                        DropdownMenuItem(
+                            text = { Text("Use default") },
+                            onClick = {
+                                open = false
+                                onPick("")
+                            },
+                        )
+                    }
                     models.forEach { m ->
                         DropdownMenuItem(
                             text = { Text(shortModelName(m.value), style = MaterialTheme.typography.bodySmall) },
