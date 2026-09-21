@@ -8,15 +8,24 @@
  *   1. Capabilities DECLARED on the provider's models[] entry. This is what
  *      lets the same model id differ per provider — gemma-4 on Cloudflare and
  *      gemma-4 on OpenRouter genuinely do not behave the same.
- *   2. The bundled Cloudflare catalogue, for `@cf/...` ids.
- *   3. Demoted name-substring heuristics, last resort only.
+ *   2. LIVE Cloudflare metadata. Workers AI reports `vision`, `reasoning` and
+ *      `context_window` per model; asking it beats guessing from the name.
+ *   3. The bundled Cloudflare catalogue, for `@cf/...` ids it still covers.
+ *   4. Demoted name-substring heuristics, last resort only.
  *
- * Step 3 exists solely so an un-annotated custom model degrades rather than
- * breaks. Do not promote it.
+ * Step 2 was added after glm-5.3-flash — which Cloudflare reports as
+ * `vision = true` — had its images stripped by flattenForTextModel, because
+ * no substring in the hint list matched it. The bundled catalogue knows 10 of
+ * the 31 text models Workers AI now serves, so the heuristics were answering
+ * for the other 21, and answering wrongly. This is the same root cause stable
+ * fixed once already by replacing scattered name-substring guessing.
+ *
+ * Step 4 exists solely so an un-annotated NON-Cloudflare model degrades rather
+ * than breaks. Do not promote it.
  */
 
 import { CF_MODELS_BY_ID } from "./cf_catalog";
-import type { Capabilities, Provider } from "./types";
+import type { Capabilities, Provider, Env } from "./types";
 
 /** CF model id substrings for models that emit a hidden reasoning channel. */
 const REASONING_HINTS = [
@@ -62,6 +71,60 @@ export function isVisionModel(modelId: string): boolean {
   return VISION_HINTS.some((h) => m.includes(h));
 }
 
+/**
+ * Live Cloudflare capabilities, by model id.
+ *
+ * Module-level and synchronous to READ, because `modelCapabilities` is called
+ * from request construction where there is nothing to await. [warmCfCapabilities]
+ * fills it; until it does, resolution simply falls through to the catalogue and
+ * heuristics, so a cold isolate degrades rather than breaking.
+ */
+let cfLive: Map<string, Capabilities> | null = null;
+let cfLiveAt = 0;
+const CF_LIVE_TTL_MS = 60 * 60 * 1000;
+
+/** Property values arrive as booleans or as the strings "true"/"false". */
+function truthy(v: unknown): boolean {
+  return v === true || v === "true" || v === 1 || v === "1";
+}
+
+/**
+ * Populate the live capability map. Cheap after the first call, and safe to
+ * call on every run.
+ *
+ * MUST be awaited before a Workers AI request is built, or vision models whose
+ * names the heuristics do not recognise will have their image parts flattened
+ * away — which looks exactly like the model ignoring the picture.
+ */
+export async function warmCfCapabilities(env: Env): Promise<void> {
+  if (cfLive && Date.now() - cfLiveAt < CF_LIVE_TTL_MS) return;
+  try {
+    const listed = await env.AI.models({ task: "Text Generation", per_page: 200 });
+    const next = new Map<string, Capabilities>();
+    for (const model of listed) {
+      const props: Record<string, unknown> = {};
+      for (const prop of model.properties ?? []) {
+        props[prop.property_id] = prop.value;
+      }
+      const ctx = Number(props["context_window"]);
+      next.set(model.name, {
+        vision: truthy(props["vision"]),
+        reasoning: truthy(props["reasoning"]),
+        context: Number.isFinite(ctx) && ctx > 0 ? ctx : null,
+      });
+    }
+    // Only adopt a non-empty result: a transient empty response must not
+    // replace good data with a map that says nothing can see.
+    if (next.size) {
+      cfLive = next;
+      cfLiveAt = Date.now();
+    }
+  } catch {
+    // Keep whatever is cached. Losing the live list is a degradation, not a
+    // failure worth taking a generation down for.
+  }
+}
+
 /** Step 1: capabilities explicitly declared on the provider's model entry. */
 function declared(provider: Provider | null, modelId: string): Capabilities | null {
   for (const m of provider?.models ?? []) {
@@ -93,6 +156,9 @@ export function modelCapabilities(
 ): Capabilities {
   const fromProvider = declared(provider, modelId);
   if (fromProvider !== null) return fromProvider;
+
+  const live = cfLive?.get(modelId);
+  if (live !== undefined) return live;
 
   const entry = CF_MODELS_BY_ID[modelId];
   if (entry !== undefined) {

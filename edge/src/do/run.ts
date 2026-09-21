@@ -24,6 +24,7 @@ import { parseModelStr, resolveProvider, chatCompletionsUrl } from "./../provide
 import { streamWithFallback } from "./../stream";
 import { isServerTool, runServerTool } from "./../server_tools";
 import { getPrefs } from "./../prefs";
+import { warmCfCapabilities } from "./../capabilities";
 
 /**
  * Ceiling on model→tool→model cycles in a single run.
@@ -436,6 +437,10 @@ export class DetachedRun implements DurableObject {
 
   /** One model call. Returns null if the run was cancelled while streaming. */
   private async oneRound(rec: RunRecord): Promise<CompletedRound | null> {
+    // Before the request is built: modelCapabilities decides whether image
+    // parts survive, and it reads this synchronously.
+    await warmCfCapabilities(this.env);
+
     const { providerId, modelId } = parseModelStr(rec.model, this.env.TIER2_MODEL);
     const provider = await resolveProvider(this.env, rec.userId, providerId);
     if (!provider) throw new Error(`unknown provider ${providerId}`);

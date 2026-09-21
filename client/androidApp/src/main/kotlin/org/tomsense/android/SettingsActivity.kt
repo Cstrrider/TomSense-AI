@@ -747,6 +747,12 @@ private val SLOTS = listOf(
         "Owns image turns — even if your chat model can also see images.",
     ),
     Slot(
+        "image",
+        "Image",
+        "Draws pictures when you ask for one. Must be a text-to-image model — " +
+            "the flux-2-klein family will not work, it takes a different request shape.",
+    ),
+    Slot(
         "title",
         "Utility",
         "Titles, follow-ups and the auto-route check. Pick something small " +
@@ -765,6 +771,7 @@ private fun ToolModels.slot(key: String): String? = when (key) {
     "research" -> research
     "vision" -> vision
     "title" -> title
+    "image" -> image
     "chat_fallback" -> chatFallback
     "vision_fallback" -> visionFallback
     "title_fallback" -> titleFallback

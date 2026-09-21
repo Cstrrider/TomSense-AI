@@ -678,7 +678,52 @@ rendering have only been compiled.
 
 ---
 
-## 17. What this is not
+## 17. Capabilities come from Cloudflare, not from the model name (2026-09-21)
+
+Reported: llama-4-scout handled an attached image, glm-5.3-flash did not,
+"despite being multimodal".
+
+Correct, and the cause was ours. `isVisionModel` matched substrings from a
+hand-maintained hint list — `gemma-4`, `llama-4`, `kimi-k2.6`… — and nothing
+in it matched `glm-5.3-flash`. So `modelCapabilities` said vision = false,
+`flattenForTextModel` stripped the image parts, and the model answered a
+question about a picture it was never sent.
+
+**Cloudflare reports this directly.** `env.AI.models()` returns per-model
+properties including `vision`, `reasoning` and `context_window`:
+
+| model | CF says | old heuristic |
+|---|---|---|
+| llama-4-scout | vision = true | matched — worked by luck |
+| glm-5.3-flash | vision = true | no match — **broken** |
+| glm-5.2 | *(absent)* | correctly false |
+
+Resolution is now **declared → live CF metadata → bundled catalogue →
+heuristics**. The heuristics remain only so an un-annotated NON-Cloudflare
+model degrades rather than breaks.
+
+This is the same root cause stable fixed once before by removing scattered
+name-substring guessing, and it reappeared because the catalogue covers 10 of
+the 31 text models Workers AI now serves — so the heuristics were answering
+for the other 21.
+
+A second instance of the same bug sat one layer up: `cloudflareView` baked
+catalogue capabilities into each model entry, which made them look DECLARED and
+therefore outrank live data. llama-4-scout reported the generated 128000
+context instead of the real 131000, and would have reported a stale vision flag
+forever. CF models are now emitted as bare ids and resolved.
+
+Verified live: glm-5.3-flash and llama-4-scout both answer "Rubber duck" for
+the same uploaded image; glm-5.2 still reports vision = false; context windows
+now read 1310720 / 131000 / 262144 from Cloudflare rather than the catalogue.
+
+**Also fixed here:** the `image` slot existed on the edge but was never added
+to the client, so there was no way to set the image model. It is now the third
+row in Routing, with a warning that the flux-2-klein family will not work.
+
+---
+
+## 18. What this is not
 
 This plan does **not** aim for 1:1 endpoint parity with `main`. Roughly 14 of
 the 98 routes are dropped or replaced outright, and several more collapse into

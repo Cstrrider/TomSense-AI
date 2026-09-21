@@ -19,7 +19,7 @@ import type { Env, Principal, ModelEntry } from "./types";
 import { encryptKey, decryptKey } from "./crypto";
 import { CF_MODELS } from "./cf_catalog";
 import { CF_BUILTIN_ID } from "./providers";
-import { isReasoningModel, isVisionModel } from "./capabilities";
+import { isReasoningModel, isVisionModel, modelCapabilities, warmCfCapabilities } from "./capabilities";
 
 export interface ProviderView {
   id: string;
@@ -63,14 +63,19 @@ export const PROVIDER_PRESETS = [
   { kind: "openai-compat", name: "Groq", baseUrl: "https://api.groq.com/openai/v1" },
 ] as const;
 
-/** The chat-capable Cloudflare catalogue, as a ModelEntry list. */
+/**
+ * The chat-capable Cloudflare catalogue, as bare ids.
+ *
+ * Capabilities are deliberately NOT baked in here. They used to be, and that
+ * made a catalogue entry look like a DECLARED capability, which outranks live
+ * Cloudflare metadata in the resolver — so a catalogue model reported the
+ * generated context window (llama-4-scout: 128000) instead of the real one
+ * (131000), and would have kept reporting a stale vision flag forever. Leaving
+ * them off lets modelCapabilities do its job: live metadata first, catalogue as
+ * the fallback it was meant to be.
+ */
 function cfCatalogModels(): ModelEntry[] {
-  return CF_MODELS.filter((m) => m.roles.includes("chat")).map((m) => ({
-    id: m.id,
-    vision: m.vision,
-    reasoning: m.reasoning,
-    context: m.context,
-  }));
+  return CF_MODELS.filter((m) => m.roles.includes("chat")).map((m) => ({ id: m.id }));
 }
 
 /**
@@ -87,23 +92,16 @@ function cfCatalogModels(): ModelEntry[] {
  * the enabled switch is for, and a provider that silently offers nothing is a
  * worse thing to build than a slightly surprising reset.
  *
- * Capabilities are merged FROM the catalogue by id, so a curated list keeps
- * its vision/reasoning/context data. An id the catalogue does not know —
- * Cloudflare ships new models faster than the generated catalogue is
- * regenerated — is kept with whatever was stored for it, so a new model can be
- * added by hand and still work.
+ * Capabilities are resolved rather than stored, so a hand-added id Cloudflare
+ * knows about gets the right vision and context data without the bundled
+ * catalogue needing to have heard of it.
  */
 function cloudflareView(row: Row | null): ProviderView {
   const selected = row ? parseJson<ModelEntry[]>(row.models, []) : [];
 
-  const models = selected.length === 0
-    ? cfCatalogModels()
-    : selected.map((sel) => {
-        const known = CF_MODELS.find((m) => m.id === sel.id);
-        return known
-          ? { id: known.id, vision: known.vision, reasoning: known.reasoning, context: known.context }
-          : sel;
-      });
+  // Bare ids either way. Capability resolution belongs to modelCapabilities,
+  // which consults live Cloudflare metadata before the bundled catalogue.
+  const models = selected.length === 0 ? cfCatalogModels() : selected;
 
   return {
     id: CF_BUILTIN_ID,
@@ -340,6 +338,9 @@ export interface ModelOption {
 
 /** Every selectable model across enabled providers, for the client picker. */
 export async function listModels(env: Env, who: Principal): Promise<ModelOption[]> {
+  // So the picker shows what Cloudflare actually reports rather than what the
+  // model name happens to look like.
+  await warmCfCapabilities(env);
   const providers = await listProviders(env, who);
   const out: ModelOption[] = [];
 
@@ -361,13 +362,24 @@ export async function listModels(env: Env, who: Principal): Promise<ModelOption[
         value: `${p.id}::${m.id}`,
         label: m.id,
         provider: p.name,
-        vision: m.vision ?? isVisionModel(m.id),
-        reasoning: m.reasoning ?? isReasoningModel(m.id),
-        context: m.context ?? null,
+        // Full resolution, not just the declared value: declared -> live CF
+        // metadata -> catalogue -> heuristics. The picker and the request path
+        // must agree, or the tags promise something the request then strips.
+        vision: m.vision ?? caps(p, m.id).vision,
+        reasoning: m.reasoning ?? caps(p, m.id).reasoning,
+        context: m.context ?? caps(p, m.id).context,
       });
     }
   }
   return out;
+}
+
+/** Capability resolution for a listed model, via the shared resolver. */
+function caps(p: ProviderView, modelId: string) {
+  return modelCapabilities(
+    { id: p.id, name: p.name, kind: p.kind, baseUrl: p.baseUrl, apiKey: "", models: p.models, extraBody: {} } as never,
+    modelId,
+  );
 }
 
 /** Is this provider currently usable — enabled, and keyed unless keyless? */

@@ -174,6 +174,8 @@ data class ToolModels(
     val research: String? = null,
     /** Utility tier: titles, follow-ups, the auto-route classifier. */
     val title: String? = null,
+    /** Text-to-image model used by generate_image. */
+    val image: String? = null,
     @SerialName("chat_fallback") val chatFallback: String? = null,
     @SerialName("vision_fallback") val visionFallback: String? = null,
     @SerialName("title_fallback") val titleFallback: String? = null,
