@@ -611,7 +611,74 @@ prefix. Stable measured the CF hit ratio going ~60% → 80%.
 
 ---
 
-## 16. What this is not
+## 16. Images, in and out (2026-09-21)
+
+Three things that turned out to share one pipeline.
+
+**Reasoning is collapsed by default.** It used to render inline above the
+answer, which on a reasoning model routinely pushed the actual reply off
+screen. Still one tap away — hiding it entirely would defeat the point of
+running your own stack — and it shows a live "Thinking…" label while a reply
+has no content yet, because at that moment it is the only sign of life.
+
+**Attachments.** `POST /files` stores to R2 under `u/{userId}/…`; `GET
+/files/{key}` serves it. The ownership rule is a property of the key rather
+than a lookup that can be forgotten. Messages carry KEYS, never bytes — the
+edge expands them into `image_url` data URLs at request time (`expandAttachments`),
+so synced rows and replays stay small. Stable reached the same conclusion
+(`uploads.image_data_url`): a private authenticated URL is not something a
+model provider can fetch, so the bytes have to travel in the request.
+
+The client downscales to a 1600px longest edge at JPEG 85 before uploading,
+matching stable's constants, and decodes at `inSampleSize` first so a 50MP
+photo is never fully decoded just to be shrunk.
+
+**Image generation — the first SERVER tool.** Until now every tool was a
+device tool: the run parked, the phone answered. That is right for the
+calendar and wrong for anything needing the edge. A round's tool calls are now
+SPLIT — server tools execute inline and the loop continues, device tools park
+as before. Parking for a tool the phone cannot run would hang the run until it
+was swept away.
+
+`attachment` is a first-class stream event carrying the R2 key, persisted on
+the run and replayed on reconnect, so a generated image survives a restart the
+same way text does.
+
+### The trap: flux-2-klein is not a drop-in
+
+The obvious model choice fails. `@cf/black-forest-labs/flux-2-klein-4b`
+rejects a plain prompt with `required properties at '/' are 'multipart'` — it
+takes a different request shape entirely. The failure surfaces only at call
+time, as the model apologising that it cannot generate images, and the model
+then retries. `flux-1-schnell` accepts `{ prompt }` and returns
+`{ image: base64 }`; verified against the live API. The image model is
+overridable through a new `image` slot.
+
+Workers AI image models are also inconsistent about their return shape — some
+stream JPEG bytes, others return base64 JSON — so `imageBytes` handles both.
+
+### Verified live, end to end
+
+```
+generate   "draw a red bicycle" -> attachment event with an R2 key
+fetch      358KB, ffd8ff (JPEG), content-disposition inline, nosniff
+ownership  a second live user reading that key -> 404
+           no credential -> 401
+upload     POST /files -> key returned
+vision     sent back with a question -> routing claimed the turn,
+           notice emitted, model answered "A red bicycle."
+```
+
+That last line is the whole pipeline closing: generated at the edge, stored,
+served, re-uploaded, expanded to a data URL, routed to a vision model, and
+correctly described. Test users and both R2 objects were removed afterwards.
+
+**Not verified on a device** — the picker, the downscale and the bubble
+rendering have only been compiled.
+
+---
+
+## 17. What this is not
 
 This plan does **not** aim for 1:1 endpoint parity with `main`. Roughly 14 of
 the 98 routes are dropped or replaced outright, and several more collapse into

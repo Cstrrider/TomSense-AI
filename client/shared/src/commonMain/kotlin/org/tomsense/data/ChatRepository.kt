@@ -7,6 +7,10 @@ import app.cash.sqldelight.db.SqlDriver
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonArray
 import org.tomsense.db.Conversation
 import org.tomsense.db.Message
 import org.tomsense.db.TomsenseDb
@@ -89,6 +93,8 @@ class ChatRepository(
         role: String,
         content: String,
         reasoning: String? = null,
+        /** R2 keys, stored as a JSON array; see the attachments column. */
+        attachments: List<String> = emptyList(),
     ): String = withContext(Dispatchers.Default) {
         val id = randomId()
         val now = nowMillis()
@@ -101,7 +107,7 @@ class ChatRepository(
                 encrypted = 0,
                 reasoning = reasoning,
                 tool_calls = null,
-                attachments = null,
+                attachments = attachments.takeIf { it.isNotEmpty() }?.let(::encodeKeys),
                 created_at = now,
                 deleted = 0,
                 lamport = nextLamport(),
@@ -349,6 +355,19 @@ class ChatRepository(
     }
 
     /**
+     * Attach a file to an existing message — used when the edge reports one it
+     * generated mid-run, which is after the assistant row already exists.
+     */
+    suspend fun addAttachment(msgId: String, key: String) = withContext(Dispatchers.Default) {
+        db.transaction {
+            val msg = q.messageById(msgId).executeAsOneOrNull() ?: return@transaction
+            val existing = decodeKeys(msg.attachments)
+            if (key in existing) return@transaction
+            q.updateMessageAttachments(encodeKeys(existing + key), msgId)
+        }
+    }
+
+    /**
      * A readable fragment around the first match, mimicking `snippet()`.
      *
      * Case-insensitive, because the FTS path matches that way and results
@@ -381,6 +400,17 @@ class ChatRepository(
         q.bumpLamport()
         return q.syncState().executeAsOne().lamport
     }
+}
+
+/** Attachments are a JSON array of R2 keys — the shape the UI also reads. */
+private fun encodeKeys(keys: List<String>): String =
+    JsonArray(keys.map { JsonPrimitive(it) }).toString()
+
+private fun decodeKeys(raw: String?): List<String> {
+    if (raw.isNullOrBlank()) return emptyList()
+    return runCatching {
+        Json.parseToJsonElement(raw).jsonArray.mapNotNull { (it as? JsonPrimitive)?.content }
+    }.getOrDefault(emptyList())
 }
 
 /** Message hits and title hits are ranked differently, so they stay separate. */

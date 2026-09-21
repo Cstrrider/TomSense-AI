@@ -69,6 +69,12 @@ export type StreamEvent =
    * eventually be confused by.
    */
   | { type: "notice"; text: string }
+  /**
+   * A file the run produced — a generated image, for instance. Carries the R2
+   * key rather than bytes: the client fetches it through the authenticated
+   * /files route, so nothing large ever travels down the SSE stream.
+   */
+  | { type: "attachment"; key: string; mime: string }
   | { type: "done"; content: string; toolCalls: ToolCall[]; usage: Usage; stalled?: boolean }
   | { type: "end"; status: string; error?: string };
 
@@ -125,4 +131,13 @@ export interface ChatMessage {
   tool_calls?: unknown[];
   tool_call_id?: string;
   name?: string;
+  /**
+   * R2 keys the client attached to this turn.
+   *
+   * Kept as KEYS on the wire and in storage, and expanded into image_url
+   * parts only at request time (see expandAttachments). Inlining base64 into
+   * the stored message would put megabytes into every sync payload and into
+   * every replay of the conversation.
+   */
+  attachments?: string[];
 }

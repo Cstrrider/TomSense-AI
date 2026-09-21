@@ -134,7 +134,16 @@ data class ChatRequest(
 )
 
 @Serializable
-data class WireMessage(val role: String, val content: String)
+data class WireMessage(
+    val role: String,
+    val content: String,
+    /**
+     * R2 keys, not bytes. The edge turns them into image parts at request
+     * time — inlining base64 here would put megabytes into every sync payload
+     * and into every replay of the conversation.
+     */
+    val attachments: List<String>? = null,
+)
 
 @Serializable
 data class ChatEvent(
@@ -146,6 +155,9 @@ data class ChatEvent(
     @SerialName("toolCalls") val toolCalls: List<WireToolCall>? = null,
     val stalled: Boolean? = null,
     val error: String? = null,
+    /** On a "attachment" event: the R2 key of a file the run produced. */
+    val key: String? = null,
+    val mime: String? = null,
 )
 
 @Serializable

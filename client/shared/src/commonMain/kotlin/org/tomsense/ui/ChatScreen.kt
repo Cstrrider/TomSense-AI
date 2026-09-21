@@ -1,5 +1,7 @@
 package org.tomsense.ui
 
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -7,10 +9,12 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
@@ -26,6 +30,10 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Lightbulb
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
@@ -40,8 +48,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonArray
 import org.tomsense.db.Message
 
 /**
@@ -82,6 +95,17 @@ fun ChatScreen(
     /** Think mode. Null hides the control entirely. */
     thinkEnabled: Boolean? = null,
     onThinkChange: (Boolean) -> Unit = {},
+    /**
+     * Fetch an attachment's bytes by R2 key. Null disables image rendering —
+     * the desktop app has no uploader yet, and a broken image is worse than
+     * an honest placeholder.
+     */
+    loadAttachment: (suspend (String) -> ByteArray?)? = null,
+    /** Null hides the attach button on platforms with no picker. */
+    onAttach: (() -> Unit)? = null,
+    /** Keys staged for the next send, shown as removable chips. */
+    pendingAttachments: List<String> = emptyList(),
+    onRemoveAttachment: (String) -> Unit = {},
 ) {
     var draft by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
@@ -179,7 +203,7 @@ fun ChatScreen(
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    items(messages, key = { it.id }) { MessageBubble(it) }
+                    items(messages, key = { it.id }) { MessageBubble(it, loadAttachment) }
 
                     // Offered only on the settled tail of the conversation:
                     // regenerating anything earlier would orphan every turn
@@ -212,10 +236,38 @@ fun ChatScreen(
                 )
             }
 
+            // Staged attachments, above the composer so they are visibly
+            // part of the message about to be sent rather than of the last one.
+            if (pendingAttachments.isNotEmpty()) {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    pendingAttachments.forEach { key ->
+                        AssistChip(
+                            onClick = { onRemoveAttachment(key) },
+                            label = { Text(shortFileName(key), style = MaterialTheme.typography.labelSmall) },
+                            trailingIcon = {
+                                Icon(
+                                    Icons.Filled.Close,
+                                    contentDescription = "Remove attachment",
+                                    modifier = Modifier.size(14.dp),
+                                )
+                            },
+                        )
+                    }
+                }
+            }
+
             Row(
                 Modifier.fillMaxWidth().padding(12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                onAttach?.let { attach ->
+                    IconButton(onClick = attach) {
+                        Icon(Icons.Filled.AttachFile, contentDescription = "Attach a file")
+                    }
+                }
                 thinkEnabled?.let { on ->
                     // A toggle rather than a per-send choice: "think about
                     // this one" is usually a mode you stay in for a few turns.
@@ -265,7 +317,10 @@ fun ChatScreen(
 }
 
 @Composable
-private fun MessageBubble(message: Message) {
+private fun MessageBubble(
+    message: Message,
+    loadAttachment: (suspend (String) -> ByteArray?)? = null,
+) {
     val isUser = message.role == "user"
     Row(
         Modifier.fillMaxWidth(),
@@ -282,17 +337,124 @@ private fun MessageBubble(message: Message) {
             ),
         ) {
             Column(Modifier.padding(12.dp)) {
-                // Reasoning is collapsed by default but never hidden — the
-                // point of self-hosting is that nothing is opaque.
+                // Collapsed by default but never hidden — the point of
+                // self-hosting is that nothing is opaque. It was rendered
+                // inline above the answer, which on a reasoning model meant
+                // paragraphs of working-out pushing the actual reply off
+                // screen.
                 message.reasoning?.takeIf { it.isNotBlank() }?.let {
-                    Text(
-                        it,
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.padding(bottom = 6.dp),
-                    )
+                    Reasoning(it, streaming = message.content.isBlank())
                 }
-                Text(message.content, style = MaterialTheme.typography.bodyMedium)
+
+                // Above the text: for a generated image the picture IS the
+                // answer, and for an attached one it is the question.
+                attachmentKeys(message.attachments).forEach { key ->
+                    AttachmentImage(key, loadAttachment)
+                }
+
+                if (message.content.isNotBlank()) {
+                    Text(message.content, style = MaterialTheme.typography.bodyMedium)
+                }
             }
         }
+    }
+}
+
+/**
+ * The model's working-out, behind a disclosure.
+ *
+ * Collapsed by default: on a reasoning model this is routinely longer than the
+ * answer, and rendering it inline pushed the actual reply off screen. Still
+ * one tap away, because hiding it entirely would defeat the point of running
+ * your own stack.
+ *
+ * While a reply is still streaming, its reasoning IS the only sign of life —
+ * so an answer that has not started yet shows a live label rather than a
+ * finished one.
+ */
+@Composable
+private fun Reasoning(text: String, streaming: Boolean = false) {
+    var open by remember { mutableStateOf(false) }
+
+    Column(Modifier.padding(bottom = 6.dp)) {
+        Row(
+            Modifier.clickable { open = !open },
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                if (open) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                if (streaming) "Thinking…" else "Thought process",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 4.dp),
+            )
+        }
+        if (open) {
+            Text(
+                text,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+        }
+    }
+}
+
+
+/** Stored as a JSON array of R2 keys; tolerant of anything malformed. */
+private fun attachmentKeys(raw: String?): List<String> {
+    if (raw.isNullOrBlank()) return emptyList()
+    return runCatching {
+        Json.parseToJsonElement(raw).jsonArray.mapNotNull {
+            (it as? JsonPrimitive)?.content
+        }
+    }.getOrDefault(emptyList())
+}
+
+private fun shortFileName(key: String): String = key.substringAfterLast('-').ifBlank { "file" }
+
+/**
+ * One attachment, fetched and decoded on demand.
+ *
+ * The fetch is authenticated, so this cannot be a plain image URL — the bytes
+ * come back through the same client that holds the device token. Keyed on the
+ * R2 key so a recomposition does not re-download, and a failure renders a
+ * placeholder rather than throwing inside the list.
+ */
+@Composable
+private fun AttachmentImage(key: String, load: (suspend (String) -> ByteArray?)?) {
+    if (load == null) return
+    var bitmap by remember(key) { mutableStateOf<ImageBitmap?>(null) }
+    var failed by remember(key) { mutableStateOf(false) }
+
+    LaunchedEffect(key) {
+        val bytes = runCatching { load(key) }.getOrNull()
+        val decoded = bytes?.let { decodeImageBytes(it) }
+        if (decoded == null) failed = true else bitmap = decoded
+    }
+
+    val image = bitmap
+    when {
+        image != null -> Image(
+            bitmap = image,
+            contentDescription = "Attached image",
+            modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
+            contentScale = ContentScale.FillWidth,
+        )
+        failed -> Text(
+            "[image unavailable]",
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier.padding(bottom = 6.dp),
+        )
+        else -> Text(
+            "Loading image…",
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier.padding(bottom = 6.dp),
+        )
     }
 }

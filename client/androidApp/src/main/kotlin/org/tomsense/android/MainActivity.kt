@@ -60,6 +60,12 @@ class MainActivity : ComponentActivity() {
     /** Think mode. Sticky across turns until switched off. */
     private var think by mutableStateOf(false)
 
+    /** R2 keys uploaded and staged for the next send. */
+    private var pending by mutableStateOf<List<String>>(emptyList())
+
+    /** Registered in onCreate — a picker launcher created later than that throws. */
+    private lateinit var picker: androidx.activity.result.ActivityResultLauncher<String>
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -67,6 +73,14 @@ class MainActivity : ComponentActivity() {
         // is called later. This is what lets a tool ask for a permission at
         // the moment the model needs it.
         PermissionGate.attach(this)
+
+        // Registered before RESUMED for the same reason as PermissionGate.
+        // GetContent rather than a storage permission: the picker grants
+        // access to the one file chosen, so the app never asks to read
+        // everything in order to send one photo.
+        picker = registerForActivityResult(
+            androidx.activity.result.contract.ActivityResultContracts.GetContent(),
+        ) { uri -> uri?.let(::attach) }
 
         setContent {
             MaterialTheme {
@@ -215,6 +229,12 @@ class MainActivity : ComponentActivity() {
                                 notices = notices,
                                 thinkEnabled = think,
                                 onThinkChange = { think = it },
+                                onAttach = { picker.launch("*/*") },
+                                pendingAttachments = pending,
+                                onRemoveAttachment = { pending = pending - it },
+                                loadAttachment = { key ->
+                                    runCatching { app.edge.downloadFile(key) }.getOrNull()
+                                },
                                 // Branching needs something to branch FROM,
                                 // and exporting an empty chat produces a file
                                 // with a heading and nothing under it.
@@ -251,8 +271,13 @@ class MainActivity : ComponentActivity() {
      */
     private fun send(text: String) {
         val id = convId ?: return
+        val attached = pending
+        // Cleared here rather than after the send completes: they belong to
+        // the message being sent, and leaving them staged would silently
+        // attach them to the NEXT one too.
+        pending = emptyList()
         lifecycleScope.launch {
-            app.repo.appendMessage(id, "user", text)
+            app.repo.appendMessage(id, "user", text, attachments = attached)
             val assistantId = app.repo.appendMessage(id, "assistant", "")
             val history = historyForModel()
             consume(assistantId) {
@@ -411,8 +436,8 @@ class MainActivity : ComponentActivity() {
         val id = convId ?: return listOf(WireMessage("system", deviceSystemPrompt()))
         return listOf(WireMessage("system", deviceSystemPrompt())) +
             app.db.schemaQueries.messagesFor(id).executeAsList()
-                .filter { it.id != exclude && it.content.isNotBlank() }
-                .map { WireMessage(it.role, it.content) }
+                .filter { it.id != exclude && (it.content.isNotBlank() || it.attachments != null) }
+                .map { WireMessage(it.role, it.content, attachmentKeys(it.attachments)) }
     }
 
     /**
@@ -455,6 +480,11 @@ class MainActivity : ComponentActivity() {
                     // connection. Nothing to render.
                     // A routing override the edge wants the user to see.
                     "notice" -> ev.text?.let { notices = notices + it }
+
+                    // A file the run produced — currently a generated image.
+                    // Attached to the assistant row so it survives a restart
+                    // and syncs like any other part of the reply.
+                    "attachment" -> ev.key?.let { app.repo.addAttachment(assistantId, it) }
 
                     "heartbeat" -> Unit
 
@@ -518,6 +548,48 @@ class MainActivity : ComponentActivity() {
     // meaningful only to the device that started it; putting it in the synced
     // message table would push device-local scratch state to every other
     // device and to D1.
+
+    /**
+     * Prepare and upload one picked file, then stage its key.
+     *
+     * Upload happens at PICK time, not at send time: it is the slow part, and
+     * doing it here means pressing send is still instant and the failure — a
+     * dead network, a file too large — surfaces while the user is still
+     * thinking about the attachment rather than about their message.
+     */
+    private fun attach(uri: android.net.Uri) {
+        lifecycleScope.launch {
+            val prepared = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                Attachments.prepare(this@MainActivity, uri)
+            }
+            if (prepared == null) {
+                toast("Couldn't read that file.")
+                return@launch
+            }
+            val result = runCatching {
+                app.edge.uploadFile(prepared.bytes, prepared.mime, prepared.name)
+            }.getOrNull()
+            if (result == null) {
+                toast("Upload failed — check your connection.")
+                return@launch
+            }
+            pending = pending + result.key
+        }
+    }
+
+    private fun toast(msg: String) {
+        android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_SHORT).show()
+    }
+
+    /** Attachments are stored as a JSON array of R2 keys. */
+    private fun attachmentKeys(raw: String?): List<String>? {
+        if (raw.isNullOrBlank()) return null
+        return runCatching {
+            kotlinx.serialization.json.Json.parseToJsonElement(raw)
+                .let { it as kotlinx.serialization.json.JsonArray }
+                .mapNotNull { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
+        }.getOrNull()?.takeIf { it.isNotEmpty() }
+    }
 
     private fun prefs() = getSharedPreferences("tomsense", MODE_PRIVATE)
 

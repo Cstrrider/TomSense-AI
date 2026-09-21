@@ -61,10 +61,40 @@ class EdgeApi(
             setBody(ShareRequest(shared))
         }.body()
 
+    /**
+     * Upload one file, returning its R2 key.
+     *
+     * Raw body rather than multipart: there is exactly one file per call, and
+     * multipart would add a parser on both sides to carry a filename that fits
+     * in a header.
+     */
+    suspend fun uploadFile(bytes: ByteArray, mime: String, name: String): UploadedFile =
+        http.post("$baseUrl/files") {
+            auth()
+            header("content-type", mime)
+            header("x-file-name", name)
+            setBody(bytes)
+        }.body()
+
+    /** Fetch an attachment's bytes. Authenticated, so it cannot be a plain URL. */
+    suspend fun downloadFile(key: String): ByteArray =
+        http.get("$baseUrl/files/" + key.split("/").joinToString("/") { encode(it) }) {
+            auth()
+        }.body()
+
+    private fun encode(segment: String): String =
+        segment.map { c ->
+            if (c.isLetterOrDigit() || c in "-_.~") c.toString()
+            else c.code.let { "%" + it.toString(16).uppercase().padStart(2, '0') }
+        }.joinToString("")
+
     private fun io.ktor.client.request.HttpRequestBuilder.auth() {
         deviceToken()?.let { header("Authorization", "Bearer $it") }
     }
 }
+
+@kotlinx.serialization.Serializable
+data class UploadedFile(val key: String, val mime: String, val bytes: Long)
 
 @kotlinx.serialization.Serializable
 data class ShareRequest(val shared: Boolean)

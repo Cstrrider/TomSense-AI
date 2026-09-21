@@ -22,6 +22,8 @@
 import type { Env, StreamEvent, ToolCall, ChatMessage, Usage } from "./../types";
 import { parseModelStr, resolveProvider, chatCompletionsUrl } from "./../providers";
 import { streamWithFallback } from "./../stream";
+import { isServerTool, runServerTool } from "./../server_tools";
+import { getPrefs } from "./../prefs";
 
 /**
  * Ceiling on model→tool→model cycles in a single run.
@@ -77,6 +79,8 @@ interface RunRecord {
   pendingToolCalls: ToolCall[];
   /** Routing overrides to show the user; replayed on reconnect. */
   notices: string[];
+  /** R2 keys produced during this run — generated images and the like. */
+  attachments: string[];
   /** "high" when think mode routed this turn. */
   reasoningEffort: "high" | null;
   error?: string;
@@ -159,6 +163,7 @@ export class DetachedRun implements DurableObject {
       rounds: [],
       pendingToolCalls: [],
       notices: body.notices ?? [],
+      attachments: [],
       reasoningEffort: body.reasoningEffort ?? null,
     };
     await this.persist(true);
@@ -245,6 +250,9 @@ export class DetachedRun implements DurableObject {
     const out: StreamEvent[] = [{ type: "run", runId: rec.id, status: rec.status }];
     // Before any content: the notice explains the model that produced it.
     for (const n of rec.notices ?? []) out.push({ type: "notice", text: n });
+    for (const k of rec.attachments ?? []) {
+      out.push({ type: "attachment", key: k, mime: "application/octet-stream" });
+    }
     if (rec.reasoning) out.push({ type: "reasoning", text: rec.reasoning });
     if (rec.content) out.push({ type: "text", text: rec.content });
     for (const r of rec.rounds) {
@@ -366,11 +374,52 @@ export class DetachedRun implements DurableObject {
         });
 
         if (round.toolCalls.length) {
-          rec.pendingToolCalls = round.toolCalls;
-          rec.status = "awaiting_tools";
+          // Split the round: the edge answers its own tools immediately, the
+          // phone answers the rest. Parking for a tool the device cannot run
+          // would hang the run until it was swept away.
+          const serverCalls = round.toolCalls.filter((t) => isServerTool(t.name));
+          const deviceCalls = round.toolCalls.filter((t) => !isServerTool(t.name));
+
+          for (const call of serverCalls) {
+            const prefs = await getPrefs(this.env, rec.userId);
+            const result = await runServerTool(
+              this.env,
+              rec.userId,
+              call,
+              prefs.tool_models.image,
+            );
+
+            if (result.attachmentKey) {
+              rec.attachments.push(result.attachmentKey);
+              // Emitted live AND persisted, so an image survives a reconnect
+              // the same way text does.
+              this.emit({
+                type: "attachment",
+                key: result.attachmentKey,
+                mime: result.attachmentMime ?? "application/octet-stream",
+              });
+            }
+
+            rec.messages.push({
+              role: "tool",
+              tool_call_id: call.id,
+              name: call.name,
+              content: result.content,
+            } as ChatMessage);
+          }
+
+          if (deviceCalls.length) {
+            rec.pendingToolCalls = deviceCalls;
+            rec.status = "awaiting_tools";
+            await this.persist(true);
+            await this.syncStatus(rec);
+            return; // parked — /tool_result resumes us
+          }
+
+          // Only server tools ran, so nothing is waiting on the phone: keep
+          // going and let the model use what it just got back.
           await this.persist(true);
-          await this.syncStatus(rec);
-          return; // parked — /tool_result resumes us
+          continue;
         }
 
         rec.status = "done";

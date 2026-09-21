@@ -161,3 +161,8 @@ UPDATE sync_state SET lamport = lamport + 1 WHERE id = 0;
 -- what makes subsequent local edits win as the user expects.
 raiseLamport:
 UPDATE sync_state SET lamport = MAX(lamport, ?) WHERE id = 0;
+
+-- Set when the edge reports a file it produced mid-run, after the assistant
+-- row already exists. Not dirtied here: finishStreaming marks the row.
+updateMessageAttachments:
+UPDATE message SET attachments = ? WHERE id = ?;

@@ -10,6 +10,8 @@
 import type { Env, Principal, ChatMessage } from "./types";
 import { authenticate, issueDeviceToken, issueAuthCode, redeemAuthCode } from "./auth";
 import { readShared, setShare } from "./share";
+import { uploadFile, serveFile, dataUrl } from "./files";
+import { serverToolSchemas } from "./server_tools";
 import { parseModelStr, resolveProvider } from "./providers";
 import { push, pull, type PushRequest } from "./sync";
 import {
@@ -172,6 +174,13 @@ export default {
         const r = await setShare(env, who, convId, body.shared !== false);
         return "error" in r ? json(r, 400) : json(r);
       }
+      if (path === "/files" && req.method === "POST") {
+        const r = await uploadFile(env, who, req);
+        return "error" in r ? json(r, 400) : json(r);
+      }
+      if (path.startsWith("/files/") && req.method === "GET") {
+        return await serveFile(env, who, decodeURIComponent(path.slice("/files/".length)));
+      }
       if (path === "/voice") return await voice(req, env, who);
       if (path === "/runs" && req.method === "GET") return await listRuns(url, env, who);
       if (path.startsWith("/run/")) return await run(req, env, who, path);
@@ -219,13 +228,17 @@ async function chat(req: Request, env: Env, who: Principal): Promise<Response> {
     return json({ error: "conversationId is required" }, 400);
   }
 
+  // Attachments become image parts BEFORE routing, so the vision override
+  // sees a real image and can claim the turn.
+  const messages = await expandAttachments(env, body.messages);
+
   // The full routing stack: explicit pick, think mode, vision override,
   // difficulty escalation, saved default, then the budget cap over the top.
   // Honours which providers are actually enabled and keyed, so disabling
   // Cloudflare genuinely stops Cloudflare traffic rather than just hiding it
   // from the picker.
   const routed = await routeChat(env, who, {
-    messages: body.messages,
+    messages,
     requested: body.model,
     think: body.think,
   });
@@ -256,8 +269,11 @@ async function chat(req: Request, env: Env, who: Principal): Promise<Response> {
         convId: body.conversationId,
         model: routed.model,
         fallbackModel,
-        messages: body.messages,
-        tools: body.tools,
+        messages,
+        // The device advertises what it can do; the edge adds what IT can do.
+        // Merging here rather than in the client means a new server tool does
+        // not need an app update to exist.
+        tools: [...(body.tools ?? []), ...serverToolSchemas()],
         reasoningEffort: routed.reasoningEffort,
         // Rendered as the first chunks, so a surprising model choice is
         // never silent. That visibility is the point of the override.
@@ -269,6 +285,48 @@ async function chat(req: Request, env: Env, who: Principal): Promise<Response> {
   // Returned straight through: the DO's SSE body streams to the client, and
   // if the client vanishes the DO simply loses one subscriber.
   return stub.fetch(new Request("https://do/attach"));
+}
+
+/**
+ * Replace attachment keys with inline image parts.
+ *
+ * A private, authenticated /files URL is not something a model provider can
+ * fetch, so the bytes have to travel in the request — an OpenAI-shaped
+ * image_url carrying a data: URL is the one form every vision provider
+ * accepts. Stable reached the same conclusion (uploads.image_data_url).
+ *
+ * Only images are inlined. A PDF would be megabytes of base64 that no vision
+ * model can read, so non-images are named and left in R2.
+ */
+async function expandAttachments(
+  env: Env,
+  messages: ChatMessage[],
+): Promise<ChatMessage[]> {
+  const out: ChatMessage[] = [];
+
+  for (const m of messages) {
+    if (!m.attachments?.length) {
+      out.push(m);
+      continue;
+    }
+
+    const parts: unknown[] = [];
+    const text = typeof m.content === "string" ? m.content : "";
+    if (text) parts.push({ type: "text", text });
+
+    for (const key of m.attachments) {
+      const url = await dataUrl(env, key);
+      if (url && url.startsWith("data:image/")) {
+        parts.push({ type: "image_url", image_url: { url } });
+      } else {
+        const name = key.split("/").pop() ?? key;
+        parts.push({ type: "text", text: "[attached file: " + name + "]" });
+      }
+    }
+
+    out.push({ ...m, content: parts.length ? parts : text });
+  }
+  return out;
 }
 
 async function syncPush(req: Request, env: Env, who: Principal): Promise<Response> {

@@ -21,6 +21,8 @@ export interface ToolModels {
   research?: string;
   /** Utility tier: titles, follow-ups, the auto-route classifier. */
   title?: string;
+  /** Text-to-image model used by generate_image. */
+  image?: string;
   /** Used when the primary stalls, and as the budget-mode target. */
   chat_fallback?: string;
   vision_fallback?: string;
