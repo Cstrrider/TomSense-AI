@@ -62,15 +62,48 @@ export const PROVIDER_PRESETS = [
   { kind: "openai-compat", name: "Groq", baseUrl: "https://api.groq.com/openai/v1" },
 ] as const;
 
+/** The chat-capable Cloudflare catalogue, as a ModelEntry list. */
+function cfCatalogModels(): ModelEntry[] {
+  return CF_MODELS.filter((m) => m.roles.includes("chat")).map((m) => ({
+    id: m.id,
+    vision: m.vision,
+    reasoning: m.reasoning,
+    context: m.context,
+  }));
+}
+
 /**
  * The Cloudflare entry.
  *
  * Synthesised rather than stored, so it exists for a brand-new user with no
- * setup at all — the app has to work before you have any keys. Its `models`
- * come from the bundled catalogue, which is also where their declared
- * capabilities live.
+ * setup at all — the app has to work before you have any keys.
+ *
+ * Its model list is curatable like any other provider's. An EMPTY stored list
+ * means "the whole catalogue", which is what keeps a fresh account working
+ * with no configuration; a non-empty one is an explicit selection and is
+ * honoured exactly. The consequence worth knowing: removing every Cloudflare
+ * model returns you to the full catalogue rather than to none. "None" is what
+ * the enabled switch is for, and a provider that silently offers nothing is a
+ * worse thing to build than a slightly surprising reset.
+ *
+ * Capabilities are merged FROM the catalogue by id, so a curated list keeps
+ * its vision/reasoning/context data. An id the catalogue does not know —
+ * Cloudflare ships new models faster than the generated catalogue is
+ * regenerated — is kept with whatever was stored for it, so a new model can be
+ * added by hand and still work.
  */
 function cloudflareView(row: Row | null): ProviderView {
+  const selected = row ? parseJson<ModelEntry[]>(row.models, []) : [];
+
+  const models = selected.length === 0
+    ? cfCatalogModels()
+    : selected.map((sel) => {
+        const known = CF_MODELS.find((m) => m.id === sel.id);
+        return known
+          ? { id: known.id, vision: known.vision, reasoning: known.reasoning, context: known.context }
+          : sel;
+      });
+
   return {
     id: CF_BUILTIN_ID,
     name: "Cloudflare Workers AI",
@@ -78,12 +111,7 @@ function cloudflareView(row: Row | null): ProviderView {
     baseUrl: "",
     hasKey: false,
     keyless: true,
-    models: CF_MODELS.filter((m) => m.roles.includes("chat")).map((m) => ({
-      id: m.id,
-      vision: m.vision,
-      reasoning: m.reasoning,
-      context: m.context,
-    })),
+    models,
     enabled: row ? Boolean(row.enabled) : true,
     builtin: true,
   };
@@ -183,18 +211,44 @@ export async function updateProvider(
     enabled?: boolean;
   },
 ): Promise<{ ok: true } | { error: string }> {
-  // Cloudflare is synthetic; the only thing that can be persisted about it is
-  // whether it is enabled, so it gets its own narrow path.
+  // Cloudflare is synthetic, so it gets a narrow path: only `enabled` and
+  // `models` mean anything for it. There is no key to rotate and no base URL
+  // to point somewhere else, and accepting either would let a request move
+  // the built-in provider somewhere it was never meant to go.
   if (id === CF_BUILTIN_ID) {
     const now = Date.now();
+
+    // Materialise the synthetic row on first write. Until something is
+    // actually persisted about Cloudflare it exists only as a view, so there
+    // may be nothing here to update yet.
     await env.DB.prepare(
       `INSERT INTO providers
          (id, user_id, name, kind, base_url, api_key_enc, models, extra_body,
           enabled, created_at, updated_at)
-       VALUES (?, ?, 'Cloudflare Workers AI', 'cf', '', '', '[]', '{}', ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled, updated_at = excluded.updated_at`,
+       VALUES (?, ?, 'Cloudflare Workers AI', 'cf', '', '', '[]', '{}', 1, ?, ?)
+       ON CONFLICT(id) DO NOTHING`,
     )
-      .bind(CF_BUILTIN_ID, who.userId, body.enabled === false ? 0 : 1, now, now)
+      .bind(CF_BUILTIN_ID, who.userId, now, now)
+      .run();
+
+    const cfSets: string[] = [];
+    const cfArgs: unknown[] = [];
+    if (body.enabled !== undefined) {
+      cfSets.push("enabled = ?");
+      cfArgs.push(body.enabled ? 1 : 0);
+    }
+    if (body.models !== undefined) {
+      cfSets.push("models = ?");
+      cfArgs.push(JSON.stringify(body.models));
+    }
+    if (!cfSets.length) return { ok: true };
+
+    cfSets.push("updated_at = ?");
+    cfArgs.push(now, CF_BUILTIN_ID, who.userId);
+    await env.DB.prepare(
+      `UPDATE providers SET ${cfSets.join(", ")} WHERE id = ? AND user_id = ?`,
+    )
+      .bind(...cfArgs)
       .run();
     return { ok: true };
   }
@@ -393,6 +447,14 @@ export async function discoverModels(
   let baseUrl = "";
   let apiKey = "";
   let kind = "openai-compat";
+
+  // Cloudflare has no `/models` endpoint reachable from here — the Worker
+  // holds an AI *binding*, not an account API token — so "what's available"
+  // is the bundled catalogue. Curating it still matters: the catalogue is
+  // long, and a user who wants three models should not scroll thirty.
+  if (body.providerId === CF_BUILTIN_ID) {
+    return { models: cfCatalogModels().map((m) => m.id).sort() };
+  }
 
   if (body.providerId) {
     const row = await env.DB.prepare(

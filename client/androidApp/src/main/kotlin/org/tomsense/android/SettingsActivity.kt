@@ -73,6 +73,7 @@ class SettingsActivity : ComponentActivity() {
                 var defaultModel by remember { mutableStateOf("") }
                 var error by remember { mutableStateOf<String?>(null) }
                 var adding by remember { mutableStateOf(false) }
+                var managing by remember { mutableStateOf<ProviderView?>(null) }
                 var query by remember { mutableStateOf("") }
 
                 suspend fun refresh() {
@@ -113,6 +114,15 @@ class SettingsActivity : ComponentActivity() {
                                 singleLine = true,
                                 label = { Text("Search models") },
                                 placeholder = { Text("opus, vision, 70b…") },
+                                // This searches the models each provider is
+                                // CONFIGURED to offer, not everything it could
+                                // serve. Saying so is the difference between
+                                // "that model doesn't exist" and "I haven't
+                                // added it yet" — which is exactly the wrong
+                                // conclusion this box used to invite.
+                                supportingText = {
+                                    Text("Searches configured models — add more under Providers.")
+                                },
                             )
                         }
 
@@ -129,8 +139,9 @@ class SettingsActivity : ComponentActivity() {
                         } else if (filtered.isEmpty()) {
                             item {
                                 Text(
-                                    "No model matches \"$query\" " +
-                                        "(${models.size} available)",
+                                    "No configured model matches \"$query\" " +
+                                        "(${models.size} configured). If the provider offers " +
+                                        "it, add it under Providers → Models.",
                                     style = MaterialTheme.typography.bodySmall,
                                 )
                             }
@@ -164,6 +175,7 @@ class SettingsActivity : ComponentActivity() {
                                         }.onFailure { error = it.message }
                                     }
                                 },
+                                onManageModels = { managing = p },
                                 onDelete = {
                                     lifecycleScope.launch {
                                         runCatching {
@@ -181,6 +193,32 @@ class SettingsActivity : ComponentActivity() {
                             }
                         }
                     }
+                }
+
+                managing?.let { target ->
+                    ManageModelsDialog(
+                        provider = target,
+                        onDiscover = {
+                            app.providers.discover(
+                                org.tomsense.sync.DiscoverRequest(providerId = target.id),
+                            ).models
+                        },
+                        onDismiss = { managing = null },
+                        onSave = { ids ->
+                            managing = null
+                            lifecycleScope.launch {
+                                runCatching {
+                                    app.providers.update(
+                                        target.id,
+                                        UpdateProvider(
+                                            models = ids.map { org.tomsense.sync.WireModel(id = it) },
+                                        ),
+                                    )
+                                    refresh()
+                                }.onFailure { error = it.message }
+                            }
+                        },
+                    )
                 }
 
                 if (adding) {
@@ -258,29 +296,180 @@ private fun ModelRow(model: ModelOption, selected: Boolean, onSelect: () -> Unit
 private fun ProviderCard(
     provider: ProviderView,
     onToggle: (Boolean) -> Unit,
+    onManageModels: () -> Unit,
     onDelete: () -> Unit,
 ) {
     Card(Modifier.fillMaxWidth()) {
-        Row(
-            Modifier.fillMaxWidth().padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text(provider.name, style = MaterialTheme.typography.bodyLarge)
-                val status = when {
-                    // Cloudflare's "no key" is correct, not a missing setup step.
-                    provider.keyless -> "no key needed · ${provider.models.size} models"
-                    provider.hasKey -> "key set · ${provider.models.size} models"
-                    else -> "no key — add one to use this provider"
+        Column(Modifier.fillMaxWidth().padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(provider.name, style = MaterialTheme.typography.bodyLarge)
+                    val status = when {
+                        // Cloudflare's "no key" is correct, not a missing setup step.
+                        provider.keyless -> "no key needed · ${provider.models.size} models"
+                        provider.hasKey -> "key set · ${provider.models.size} models"
+                        else -> "no key — add one to use this provider"
+                    }
+                    Text(status, style = MaterialTheme.typography.labelSmall)
                 }
-                Text(status, style = MaterialTheme.typography.labelSmall)
+                Switch(checked = provider.enabled, onCheckedChange = onToggle)
             }
-            Switch(checked = provider.enabled, onCheckedChange = onToggle)
-            if (!provider.builtin) {
-                TextButton(onClick = onDelete) { Text("Delete") }
+            Row {
+                TextButton(onClick = onManageModels) { Text("Models") }
+                if (!provider.builtin) {
+                    TextButton(onClick = onDelete) { Text("Delete") }
+                }
             }
         }
     }
+}
+
+/**
+ * Add or remove the models a provider offers, after it has been created.
+ *
+ * This exists because model discovery used to happen ONLY while adding a
+ * provider, which froze the list at that moment. The search box on the main
+ * screen then searched that frozen list — so it found what was already there
+ * rather than what the provider actually offers, and a model added by the
+ * provider later was unreachable without deleting and re-adding the whole
+ * thing (losing the API key with it).
+ *
+ * The list shown is the union of what is configured and what discovery
+ * returned, so the current selection is always visible and never silently
+ * dropped by a filter or by a provider that has stopped advertising a model
+ * the user still relies on.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ManageModelsDialog(
+    provider: ProviderView,
+    onDiscover: suspend () -> List<String>,
+    onDismiss: () -> Unit,
+    onSave: (List<String>) -> Unit,
+) {
+    var chosen by remember { mutableStateOf(provider.models.map { it.id }.toSet()) }
+    var available by remember { mutableStateOf<List<String>>(emptyList()) }
+    var filter by remember { mutableStateOf("") }
+    var fetching by remember { mutableStateOf(false) }
+    var note by remember { mutableStateOf<String?>(null) }
+    var manual by remember { mutableStateOf("") }
+
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+
+    // Configured first, then anything discovered that is not already
+    // configured — so the models in use stay at the top where they can be
+    // unticked, instead of being lost in a list of hundreds.
+    val union = remember(available, chosen) {
+        val configured = provider.models.map { it.id }
+        configured + available.filterNot { it in configured }
+    }
+    val shown = union.filter { it.contains(filter.trim(), ignoreCase = true) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(provider.name) },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.heightIn(max = 520.dp).verticalScroll(rememberScrollState()),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Button(
+                        enabled = !fetching,
+                        onClick = {
+                            fetching = true
+                            note = null
+                            scope.launch {
+                                val found = runCatching { onDiscover() }.getOrDefault(emptyList())
+                                available = found
+                                fetching = false
+                                note = if (found.isEmpty()) {
+                                    "Nothing returned — this provider may not list models. Add ids by hand below."
+                                } else {
+                                    "${found.size} available"
+                                }
+                            }
+                        },
+                    ) { Text(if (fetching) "Fetching…" else "Fetch available") }
+
+                    note?.let {
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(start = 8.dp),
+                        )
+                    }
+                }
+
+                Text(
+                    "${chosen.size} selected of ${union.size}",
+                    style = MaterialTheme.typography.labelSmall,
+                )
+
+                if (union.size > 8) {
+                    OutlinedTextField(
+                        filter,
+                        { filter = it },
+                        singleLine = true,
+                        label = { Text("Filter") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+
+                // Capped for the same reason as the add dialog: OpenRouter
+                // returns 300+ and composing them all inside a dialog janks.
+                shown.take(60).forEach { id ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(
+                            checked = id in chosen,
+                            onCheckedChange = {
+                                chosen = if (id in chosen) chosen - id else chosen + id
+                            },
+                        )
+                        Text(id, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+                if (shown.size > 60) {
+                    Text(
+                        "…${shown.size - 60} more — narrow the filter",
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
+
+                // Always available, not just when discovery fails: a provider
+                // can serve a model it does not advertise, and Cloudflare
+                // ships new ones faster than the bundled catalogue is
+                // regenerated.
+                OutlinedTextField(
+                    manual,
+                    { manual = it },
+                    label = { Text("Add model ID by hand") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (manual.isNotBlank()) {
+                    TextButton(onClick = {
+                        val id = manual.trim()
+                        chosen = chosen + id
+                        available = (available + id).distinct()
+                        manual = ""
+                    }) { Text("Add \"${manual.trim()}\"") }
+                }
+
+                if (provider.builtin && chosen.isEmpty()) {
+                    Text(
+                        "With nothing selected, Cloudflare offers its whole catalogue. " +
+                            "Turn the provider off instead if you want none of it.",
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onSave(chosen.toList().sorted()) }) { Text("Save") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 /**

@@ -456,7 +456,64 @@ than forbidden. Test rows were removed from D1 afterwards.
 
 ---
 
-## 14. What this is not
+## 14. Model curation (2026-09-21)
+
+Model discovery originally ran **only while adding a provider**, which froze
+the model list at that moment. The search box on the settings screen then
+searched that frozen list, so it found what was already configured rather than
+what the provider actually offers — and a model the provider added later was
+unreachable without deleting and re-creating the provider, losing the API key
+with it.
+
+Models can now be added and removed for **every** provider, after creation:
+
+- `Providers → Models` opens the list, with *Fetch available* re-running
+  discovery against the saved provider using its stored key.
+- The list shown is the union of configured and discovered ids, so the current
+  selection is always visible and cannot be hidden by a filter or dropped
+  because a provider stopped advertising something still in use.
+- Ids can be typed by hand at any time, not only when discovery fails — a
+  provider can serve a model it does not advertise.
+
+**Cloudflare is curatable too**, which it was not: `updateProvider` accepted
+only `enabled` for it and the list came straight from the generated catalogue.
+Now an empty stored list means "the whole catalogue" (so a fresh account still
+works with zero configuration) and a non-empty one is honoured exactly.
+Capabilities are merged from the catalogue by id, and an id the catalogue does
+not know is kept as stored — Cloudflare ships models faster than
+`cf_catalog.py` is regenerated, so hand-adding one has to work.
+
+`POST /providers/discover` with `providerId: "cf"` returns the catalogue rather
+than attempting a fetch: the Worker holds an AI *binding*, not an account API
+token, so there is no `/models` endpoint it could call.
+
+The search box now says it searches *configured* models. That wording is the
+actual fix for the original confusion — the difference between "that model
+doesn't exist" and "I haven't added it yet".
+
+### Verified against the live Worker
+
+CF discovery returned the catalogue; curating CF to 2 models was reflected in
+both `/providers` and `/models` with capabilities merged; a hand-added id the
+catalogue does not know survived the round trip with its declared
+capabilities; an empty list restored the full catalogue. On a custom provider,
+add and remove both worked and **the API key survived a model edit**. All test
+rows were removed and the database verified byte-identical to its prior state.
+
+### A latent bug found while testing, NOT fixed
+
+`providers.id` is the primary key and Cloudflare's row uses the constant
+`'cf'` for every user. With more than one account, only the first can own that
+row — everyone else's writes hit `ON CONFLICT DO NOTHING` on insert and match
+zero rows on update, so their Cloudflare settings silently do nothing. This is
+invisible in a single-user deployment, which is what this is. The fix is a
+composite `(id, user_id)` key or a per-user synthetic id, and it needs a D1
+migration; it is not worth doing before there is a second user, but it should
+be done before there ever is one.
+
+---
+
+## 15. What this is not
 
 This plan does **not** aim for 1:1 endpoint parity with `main`. Roughly 14 of
 the 98 routes are dropped or replaced outright, and several more collapse into
