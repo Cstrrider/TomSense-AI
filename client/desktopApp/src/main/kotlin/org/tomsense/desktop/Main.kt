@@ -140,9 +140,12 @@ private suspend fun send(deps: Deps, convId: String, text: String) {
     deps.repo.appendMessage(convId, "user", text)
     val assistantId = deps.repo.appendMessage(convId, "assistant", "")
 
-    val history = deps.db.schemaQueries.messagesFor(convId).executeAsList()
-        .filter { it.content.isNotBlank() }
-        .map { WireMessage(it.role, it.content) }
+    // The device's own clock goes in front of every request; see
+    // deviceSystemPrompt for the failure that made it necessary.
+    val history = listOf(WireMessage("system", org.tomsense.data.deviceSystemPrompt())) +
+        deps.db.schemaQueries.messagesFor(convId).executeAsList()
+            .filter { it.content.isNotBlank() }
+            .map { WireMessage(it.role, it.content) }
 
     val buffer = StringBuilder()
     runCatching {

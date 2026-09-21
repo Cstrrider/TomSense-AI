@@ -78,6 +78,7 @@ offline. Don't port the endpoint.
 `get_device_status`, `play_music`
 
 **Disposition: Rewrite — and it gets much simpler. Size: L (20 tools, but each S).**
+**Status: DONE 2026-09-21 — 19 of 20 shipped. See §12.**
 
 On stable these round-trip: model → backend → SSE down to the Capacitor client →
 JS plugin → Android API → result back up. The native client collapses that to a
@@ -86,6 +87,11 @@ the whole `clienttools.py` dispatch protocol.
 
 This is the single clearest justification for the native rewrite, so it should
 land early enough to prove the thesis.
+
+`get_health` is the one not shipped: it needs Health Connect, which is a
+dependency, a separate permission model and a published privacy policy. It is
+NOT registered rather than stubbed — a tool that is always going to fail is
+worse than a tool the model was never told about.
 
 ### 4b. Server tools (34)
 
@@ -196,7 +202,7 @@ early rather than discovered late.
 | Phase | Contents | Why here |
 |---|---|---|
 | ~~**A**~~ | ~~Tool-result round trip · detached-run reconnect · stop · regenerate~~ — **DONE 2026-09-20**, see §11 | Unblocks every tool; all small |
-| **B** | Device tools (20) · permission flow | Proves the native thesis; highest value per line |
+| ~~**B**~~ | ~~Device tools (20) · permission flow~~ — **DONE 2026-09-21** (19/20), see §12 | Proves the native thesis; highest value per line |
 | **C** | Voice: wire `VoiceSession` end to end, measure on-device latency | Highest risk; must be validated before building on it |
 | **D** | Chat management: search (FTS5) · pin/folder/project · branch · export · share | Makes it a daily driver |
 | **E** | Memory + uploads + RAG *(needs Vectorize)* · artifacts | Depth; externally blocked |
@@ -253,7 +259,65 @@ client work, with no edge changes needed.
 
 ---
 
-## 12. What this is not
+## 12. Phase B as built (2026-09-21)
+
+19 device tools, implemented natively and dispatched in the client. No edge
+changes were needed at all — the run parks, the phone answers — which is the
+clearest evidence the phase A seam was cut in the right place.
+
+**Contract and implementation are separate.** `ToolCatalog` (shared, no Android
+types) is everything the model sees; the Android files bind each entry to code.
+That split exists so the contract can be dumped and tested against a live model
+without an emulator: `./gradlew -q :shared:dumpToolSchemas`. Testing
+hand-copied schemas would have proved nothing.
+
+**Nothing irreversible happens without a human.** `make_call` opens the dialer
+and `send_sms` opens the messaging app, both pre-filled; the user presses the
+final button. So the app ships with **no CALL_PHONE and no SEND_SMS permission
+at all** — a model cannot ring a hallucinated number, and neither can anything
+that compromises the app. The tool descriptions say so explicitly, and the
+model does report "ready to send" rather than "sent".
+
+Permissions are requested at the moment of use, never up front.
+
+### The bug this phase found: the model had no clock
+
+Asked to "remind me to call the dentist at 3pm today", the model called
+`get_calendar`, then `get_calendar` again, then `get_device_status` — three
+paid rounds probing tools to work out what day it was, never setting the
+reminder. Nothing was sending it the time. A Worker cannot supply it either:
+it runs wherever the request landed, so for a Los Angeles user its "today" is
+already tomorrow from late afternoon on.
+
+Fixed with `deviceSystemPrompt()` — the device's own clock and zone, prepended
+to every request. The same prompt then produces `set_reminder` with the correct
+ISO timestamp on the first round. **Anything time-relative was broken before
+this**, tools or not.
+
+### Verified against the live model, not just compiled
+
+All 19 real schemas, routed by glm-5.2:
+
+```
+calendar tomorrow    → get_calendar({days:1})
+dinner tomorrow 7pm  → create_calendar_event({start:"2026-09-21T19:00", …})
+alarm 7:30           → set_alarm({hour:7, minute:30})
+timer 10 min         → start_timer({seconds:600})
+brightness 80%       → set_brightness({percent:80})
+skip song            → media_control({action:"next"})
+play Miles Davis     → play_music({query:"Miles Davis"})
+wifi settings        → open_settings({screen:"wifi"})
+"capital of France"  → no tool, just answers
+"remind me at 3pm"   → declines: already past 3pm (the clock, working)
+```
+
+And the multi-round chain end to end: *"Text Sarah I'll be 10 minutes late"* →
+`get_contacts("Sarah")` → number returned → `send_sms(+1310…, "…10 minutes
+late…")` → *"ready to go, just hit send."*
+
+---
+
+## 13. What this is not
 
 This plan does **not** aim for 1:1 endpoint parity with `main`. Roughly 14 of
 the 98 routes are dropped or replaced outright, and several more collapse into

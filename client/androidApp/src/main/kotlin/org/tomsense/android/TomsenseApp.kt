@@ -17,6 +17,8 @@ import org.tomsense.sync.ChatClient
 import org.tomsense.sync.EdgeApi
 import org.tomsense.sync.ProvidersApi
 import org.tomsense.sync.SyncEngine
+import org.tomsense.android.tools.AndroidToolset
+import org.tomsense.tools.Toolset
 import java.util.UUID
 
 /**
@@ -40,6 +42,13 @@ class TomsenseApp : Application() {
     lateinit var sync: SyncEngine
         private set
 
+    /**
+     * Device tools. Built once at startup because enumerating the launcher
+     * for `launch_app` is not free, and the set does not change at runtime.
+     */
+    lateinit var tools: Toolset
+        private set
+
     private val scope = CoroutineScope(SupervisorJob())
 
     override fun onCreate() {
@@ -55,6 +64,7 @@ class TomsenseApp : Application() {
         db.schemaQueries.initSyncState(deviceId)
 
         repo = ChatRepository(db, deviceId)
+        tools = AndroidToolset(this)
 
         val http = HttpClient(OkHttp) {
             install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }

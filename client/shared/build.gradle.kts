@@ -80,3 +80,20 @@ sqldelight {
         }
     }
 }
+
+/**
+ * Print the device-tool schemas the client advertises.
+ *
+ * `./gradlew -q :shared:dumpToolSchemas > tools.json` gives the exact JSON the
+ * app sends, so tool descriptions can be tested against a live model without
+ * building an APK or running an emulator. See DumpToolSchemas.kt.
+ */
+tasks.register<JavaExec>("dumpToolSchemas") {
+    group = "verification"
+    description = "Print device-tool schemas as the client advertises them"
+    val desktopMain = kotlin.targets.getByName("desktop").compilations.getByName("main")
+    dependsOn(desktopMain.compileTaskProvider)
+    classpath = files(desktopMain.output.allOutputs) +
+        configurations.getByName("desktopRuntimeClasspath")
+    mainClass.set("org.tomsense.tools.DumpToolSchemasKt")
+}

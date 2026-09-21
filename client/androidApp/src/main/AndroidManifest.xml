@@ -4,13 +4,58 @@
   reason a native client is worth the loss of instant OTA web iteration.
   A Capacitor WebView on server.url can declare none of what follows.
 -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- ── Device tools ────────────────────────────────────────────────────
+         Requested at the moment of use, never up front: a prompt attached to
+         "what's on my calendar today?" is a question the user can answer,
+         while a wall of dialogs at first launch is one they dismiss.
+
+         Note what is ABSENT. CALL_PHONE and SEND_SMS are not here and will
+         not be — make_call and send_sms open the dialer and the messaging app
+         pre-filled, so a human presses the final button. A model cannot ring
+         a hallucinated number, and a compromise of this app cannot obtain the
+         ability to either. -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <uses-permission android:name="android.permission.WRITE_CALENDAR" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.SET_ALARM" />
+    <!-- Special access: granted on a settings screen, not by a dialog, so
+         set_brightness opens that screen instead of failing silently. -->
+    <uses-permission android:name="android.permission.WRITE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
+
+    <!-- Package visibility for launch_app. An explicit <queries> block rather
+         than QUERY_ALL_PACKAGES: the launcher list is all this needs, and the
+         blanket permission is both broader than necessary and a Play policy
+         problem the moment this app is distributed. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.DIAL" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SENDTO" />
+            <data android:scheme="smsto" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="https" />
+        </intent>
+    </queries>
 
     <application
         android:name=".TomsenseApp"

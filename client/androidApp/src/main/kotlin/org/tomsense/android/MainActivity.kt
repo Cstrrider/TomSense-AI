@@ -20,10 +20,13 @@ import androidx.lifecycle.lifecycleScope
 import org.tomsense.android.auth.Login
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import org.tomsense.data.deviceSystemPrompt
 import org.tomsense.db.Message
 import org.tomsense.sync.ChatRequest
 import org.tomsense.sync.SyncStatus
 import org.tomsense.sync.WireMessage
+import org.tomsense.android.tools.PermissionGate
+import org.tomsense.tools.schemas
 import org.tomsense.ui.ChatScreen
 
 class MainActivity : ComponentActivity() {
@@ -36,6 +39,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Must happen before RESUMED — registerForActivityResult throws if it
+        // is called later. This is what lets a tool ask for a permission at
+        // the moment the model needs it.
+        PermissionGate.attach(this)
 
         setContent {
             MaterialTheme {
@@ -112,6 +120,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onDestroy() {
+        PermissionGate.detach(this)
+        super.onDestroy()
+    }
+
     /**
      * Persist first, then generate.
      *
@@ -124,7 +137,9 @@ class MainActivity : ComponentActivity() {
             app.repo.appendMessage(convId, "user", text)
             val assistantId = app.repo.appendMessage(convId, "assistant", "")
             val history = historyForModel()
-            consume(assistantId) { app.chat.stream(ChatRequest(convId, history)) }
+            consume(assistantId) {
+                app.chat.stream(ChatRequest(convId, history, tools = app.tools.schemas()))
+            }
         }
     }
 
@@ -141,7 +156,9 @@ class MainActivity : ComponentActivity() {
 
             app.repo.resetMessage(last.id)
             val history = historyForModel(exclude = last.id)
-            consume(last.id) { app.chat.stream(ChatRequest(convId, history)) }
+            consume(last.id) {
+                app.chat.stream(ChatRequest(convId, history, tools = app.tools.schemas()))
+            }
         }
     }
 
@@ -169,10 +186,17 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * The turns to send, with the device's own context in front.
+     *
+     * Rebuilt per request rather than stored, because the clock inside it is
+     * only true at the moment of sending.
+     */
     private fun historyForModel(exclude: String? = null): List<WireMessage> =
-        app.db.schemaQueries.messagesFor(convId).executeAsList()
-            .filter { it.id != exclude && it.content.isNotBlank() }
-            .map { WireMessage(it.role, it.content) }
+        listOf(WireMessage("system", deviceSystemPrompt())) +
+            app.db.schemaQueries.messagesFor(convId).executeAsList()
+                .filter { it.id != exclude && it.content.isNotBlank() }
+                .map { WireMessage(it.role, it.content) }
 
     /**
      * Drive one generation into [assistantId], whether newly started or rejoined.
@@ -212,24 +236,14 @@ class MainActivity : ComponentActivity() {
                     "heartbeat" -> Unit
 
                     // End of a ROUND, not of the run. Tool calls here mean the
-                    // edge is parked waiting for results, and no device tools
-                    // exist yet (migration phase B) — so answer honestly and
-                    // let the model recover, rather than leaving the run
-                    // parked until it is swept away.
+                    // edge is parked waiting on this device, so results have
+                    // to go back even when every one of them failed — silence
+                    // leaves the run parked until it is swept away.
                     "done" -> {
                         val calls = ev.toolCalls.orEmpty()
                         val id = runId
                         if (calls.isNotEmpty() && id != null) {
-                            app.chat.sendToolResults(
-                                id,
-                                calls.map {
-                                    org.tomsense.sync.ToolResult(
-                                        id = it.id,
-                                        name = it.name,
-                                        content = """{"error":"tool ${it.name} is not available on this device"}""",
-                                    )
-                                },
-                            )
+                            app.chat.sendToolResults(id, calls.map { runTool(it) })
                         }
                     }
                     "end" -> app.repo.finishStreaming(assistantId)
@@ -245,6 +259,34 @@ class MainActivity : ComponentActivity() {
 
         generating = false
         clearActiveRun()
+    }
+
+    /**
+     * Run one tool call on this device.
+     *
+     * The whole point of the native rewrite in one function: the model asks
+     * for the calendar and the calendar is right here, rather than four hops
+     * away through a backend and a WebView bridge.
+     *
+     * Arguments are normalised to an object because models occasionally send
+     * `"{}"` as a string, or nothing at all, and a tool that takes no
+     * arguments is the most common case of all.
+     */
+    private suspend fun runTool(call: org.tomsense.sync.WireToolCall): org.tomsense.sync.ToolResult {
+        val args = when (val raw = call.arguments) {
+            is kotlinx.serialization.json.JsonObject -> raw
+            is kotlinx.serialization.json.JsonPrimitive ->
+                runCatching {
+                    kotlinx.serialization.json.Json.parseToJsonElement(raw.content)
+                        as? kotlinx.serialization.json.JsonObject
+                }.getOrNull() ?: kotlinx.serialization.json.JsonObject(emptyMap())
+            else -> kotlinx.serialization.json.JsonObject(emptyMap())
+        }
+        return org.tomsense.sync.ToolResult(
+            id = call.id,
+            name = call.name,
+            content = app.tools.call(call.name, args),
+        )
     }
 
     // ─── active run, device-local ────────────────────────────────────────────
