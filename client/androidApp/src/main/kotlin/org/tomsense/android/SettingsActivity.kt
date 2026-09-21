@@ -33,7 +33,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -84,7 +83,6 @@ class SettingsActivity : ComponentActivity() {
                 var defaultModel by remember { mutableStateOf("") }
                 var error by remember { mutableStateOf<String?>(null) }
                 var adding by remember { mutableStateOf(false) }
-                var managing by remember { mutableStateOf<ProviderView?>(null) }
                 var query by remember { mutableStateOf("") }
                 var prefs by remember { mutableStateOf(UserPrefs()) }
 
@@ -257,10 +255,10 @@ class SettingsActivity : ComponentActivity() {
                             val matching = mine.filter { it.matches(query) }
                             ProviderCard(
                                 provider = p,
-                                models = if (query.isBlank()) mine else matching,
-                                defaultModel = defaultModel,
+                                models = mine,
+                                query = query,
                                 // A search forces every card with a hit open,
-                                // and hides the ones without.
+                                // and fades the ones without.
                                 forceExpanded = query.isNotBlank() && matching.isNotEmpty(),
                                 dimmed = query.isNotBlank() && matching.isEmpty(),
                                 onToggle = { on ->
@@ -271,14 +269,26 @@ class SettingsActivity : ComponentActivity() {
                                         }.onFailure { error = it.message }
                                     }
                                 },
-                                onSelectDefault = { value ->
-                                    defaultModel = value
+                                onDiscover = {
+                                    app.providers.discover(
+                                        org.tomsense.sync.DiscoverRequest(providerId = p.id),
+                                    ).models
+                                },
+                                onSetModels = { ids ->
                                     lifecycleScope.launch {
-                                        runCatching { app.providers.setDefaultModel(value) }
-                                            .onFailure { error = it.message }
+                                        runCatching {
+                                            app.providers.update(
+                                                p.id,
+                                                UpdateProvider(
+                                                    models = ids.map {
+                                                        org.tomsense.sync.WireModel(id = it)
+                                                    },
+                                                ),
+                                            )
+                                            refresh()
+                                        }.onFailure { error = it.message }
                                     }
                                 },
-                                onManageModels = { managing = p },
                                 onDelete = {
                                     lifecycleScope.launch {
                                         runCatching {
@@ -296,32 +306,6 @@ class SettingsActivity : ComponentActivity() {
                             }
                         }
                     }
-                }
-
-                managing?.let { target ->
-                    ManageModelsDialog(
-                        provider = target,
-                        onDiscover = {
-                            app.providers.discover(
-                                org.tomsense.sync.DiscoverRequest(providerId = target.id),
-                            ).models
-                        },
-                        onDismiss = { managing = null },
-                        onSave = { ids ->
-                            managing = null
-                            lifecycleScope.launch {
-                                runCatching {
-                                    app.providers.update(
-                                        target.id,
-                                        UpdateProvider(
-                                            models = ids.map { org.tomsense.sync.WireModel(id = it) },
-                                        ),
-                                    )
-                                    refresh()
-                                }.onFailure { error = it.message }
-                            }
-                        },
-                    )
                 }
 
                 if (adding) {
@@ -376,20 +360,26 @@ private fun SectionHeader(text: String) {
 }
 
 @Composable
-private fun ModelRow(model: ModelOption, selected: Boolean, onSelect: () -> Unit) {
+private fun ModelRow(
+    id: String,
+    caps: ModelOption?,
+    included: Boolean,
+    onToggle: (Boolean) -> Unit,
+) {
     Row(
         Modifier.fillMaxWidth().padding(vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        RadioButton(selected = selected, onClick = onSelect)
+        Checkbox(checked = included, onCheckedChange = onToggle)
         Column(Modifier.weight(1f)) {
-            Text(model.label, style = MaterialTheme.typography.bodyMedium)
-            // The provider name is no longer a tag — the row now sits inside
-            // that provider's card, so repeating it is noise.
+            Text(shortModelName(id), style = MaterialTheme.typography.bodyMedium)
+            // Capabilities are only known for models the edge already reports,
+            // i.e. ones that are configured. A freshly discovered id has none
+            // yet, and inventing tags for it would be a guess presented as fact.
             val tags = buildList {
-                if (model.vision) add("vision")
-                if (model.reasoning) add("reasoning")
-                model.context?.let { add("${it / 1000}k") }
+                if (caps?.vision == true) add("vision")
+                if (caps?.reasoning == true) add("reasoning")
+                caps?.context?.let { add("${it / 1000}k") }
             }
             if (tags.isNotEmpty()) {
                 Text(tags.joinToString(" · "), style = MaterialTheme.typography.labelSmall)
@@ -399,63 +389,72 @@ private fun ModelRow(model: ModelOption, selected: Boolean, onSelect: () -> Unit
 }
 
 /**
- * A provider, with its models folded inside it.
+ * A provider, with its model list folded inside it.
  *
- * The models used to be one flat list of everything across every provider,
- * above a separate list of providers. That made two things awkward at once:
- * which provider a model came from was a tag rather than its location, and the
- * only way to reach a provider's own settings was to scroll past every model
- * in the account. Nesting them puts a provider's key, its enabled state, its
- * model list and the default it supplies in one place.
+ * The expanded section is for ONE job: choosing which models this provider
+ * contributes. It deliberately does not set the default — that lives in
+ * Routing, alongside the other slots, because "which model answers" is a
+ * routing question and mixing it in here gave a single row two meanings
+ * (tap = make default, tick = include) that were easy to confuse.
  *
- * Collapsed by default because most of the time you are looking for a
- * provider, not a model — and an expanded OpenRouter is 300 rows.
+ * Add and remove happen in place rather than in a dialog. A dialog for this
+ * was a modal layer over a list to reach a list, and it hid the provider whose
+ * models were being edited.
+ *
+ * Collapsed by default, because most visits are looking for a provider rather
+ * than a model, and an expanded OpenRouter is 300 rows.
  */
 @Composable
 private fun ProviderCard(
     provider: ProviderView,
     models: List<ModelOption>,
-    defaultModel: String,
+    query: String,
     forceExpanded: Boolean,
     dimmed: Boolean,
     onToggle: (Boolean) -> Unit,
-    onSelectDefault: (String) -> Unit,
-    onManageModels: () -> Unit,
+    onDiscover: suspend () -> List<String>,
+    onSetModels: (List<String>) -> Unit,
     onDelete: () -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
-    // A search overrides the manual state, but does not destroy it: clearing
-    // the query returns each card to however the user had left it.
+    var available by remember { mutableStateOf<List<String>>(emptyList()) }
+    var fetching by remember { mutableStateOf(false) }
+    var note by remember { mutableStateOf<String?>(null) }
+    var manual by remember { mutableStateOf("") }
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+
+    // A search overrides the collapsed state but does not destroy it: clearing
+    // the query returns each card to however the user left it.
     val expanded = open || forceExpanded
+    // Never fade a card the user opened themselves — they may be looking at
+    // discovered models the outer search knows nothing about.
+    val faded = dimmed && !open
 
-    val holdsDefault = models.any { it.value == defaultModel }
+    val configured = provider.models.map { it.id }
+    val capsById = models.associateBy { it.value.substringAfter("::") }
 
-    Card(
-        Modifier.fillMaxWidth().alpha(if (dimmed) 0.4f else 1f),
-    ) {
+    // Configured first, then anything discovery turned up that is not already
+    // in use — so the models being relied on stay at the top where they can be
+    // unticked, rather than lost among hundreds.
+    val union = configured + available.filterNot { it in configured }
+    val shown = if (query.isBlank()) {
+        union
+    } else {
+        union.filter { it.contains(query.trim(), ignoreCase = true) }
+    }
+
+    Card(Modifier.fillMaxWidth().alpha(if (faded) 0.4f else 1f)) {
         Column(Modifier.fillMaxWidth().padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(
-                    Modifier.weight(1f).clickable { open = !open },
-                ) {
+                Column(Modifier.weight(1f).clickable { open = !open }) {
                     Text(provider.name, style = MaterialTheme.typography.bodyLarge)
                     val status = when {
                         // Cloudflare's "no key" is correct, not a missing setup step.
-                        provider.keyless -> "no key needed · ${provider.models.size} models"
-                        provider.hasKey -> "key set · ${provider.models.size} models"
+                        provider.keyless -> "no key needed · ${configured.size} models"
+                        provider.hasKey -> "key set · ${configured.size} models"
                         else -> "no key — add one to use this provider"
                     }
                     Text(status, style = MaterialTheme.typography.labelSmall)
-
-                    // Surfaced while collapsed, so the default model is
-                    // findable without opening every card to hunt for it.
-                    if (holdsDefault && !expanded) {
-                        Text(
-                            "default: ${shortModelName(defaultModel)}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                    }
                 }
                 IconButton(onClick = { open = !open }) {
                     Icon(
@@ -467,93 +466,11 @@ private fun ProviderCard(
             }
 
             if (expanded) {
-                if (models.isEmpty()) {
-                    Text(
-                        if (provider.enabled) {
-                            "No models configured. Add some below."
-                        } else {
-                            "Provider is off — its models are hidden from the picker."
-                        },
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.padding(vertical = 8.dp),
-                    )
-                } else {
-                    Text(
-                        "Tap a model to make it the default.",
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.padding(top = 8.dp),
-                    )
-                    models.forEach { m ->
-                        ModelRow(
-                            model = m,
-                            selected = m.value == defaultModel,
-                            onSelect = { onSelectDefault(m.value) },
-                        )
-                    }
-                }
-
-                Row {
-                    TextButton(onClick = onManageModels) { Text("Add or remove models") }
-                    if (!provider.builtin) {
-                        TextButton(onClick = onDelete) { Text("Delete") }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/**
- * Add or remove the models a provider offers, after it has been created.
- *
- * This exists because model discovery used to happen ONLY while adding a
- * provider, which froze the list at that moment. The search box on the main
- * screen then searched that frozen list — so it found what was already there
- * rather than what the provider actually offers, and a model added by the
- * provider later was unreachable without deleting and re-adding the whole
- * thing (losing the API key with it).
- *
- * The list shown is the union of what is configured and what discovery
- * returned, so the current selection is always visible and never silently
- * dropped by a filter or by a provider that has stopped advertising a model
- * the user still relies on.
- */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun ManageModelsDialog(
-    provider: ProviderView,
-    onDiscover: suspend () -> List<String>,
-    onDismiss: () -> Unit,
-    onSave: (List<String>) -> Unit,
-) {
-    var chosen by remember { mutableStateOf(provider.models.map { it.id }.toSet()) }
-    var available by remember { mutableStateOf<List<String>>(emptyList()) }
-    var filter by remember { mutableStateOf("") }
-    var fetching by remember { mutableStateOf(false) }
-    var note by remember { mutableStateOf<String?>(null) }
-    var manual by remember { mutableStateOf("") }
-
-    val scope = androidx.compose.runtime.rememberCoroutineScope()
-
-    // Configured first, then anything discovered that is not already
-    // configured — so the models in use stay at the top where they can be
-    // unticked, instead of being lost in a list of hundreds.
-    val union = remember(available, chosen) {
-        val configured = provider.models.map { it.id }
-        configured + available.filterNot { it in configured }
-    }
-    val shown = union.filter { it.contains(filter.trim(), ignoreCase = true) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(provider.name) },
-        text = {
-            Column(
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.heightIn(max = 520.dp).verticalScroll(rememberScrollState()),
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Button(
+                Row(
+                    Modifier.padding(top = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TextButton(
                         enabled = !fetching,
                         onClick = {
                             fetching = true
@@ -563,7 +480,7 @@ private fun ManageModelsDialog(
                                 available = found
                                 fetching = false
                                 note = if (found.isEmpty()) {
-                                    "Nothing returned — this provider may not list models. Add ids by hand below."
+                                    "Nothing returned — add ids by hand below."
                                 } else {
                                     "${found.size} available"
                                 }
@@ -580,75 +497,75 @@ private fun ManageModelsDialog(
                     }
                 }
 
-                Text(
-                    "${chosen.size} selected of ${union.size}",
-                    style = MaterialTheme.typography.labelSmall,
-                )
-
-                if (union.size > 8) {
-                    OutlinedTextField(
-                        filter,
-                        { filter = it },
-                        singleLine = true,
-                        label = { Text("Filter") },
-                        modifier = Modifier.fillMaxWidth(),
+                if (shown.isEmpty()) {
+                    Text(
+                        if (union.isEmpty()) {
+                            "No models yet — fetch the available list, or add an id by hand."
+                        } else {
+                            "Nothing here matches \"$query\"."
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(vertical = 8.dp),
                     )
                 }
 
-                // Capped for the same reason as the add dialog: OpenRouter
-                // returns 300+ and composing them all inside a dialog janks.
+                // Capped for the same reason the dialog was: OpenRouter returns
+                // 300+, and composing them all inside a scrolling list janks.
                 shown.take(60).forEach { id ->
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(
-                            checked = id in chosen,
-                            onCheckedChange = {
-                                chosen = if (id in chosen) chosen - id else chosen + id
-                            },
-                        )
-                        Text(id, style = MaterialTheme.typography.bodySmall)
-                    }
+                    ModelRow(
+                        id = id,
+                        caps = capsById[id],
+                        included = id in configured,
+                        onToggle = { include ->
+                            // Applied immediately, like the enable switch just
+                            // above it. A Save button here would be the only
+                            // control on this screen that defers.
+                            val next = if (include) configured + id else configured - id
+                            onSetModels(next.distinct().sorted())
+                        },
+                    )
                 }
                 if (shown.size > 60) {
                     Text(
-                        "…${shown.size - 60} more — narrow the filter",
+                        "…${shown.size - 60} more — narrow the search above",
                         style = MaterialTheme.typography.labelSmall,
                     )
                 }
 
-                // Always available, not just when discovery fails: a provider
-                // can serve a model it does not advertise, and Cloudflare
-                // ships new ones faster than the bundled catalogue is
-                // regenerated.
+                // Always available, not only when discovery fails: a provider
+                // can serve a model it does not advertise, and Cloudflare ships
+                // new ones faster than the bundled catalogue is regenerated.
                 OutlinedTextField(
                     manual,
                     { manual = it },
                     label = { Text("Add model ID by hand") },
                     singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
                 )
-                if (manual.isNotBlank()) {
-                    TextButton(onClick = {
-                        val id = manual.trim()
-                        chosen = chosen + id
-                        available = (available + id).distinct()
-                        manual = ""
-                    }) { Text("Add \"${manual.trim()}\"") }
+                Row {
+                    if (manual.isNotBlank()) {
+                        TextButton(onClick = {
+                            val id = manual.trim()
+                            available = (available + id).distinct()
+                            onSetModels((configured + id).distinct().sorted())
+                            manual = ""
+                        }) { Text("Add \"${manual.trim()}\"") }
+                    }
+                    if (!provider.builtin) {
+                        TextButton(onClick = onDelete) { Text("Delete provider") }
+                    }
                 }
 
-                if (provider.builtin && chosen.isEmpty()) {
+                if (provider.builtin && configured.isEmpty()) {
                     Text(
-                        "With nothing selected, Cloudflare offers its whole catalogue. " +
-                            "Turn the provider off instead if you want none of it.",
+                        "With nothing ticked, Cloudflare offers its whole catalogue. " +
+                            "Switch the provider off instead if you want none of it.",
                         style = MaterialTheme.typography.labelSmall,
                     )
                 }
             }
-        },
-        confirmButton = {
-            TextButton(onClick = { onSave(chosen.toList().sorted()) }) { Text("Save") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
-    )
+        }
+    }
 }
 
 /**
