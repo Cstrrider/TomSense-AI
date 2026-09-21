@@ -54,7 +54,15 @@ crons = ["*/15 * * * *"]
 [vars]
 # Tier defaults (spec §4). Tier 0 is on-device and has no entry here.
 TIER1_MODEL = "cf::@cf/google/gemma-4-26b-a4b-it"
+# Utility tier: titles, follow-ups, the auto-route classifier. Deliberately a
+# SMALL NON-REASONING model. A reasoning model here spends a tiny token budget
+# thinking and returns empty content, which silently disables every feature
+# built on it — the auto-route classifier failed exactly this way on gemma-4.
+TASK_MODEL = "cf::@cf/meta/llama-3.2-3b-instruct"
 TIER2_MODEL = "cf::@cf/meta/llama-4-scout-17b-16e-instruct"
+# Budget mode. Dormant unless a user supplies an analytics token in settings.
+NEURON_DAILY_LIMIT = "10000"
+NEURON_SOFT_CAP_PCT = "80"
 STT_MODEL   = "@cf/deepgram/flux"
 TTS_MODEL   = "@cf/deepgram/aura-2"
 

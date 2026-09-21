@@ -11,7 +11,12 @@ export interface Env {
   HOMELINK: DurableObjectNamespace;
 
   TIER1_MODEL: string;
+  /** Small non-reasoning model for the utility tier; see task_model.ts. */
+  TASK_MODEL: string;
   TIER2_MODEL: string;
+  /** Budget mode: free daily neuron allowance, and the % at which to downshift. */
+  NEURON_DAILY_LIMIT: string;
+  NEURON_SOFT_CAP_PCT: string;
   STT_MODEL: string;
   TTS_MODEL: string;
 
@@ -57,6 +62,13 @@ export type StreamEvent =
   | { type: "reasoning"; text: string }
   | { type: "heartbeat" }
   | { type: "run"; runId: string; status: string }
+  /**
+   * A routing override worth telling the user about — "answering with your
+   * Vision model", "budget mode". Persisted with the run, so it replays on
+   * reconnect: a model swap the user never sees is a model swap they will
+   * eventually be confused by.
+   */
+  | { type: "notice"; text: string }
   | { type: "done"; content: string; toolCalls: ToolCall[]; usage: Usage; stalled?: boolean }
   | { type: "end"; status: string; error?: string };
 

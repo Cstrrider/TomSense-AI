@@ -18,9 +18,9 @@
  *   and intermediaries may close an idle connection.
  */
 
-import type { StreamEvent, ToolCall, Usage, Provider, ChatMessage } from "./types";
+import type { StreamEvent, ToolCall, Usage, Provider, ChatMessage, Env } from "./types";
 import { modelCapabilities } from "./capabilities";
-import { flattenForTextModel } from "./providers";
+import { flattenForTextModel, chatCompletionsUrl } from "./providers";
 
 /** No token at all for this long → treat the stream as stalled. */
 const STALL_MS = 25_000;
@@ -48,6 +48,44 @@ export interface RoundOptions {
    * no credential at all.
    */
   ai?: Ai;
+  /**
+   * Cache-affinity key — pins this call to the instance holding its prefix
+   * cache. See [sessionHeaders]. Omit and the discount simply does not apply.
+   */
+  session?: string;
+  /**
+   * Raises the reasoning budget for think mode.
+   *
+   * Sent only to models that actually understand it. Stable notes the inverse
+   * hazard too: gpt-oss models need an explicit LOW effort or they burn the
+   * token budget on invisible reasoning, so the default is set rather than
+   * omitted.
+   */
+  reasoningEffort?: "low" | "high";
+}
+
+/**
+ * "Pin this to the cache-holding instance" header, per provider.
+ *
+ *   Cloudflare Workers AI  `x-session-affinity`  (stable measured the hit
+ *                                                 ratio going ~60% → 80%)
+ *   OpenRouter             `x-session-id`        (sticky routing, ≤256 chars)
+ *
+ * Everything else gets nothing: those providers either auto-pin after the
+ * first hit or do not cache, and an unrecognised header can upset a strict
+ * OpenAI-compatible server. No session, no header.
+ */
+function sessionHeaders(
+  provider: Provider,
+  session?: string,
+): Record<string, string> {
+  if (!session) return {};
+  const base = provider.baseUrl || "";
+  if (base.includes("openrouter.ai")) return { "x-session-id": session.slice(0, 256) };
+  if (provider.kind === "cf" || base.includes("cloudflare.com")) {
+    return { "x-session-affinity": session };
+  }
+  return {};
 }
 
 function shortName(modelId: string): string {
@@ -146,10 +184,18 @@ async function buildRequest(
     ...provider.extraBody, // per-provider passthrough (OpenRouter routing, etc.)
   };
   if (tools?.length) body["tools"] = tools;
+  if (modelId.includes("gpt-oss")) {
+    body["reasoning_effort"] = opts.reasoningEffort ?? "low";
+  } else if (opts.reasoningEffort) {
+    body["reasoning_effort"] = opts.reasoningEffort;
+  }
   if (temperature !== undefined) body["temperature"] = temperature;
   if (maxTokens !== undefined) body["max_tokens"] = maxTokens;
 
-  const headers: Record<string, string> = { "content-type": "application/json" };
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    ...sessionHeaders(provider, opts.session),
+  };
   if (provider.apiKey) {
     if (provider.kind === "anthropic") {
       headers["x-api-key"] = provider.apiKey;
@@ -325,8 +371,17 @@ async function* streamWorkersAi(opts: RoundOptions): AsyncGenerator<StreamEvent>
     if (tools?.length) input["tools"] = tools;
     if (temperature !== undefined) input["temperature"] = temperature;
     if (maxTokens !== undefined) input["max_tokens"] = maxTokens;
+    // Same rule as the fetch path: gpt-oss needs an explicit effort or it
+    // spends the whole budget reasoning invisibly.
+    if (modelId.includes("gpt-oss")) {
+      input["reasoning_effort"] = opts.reasoningEffort ?? "low";
+    } else if (opts.reasoningEffort) {
+      input["reasoning_effort"] = opts.reasoningEffort;
+    }
 
-    const result = (await ai.run(modelId as never, input as never)) as unknown;
+    // Cache affinity travels in the binding options, not a header.
+    const runOpts = opts.session ? { sessionId: opts.session } : undefined;
+    const result = (await ai.run(modelId as never, input as never, runOpts as never)) as unknown;
     const body = result as ReadableStream<Uint8Array>;
     const reader = body.pipeThrough(new TextDecoderStream()).getReader();
 
@@ -475,4 +530,44 @@ export async function* streamWithFallback(
     usage: fbTerminal?.usage ?? emptyUsage(),
     stalled: true,
   };
+}
+
+/**
+ * Run one short completion and return its text.
+ *
+ * For the utility tier — titles, follow-ups, the auto-route classifier — where
+ * the caller wants an answer, not a stream. Implemented by draining
+ * [streamRound] rather than duplicating request construction, so utility calls
+ * inherit provider quirks, vision flattening and session affinity for free.
+ *
+ * Returns "" rather than throwing on a stalled or empty round: a utility call
+ * is an enhancement, and its failure must never take the turn down with it.
+ */
+export async function completeOnce(
+  env: Env,
+  provider: Provider,
+  modelId: string,
+  opts: {
+    messages: ChatMessage[];
+    maxTokens?: number;
+    session?: string;
+    signal?: AbortSignal;
+  },
+): Promise<string> {
+  const round: RoundOptions = {
+    provider,
+    modelId,
+    messages: opts.messages,
+    maxTokens: opts.maxTokens ?? 64,
+    session: opts.session,
+    signal: opts.signal,
+    ai: env.AI,
+  };
+
+  let text = "";
+  for await (const ev of streamRound(round, chatCompletionsUrl(provider))) {
+    if (ev.type === "text") text += ev.text;
+    else if (ev.type === "done") return (ev.content || text).trim();
+  }
+  return text.trim();
 }

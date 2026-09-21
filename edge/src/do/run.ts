@@ -75,6 +75,10 @@ interface RunRecord {
   reasoning: string;
   rounds: CompletedRound[];
   pendingToolCalls: ToolCall[];
+  /** Routing overrides to show the user; replayed on reconnect. */
+  notices: string[];
+  /** "high" when think mode routed this turn. */
+  reasoningEffort: "high" | null;
   error?: string;
 }
 
@@ -137,6 +141,8 @@ export class DetachedRun implements DurableObject {
       fallbackModel: string | null;
       messages: ChatMessage[];
       tools?: unknown[];
+      notices?: string[];
+      reasoningEffort?: "high" | null;
     };
 
     this.record = {
@@ -152,6 +158,8 @@ export class DetachedRun implements DurableObject {
       reasoning: "",
       rounds: [],
       pendingToolCalls: [],
+      notices: body.notices ?? [],
+      reasoningEffort: body.reasoningEffort ?? null,
     };
     await this.persist(true);
 
@@ -235,6 +243,8 @@ export class DetachedRun implements DurableObject {
    */
   private replayEvents(rec: RunRecord): StreamEvent[] {
     const out: StreamEvent[] = [{ type: "run", runId: rec.id, status: rec.status }];
+    // Before any content: the notice explains the model that produced it.
+    for (const n of rec.notices ?? []) out.push({ type: "notice", text: n });
     if (rec.reasoning) out.push({ type: "reasoning", text: rec.reasoning });
     if (rec.content) out.push({ type: "text", text: rec.content });
     for (const r of rec.rounds) {
@@ -398,6 +408,10 @@ export class DetachedRun implements DurableObject {
         fallback,
         signal: this.abort.signal,
         ai: this.env.AI,
+        reasoningEffort: rec.reasoningEffort ?? undefined,
+        // Pin the whole conversation to one cache-holding instance. Keyed by
+        // conversation, unlike the utility tier which keys by purpose.
+        session: rec.convId,
       },
       (p) => chatCompletionsUrl(p),
     );

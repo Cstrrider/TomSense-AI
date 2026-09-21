@@ -25,6 +25,8 @@ import {
   discoverModels,
   PROVIDER_PRESETS,
 } from "./providers_api";
+import { routeChat } from "./routing";
+import { getPrefs, setPrefs, setAnalyticsKey, hasAnalyticsKey } from "./prefs";
 
 export { VoiceSession } from "./do/voice";
 export { DetachedRun } from "./do/run";
@@ -122,6 +124,33 @@ export default {
           presets: PROVIDER_PRESETS,
         });
       }
+      if (path === "/me/prefs") {
+        if (req.method === "GET") {
+          return json({
+            ...(await getPrefs(env, who.userId)),
+            // Whether a key EXISTS, never the key. A settings screen that can
+            // display a credential is one that can leak it.
+            hasAnalyticsKey: await hasAnalyticsKey(env, who.userId),
+          });
+        }
+        if (req.method === "PUT") {
+          const b = (await req.json()) as {
+            tool_models?: Record<string, string>;
+            auto_route?: boolean;
+            cfAnalyticsKey?: string;
+            cfAccountId?: string;
+          };
+          if (b.cfAnalyticsKey !== undefined) {
+            await setAnalyticsKey(env, who, b.cfAnalyticsKey);
+          }
+          if (b.cfAccountId !== undefined) {
+            await env.DB.prepare(`UPDATE users SET cf_account_id = ? WHERE id = ?`)
+              .bind(b.cfAccountId.trim(), who.userId)
+              .run();
+          }
+          return json(await setPrefs(env, who, b));
+        }
+      }
       if (path === "/me/default-model" && req.method === "PUT") {
         const b = (await req.json()) as { model?: string };
         await setDefaultModel(env, who, b.model ?? "");
@@ -173,28 +202,42 @@ async function chat(req: Request, env: Env, who: Principal): Promise<Response> {
     messages: ChatMessage[];
     model?: string;
     tools?: unknown[];
+    /** Route to the reasoning model and raise the effort — see routing.ts. */
+    think?: boolean;
   };
 
+  // A missing conversationId used to surface as an opaque D1_TYPE_ERROR from
+  // the runs INSERT several lines below, which reads like a database fault
+  // rather than a malformed request.
+  if (!body.conversationId) {
+    return json({ error: "conversationId is required" }, 400);
+  }
+
+  // The full routing stack: explicit pick, think mode, vision override,
+  // difficulty escalation, saved default, then the budget cap over the top.
   // Honours which providers are actually enabled and keyed, so disabling
   // Cloudflare genuinely stops Cloudflare traffic rather than just hiding it
   // from the picker.
-  const picked = await resolveChatModel(env, who, body.model);
-  if ("error" in picked) return json(picked, 400);
+  const routed = await routeChat(env, who, {
+    messages: body.messages,
+    requested: body.model,
+    think: body.think,
+  });
+  if ("error" in routed) return json(routed, 400);
 
-  const { providerId } = parseModelStr(picked.model, env.TIER2_MODEL);
+  const { providerId } = parseModelStr(routed.model, env.TIER2_MODEL);
   if (!(await resolveProvider(env, who.userId, providerId))) {
     return json({ error: `unknown provider ${providerId}` }, 400);
   }
 
-  // Stall fallback, skipped entirely when nothing suitable is available.
-  const fallbackModel = await resolveFallbackModel(env, who, picked.model);
+  const fallbackModel = routed.fallbackModel;
 
   const runId = crypto.randomUUID();
   await env.DB.prepare(
     `INSERT INTO runs (id, user_id, conv_id, status, model, started_at)
      VALUES (?, ?, ?, 'running', ?, ?)`,
   )
-    .bind(runId, who.userId, body.conversationId, picked.model, Date.now())
+    .bind(runId, who.userId, body.conversationId, routed.model, Date.now())
     .run();
 
   const stub = env.RUN.get(env.RUN.idFromName(runId));
@@ -205,10 +248,14 @@ async function chat(req: Request, env: Env, who: Principal): Promise<Response> {
         id: runId,
         userId: who.userId,
         convId: body.conversationId,
-        model: picked.model,
+        model: routed.model,
         fallbackModel,
         messages: body.messages,
         tools: body.tools,
+        reasoningEffort: routed.reasoningEffort,
+        // Rendered as the first chunks, so a surprising model choice is
+        // never silent. That visibility is the point of the override.
+        notices: routed.notices,
       }),
     }),
   );
