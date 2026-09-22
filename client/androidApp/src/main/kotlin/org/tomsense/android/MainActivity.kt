@@ -4,10 +4,17 @@ import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Chat
+import androidx.compose.material.icons.filled.Newspaper
 import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.Text
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.rememberCoroutineScope
@@ -15,6 +22,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -38,6 +46,15 @@ import org.tomsense.android.tools.PermissionGate
 import org.tomsense.tools.schemas
 import org.tomsense.ui.ChatScreen
 import org.tomsense.ui.ConversationDrawer
+
+/**
+ * The two top-level surfaces.
+ *
+ * Kept as a plain enum rather than a nav graph: there are two destinations,
+ * neither takes arguments, and the chat screen's state has to survive a switch
+ * to News and back — which a NavHost would tear down by default.
+ */
+enum class HomeTab { Chat, News }
 
 class MainActivity : ComponentActivity() {
 
@@ -222,6 +239,19 @@ class MainActivity : ComponentActivity() {
                     var query by remember { mutableStateOf("") }
                     var results by remember { mutableStateOf<SearchResults?>(null) }
 
+                    var tab by remember { mutableStateOf(HomeTab.Chat) }
+
+                    // The SAME state class the home-screen panel uses, so the
+                    // taste vector, the refetch cooldown and the feedback calls
+                    // behave identically on both surfaces. Remembered here so
+                    // switching tabs does not refetch.
+                    val feedState = remember {
+                        org.tomsense.android.feed.FeedPanelState(
+                            onOpenApp = { startActivity(it) },
+                            onDismiss = { tab = HomeTab.Chat },
+                        )
+                    }
+
                     // Debounced so a fast typist does not run a query per
                     // keystroke. Restarting on every change cancels the
                     // previous wait, so only the last pause actually searches.
@@ -283,46 +313,77 @@ class MainActivity : ComponentActivity() {
                                     onSignIn = { Login.start(this@MainActivity, app.baseUrl) },
                                 )
                             }
-                            ChatScreen(
-                                messages = messages,
-                                syncLabel = syncStatus.label(),
-                                onSend = ::send,
-                                isGenerating = generating,
-                                onStop = ::stop,
-                                onRegenerate = ::regenerate,
-                                title = conversations.firstOrNull { it.id == convId }
-                                    ?.title.orEmpty(),
-                                onOpenDrawer = { scope.launch { drawerState.open() } },
-                                prefill = prefill,
-                                onPrefillConsumed = { prefill = "" },
-                                notices = notices,
-                                thinkEnabled = think,
-                                onThinkChange = { think = it },
-                                onAttach = { picker.launch("*/*") },
-                                onMic = ::toggleMic,
-                                listening = voice.phase == org.tomsense.android.voice.VoiceController.Phase.Listening,
-                                speaking = voice.phase == org.tomsense.android.voice.VoiceController.Phase.Speaking,
-                                partialTranscript = voice.partial,
-                                pendingAttachments = pending,
-                                onRemoveAttachment = { pending = pending - it },
-                                loadAttachment = { key ->
-                                    runCatching { app.edge.downloadFile(key) }.getOrNull()
-                                },
-                                // Branching needs something to branch FROM,
-                                // and exporting an empty chat produces a file
-                                // with a heading and nothing under it.
-                                onBranch = if (messages.isNotEmpty()) ::branchHere else null,
-                                onExport = if (messages.isNotEmpty()) ::exportChat else null,
-                                onShare = if (messages.isNotEmpty()) ::shareChat else null,
-                                onOpenSettings = {
-                                    startActivity(
-                                        android.content.Intent(
-                                            this@MainActivity,
-                                            SettingsActivity::class.java,
-                                        ),
+                            Box(Modifier.weight(1f)) {
+                                if (tab == HomeTab.News) {
+                                    org.tomsense.android.feed.NewsScreen(app, feedState)
+                                } else {
+                                    ChatScreen(
+                                    messages = messages,
+                                    syncLabel = syncStatus.label(),
+                                    onSend = ::send,
+                                    isGenerating = generating,
+                                    onStop = ::stop,
+                                    onRegenerate = ::regenerate,
+                                    title = conversations.firstOrNull { it.id == convId }
+                                        ?.title.orEmpty(),
+                                    onOpenDrawer = { scope.launch { drawerState.open() } },
+                                    prefill = prefill,
+                                    onPrefillConsumed = { prefill = "" },
+                                    notices = notices,
+                                    thinkEnabled = think,
+                                    onThinkChange = { think = it },
+                                    onAttach = { picker.launch("*/*") },
+                                    onMic = ::toggleMic,
+                                    listening = voice.phase == org.tomsense.android.voice.VoiceController.Phase.Listening,
+                                    speaking = voice.phase == org.tomsense.android.voice.VoiceController.Phase.Speaking,
+                                    partialTranscript = voice.partial,
+                                    pendingAttachments = pending,
+                                    onRemoveAttachment = { pending = pending - it },
+                                    loadAttachment = { key ->
+                                        runCatching { app.edge.downloadFile(key) }.getOrNull()
+                                    },
+                                    // Branching needs something to branch FROM,
+                                    // and exporting an empty chat produces a file
+                                    // with a heading and nothing under it.
+                                    onBranch = if (messages.isNotEmpty()) ::branchHere else null,
+                                    onExport = if (messages.isNotEmpty()) ::exportChat else null,
+                                    onShare = if (messages.isNotEmpty()) ::shareChat else null,
+                                    onOpenSettings = {
+                                        startActivity(
+                                            android.content.Intent(
+                                                this@MainActivity,
+                                                SettingsActivity::class.java,
+                                            ),
+                                        )
+                                    },
                                     )
-                                },
-                            )
+                                }
+                            }
+
+                            NavigationBar {
+                                NavigationBarItem(
+                                    selected = tab == HomeTab.Chat,
+                                    onClick = { tab = HomeTab.Chat },
+                                    icon = {
+                                        Icon(
+                                            Icons.AutoMirrored.Filled.Chat,
+                                            contentDescription = null,
+                                        )
+                                    },
+                                    label = { Text("Chat") },
+                                )
+                                NavigationBarItem(
+                                    selected = tab == HomeTab.News,
+                                    onClick = { tab = HomeTab.News },
+                                    icon = {
+                                        Icon(
+                                            Icons.Filled.Newspaper,
+                                            contentDescription = null,
+                                        )
+                                    },
+                                    label = { Text("News") },
+                                )
+                            }
                         }
                     }
                 }

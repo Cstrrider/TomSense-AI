@@ -12,6 +12,8 @@ import io.ktor.client.request.post
 import io.ktor.client.request.setBody
 import io.ktor.http.ContentType
 import io.ktor.http.contentType
+import io.ktor.http.isSuccess
+import java.io.IOException
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -56,10 +58,23 @@ class NewsClient(private val http: HttpClient) {
     @Serializable
     private data class Feedback(val id: String, val action: String)
 
-    suspend fun feed(config: Config, limit: Int = 30): Feed =
-        http.get("${config.baseUrl}/feed.json?limit=$limit") {
+    /**
+     * The status check is not ceremony.
+     *
+     * Ktor does not throw on a non-2xx by default, so without it a 401 from a
+     * rotated key gets handed to the JSON parser and surfaces as an
+     * incomprehensible deserialization error about the Worker's error body —
+     * which looks nothing like "your key is wrong".
+     */
+    suspend fun feed(config: Config, limit: Int = 30): Feed {
+        val response = http.get("${config.baseUrl}/feed.json?limit=$limit") {
             header("Authorization", "Bearer ${config.apiKey}")
-        }.body()
+        }
+        if (!response.status.isSuccess()) {
+            throw IOException("news-worker returned HTTP ${response.status.value}")
+        }
+        return response.body()
+    }
 
     /**
      * Thumbs up or down.

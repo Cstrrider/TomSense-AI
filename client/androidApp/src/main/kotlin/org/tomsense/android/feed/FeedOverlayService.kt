@@ -52,6 +52,10 @@ import org.tomsense.android.assist.SessionHost
  *      `Modifier.alpha(progress)` starting at zero renders a fully
  *      transparent panel if the launcher never delivers a scroll event, which
  *      is exactly the blank screen it looks like.
+ *   5. SUBMIT every params change with `updateViewLayout`. Assigning
+ *      `window.attributes` is not enough when the decor view was added by
+ *      hand — see [updateParams]. Without it the window attaches at alpha 0
+ *      and stays there, logging success the whole time.
  *
  * Touchability is toggled with visibility for the same reason: the window is
  * created NOT_TOUCHABLE and NOT_FOCUSABLE so it cannot eat home-screen
@@ -68,6 +72,7 @@ class FeedOverlayService : Service() {
     private var window: Window? = null
     private var windowView: View? = null
     private var windowManager: WindowManager? = null
+    private var layoutParams: WindowManager.LayoutParams? = null
     private var host: SessionHost? = null
 
     private var progress = 0f
@@ -110,14 +115,25 @@ class FeedOverlayService : Service() {
         }
 
         override fun endScroll() = onMain {
-            if (progress <= 0.01f) setVisible(false)
+            if (progress <= 0.01f) {
+                setVisible(false)
+            } else {
+                // Settled OPEN, and the alpha has to be forced back to 1 here.
+                // onScroll drives it down to track the finger, and the
+                // launcher does not reliably send a final onScroll(1f) — while
+                // setVisible(true) is a no-op because the panel already became
+                // visible on startScroll. Without this the window is stranded
+                // at whatever progress arrived last and the home screen shows
+                // straight through the panel.
+                progress = 1f
+                state.progress = 1f
+                setVisible(true)
+                setWindowAlpha(1f)
+            }
         }
 
         override fun openOverlay(flags: Int) = onMain {
-            progress = 1f
-            state.progress = 1f
-            setVisible(true)
-            runCatching { callback?.overlayScrollChanged(1f) }
+            openFully()
         }
 
         override fun closeOverlay(flags: Int) = onMain { closePanel() }
@@ -191,7 +207,35 @@ class FeedOverlayService : Service() {
             val content = ComposeView(this).apply {
                 setContent { MaterialTheme { FeedPanel(app, state) } }
             }
-            sessionHost.attachTo(content)
+
+            // Dismissal lives in the view layer, above Compose — see
+            // DismissFrameLayout. The back key stays as a SECOND, independent
+            // way out: the open panel covers the launcher, so a bug in one
+            // dismissal path must not make the home screen unreachable.
+            val root = DismissFrameLayout(this).apply {
+                addView(content)
+                onDragTo = { p ->
+                    progress = p
+                    state.progress = p
+                    setWindowAlpha(p)
+                    runCatching { callback?.overlayScrollChanged(p) }
+                }
+                onDragSettled = { p ->
+                    if (p < SETTLE_CLOSED) closePanel() else openFully()
+                }
+                isFocusableInTouchMode = true
+                setOnKeyListener { _, keyCode, event ->
+                    if (keyCode == android.view.KeyEvent.KEYCODE_BACK &&
+                        event.action == android.view.KeyEvent.ACTION_UP
+                    ) {
+                        closePanel()
+                        true
+                    } else {
+                        false
+                    }
+                }
+            }
+            sessionHost.attachTo(root)
             sessionHost.resume()
 
             // The launcher's own params, mutated — not replaced. It sets
@@ -209,14 +253,19 @@ class FeedOverlayService : Service() {
             lp.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_STATE_UNSPECIFIED
 
             win.attributes = lp
-            win.setContentView(content)
+            win.setContentView(root)
 
+            // setAttributes COPIES into the window's own params, so hold on to
+            // the object that actually gets added — that is the one every
+            // later update has to mutate and re-submit.
             val decor = win.decorView
-            wm.addView(decor, win.attributes)
+            val attached = win.attributes
+            wm.addView(decor, attached)
 
             window = win
             windowView = decor
             windowManager = wm
+            layoutParams = attached
             visible = false
             Log.i(TAG, "panel window attached")
             return true
@@ -241,41 +290,65 @@ class FeedOverlayService : Service() {
         if (visible == show) return
         visible = show
         state.visible = show
-        setFocusable(show)
-        setWindowAlpha(if (show) 1f else 0f)
-    }
 
-    private fun setFocusable(focusable: Boolean) {
-        val win = window ?: return
-        val attrs = win.attributes
+        // Alpha and focusability in ONE submission: they belong to the same
+        // params object, so pushing them separately would round-trip the
+        // window twice for a single state change.
         val mask = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
             WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-
-        val changed = if (focusable) {
-            (attrs.flags and mask) != 0
-        } else {
-            (attrs.flags and mask) != mask
+        val pushed = updateParams { p ->
+            p.flags = if (show) p.flags and mask.inv() else p.flags or mask
+            p.alpha = if (show) 1f else 0f
         }
-        if (!changed) return
-
-        attrs.flags = if (focusable) attrs.flags and mask.inv() else attrs.flags or mask
-        win.attributes = attrs
-        if (focusable) windowView?.requestFocus()
+        if (pushed && show) windowView?.requestFocus()
+        Log.d(TAG, "panel ${if (show) "open" else "closed"} (pushed=$pushed)")
     }
 
     private fun setWindowAlpha(alpha: Float) {
-        val win = window ?: return
-        val attrs = win.attributes
         val target = alpha.coerceIn(0f, 1f)
-        if (attrs.alpha == target) return
-        attrs.alpha = target
-        win.attributes = attrs
+        if (layoutParams?.alpha == target) return
+        updateParams { it.alpha = target }
+    }
+
+    /**
+     * Mutate the live window params and hand them back to the WindowManager.
+     *
+     * The submission is the part that was missing. `window.attributes = …`
+     * changes nothing on screen here: Window dispatches the change to its
+     * Callback, which is the Dialog, and Dialog only forwards it to
+     * updateViewLayout once `mDecor` has been set — which happens in show().
+     * This dialog is deliberately never shown, so nothing forwards anything.
+     * The decor view was added to the WindowManager here, so it has to be
+     * updated here, or the window keeps the alpha 0 it was created with and
+     * the panel is invisible forever while every log line says it attached.
+     */
+    private fun updateParams(block: (WindowManager.LayoutParams) -> Unit): Boolean {
+        val wm = windowManager ?: return false
+        val view = windowView ?: return false
+        val params = layoutParams ?: return false
+
+        block(params)
+        window?.attributes = params
+        return runCatching { wm.updateViewLayout(view, params); true }
+            .onFailure { Log.e(TAG, "updating the panel window failed", it) }
+            .getOrDefault(false)
+    }
+
+    private fun openFully() {
+        progress = 1f
+        state.progress = 1f
+        setVisible(true)
+        // Explicit because setVisible only acts on a CHANGE: a panel that is
+        // already visible would keep whatever partial alpha the drag left.
+        setWindowAlpha(1f)
+        runCatching { callback?.overlayScrollChanged(1f) }
     }
 
     private fun closePanel() {
         progress = 0f
         state.progress = 0f
         setVisible(false)
+        setWindowAlpha(0f)
         runCatching { callback?.overlayScrollChanged(0f) }
     }
 
@@ -287,6 +360,7 @@ class FeedOverlayService : Service() {
         windowView = null
         window = null
         windowManager = null
+        layoutParams = null
         host?.destroy()
         host = null
         visible = false
@@ -311,6 +385,9 @@ class FeedOverlayService : Service() {
     private companion object {
         const val TAG = "TomSenseFeed"
         const val STATUS_ATTACHED = 1
+
+        /** Below this, a released drag closes rather than snapping back open. */
+        const val SETTLE_CLOSED = 0.65f
 
         /**
          * TYPE_DRAWN_APPLICATION. Not public API, and not a sub-panel: the

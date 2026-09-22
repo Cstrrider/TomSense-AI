@@ -71,6 +71,9 @@ fun FeedPanel(app: TomsenseApp, state: FeedPanelState) {
     // FeedOverlayService — a Modifier.alpha driven by scroll progress renders
     // a fully transparent panel whenever the launcher does not deliver a
     // scroll event, which looks exactly like a blank home screen.
+    // Swipe-to-dismiss is NOT here. It is intercepted above Compose in
+    // DismissFrameLayout, because the LazyColumn below claims horizontal
+    // drags before a parent pointerInput ever sees them.
     Column(
         Modifier
             .fillMaxSize()
@@ -184,8 +187,9 @@ private fun RecentRow(title: String, onClick: () -> Unit) {
     )
 }
 
+/** Shared with the in-app News tab — the panel is not the only surface. */
 @Composable
-private fun NewsCard(
+internal fun NewsCard(
     item: NewsClient.Item,
     thumb: ImageBitmap?,
     onOpen: () -> Unit,
@@ -260,7 +264,12 @@ class FeedPanelState(
     private var app: TomsenseApp? = null
     private var lastLoad = 0L
 
-    suspend fun load(application: TomsenseApp) {
+    /**
+     * @param force skips the refetch cooldown. Only a deliberate pull-to-
+     * refresh should set it — an automatic reload inside the window would just
+     * spend an impression to receive the same snapshot back.
+     */
+    suspend fun load(application: TomsenseApp, force: Boolean = false) {
         app = application
 
         // Local first, always: recent chats and the glance line come from
@@ -276,7 +285,7 @@ class FeedPanelState(
         // The worker's own snapshot lasts ten minutes; refetching faster than
         // that returns the same order and only costs an impression.
         val now = System.currentTimeMillis()
-        if (news.isNotEmpty() && now - lastLoad < 5 * 60_000) return
+        if (!force && news.isNotEmpty() && now - lastLoad < 5 * 60_000) return
         lastLoad = now
 
         loading = true
@@ -289,11 +298,23 @@ class FeedPanelState(
         }
 
         val client = NewsClient(application.httpClient)
-        val result = runCatching { client.feed(config) }.getOrNull()
+        // Never .getOrNull() here. A swallowed exception is the difference
+        // between "the key was rotated" and "there is no network", and both
+        // render as the same grey line of text.
+        val attempt = runCatching { client.feed(config) }
+        attempt.exceptionOrNull()?.let {
+            android.util.Log.w("TomSenseFeed", "news fetch failed for ${config.baseUrl}", it)
+        }
+        val result = attempt.getOrNull()
         loading = false
 
         if (result == null) {
-            error = if (news.isEmpty()) "Couldn't reach the news feed." else null
+            error = if (news.isEmpty()) {
+                val reason = attempt.exceptionOrNull()?.message?.take(80)
+                if (reason.isNullOrBlank()) "Couldn't reach the news feed." else "News feed: $reason"
+            } else {
+                null
+            }
             return
         }
         news = result.items

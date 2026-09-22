@@ -3,6 +3,11 @@ plugins {
     alias(libs.plugins.kotlinAndroid)
     alias(libs.plugins.composeMultiplatform)
     alias(libs.plugins.composeCompiler)
+    // Required by feed/NewsClient.kt. Without it @Serializable compiles
+    // cleanly and then fails at RUNTIME with "Serializer for class 'Feed' is
+    // not found" — the annotation is inert unless this plugin generates the
+    // serializer, and it is NOT inherited from :shared.
+    alias(libs.plugins.kotlinSerialization)
 }
 
 android {
