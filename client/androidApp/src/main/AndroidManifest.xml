@@ -130,6 +130,20 @@
             </intent-filter>
         </service>
 
+        <!-- Required alongside the voice-interaction service. Does not
+             recognise speech yet; see TomsenseRecognitionService. -->
+        <service
+            android:name=".assist.TomsenseRecognitionService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.speech.RecognitionService" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <meta-data
+                android:name="android.speech"
+                android:resource="@xml/recognition_service" />
+        </service>
+
         <service
             android:name=".assist.TomsenseSessionService"
             android:exported="false"

@@ -4,12 +4,18 @@
 
   sessionService is mandatory — it names the class that hosts the overlay
   shown on invocation. supportsAssist is what puts TomSense on the
-  power-button hold, and supportsLaunchVoiceAssistFromKeyguard is what lets
-  it answer from the lock screen without unlocking first.
+  power-button hold AND the corner-swipe assist gesture; both arrive through
+  the same VoiceInteractionSession. supportsLaunchVoiceAssistFromKeyguard is
+  what lets it answer from the lock screen without unlocking first.
+
+  recognitionService must name a real RecognitionService. It previously named
+  the VoiceInteractionService itself, which cannot fulfil that contract — the
+  symptom of which is the app quietly not being selectable as the assistant,
+  leaving every gesture dead with nothing to explain it.
 -->
 <voice-interaction-service
     xmlns:android="http://schemas.android.com/apk/res/android"
     android:sessionService="org.tomsense.android.assist.TomsenseSessionService"
-    android:recognitionService="org.tomsense.android.assist.TomsenseInteractionService"
+    android:recognitionService="org.tomsense.android.assist.TomsenseRecognitionService"
     android:supportsAssist="true"
     android:supportsLaunchVoiceAssistFromKeyguard="true" />

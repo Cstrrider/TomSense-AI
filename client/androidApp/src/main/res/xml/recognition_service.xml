@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Recogniser metadata. Required alongside the voice-interaction service; see
+  TomsenseRecognitionService for why it exists before there is any speech
+  recognition to expose.
+-->
+<recognition-service xmlns:android="http://schemas.android.com/apk/res/android" />
