@@ -87,6 +87,30 @@ class MainActivity : ComponentActivity() {
     private var prefill by mutableStateOf("")
 
     /**
+     * Speech in and out.
+     *
+     * Created lazily so the recogniser and TTS engine are not built for a
+     * session that never uses voice — both are surprisingly expensive to
+     * initialise, and most turns are typed.
+     */
+    private val voice by lazy {
+        org.tomsense.android.voice.VoiceController(
+            context = this,
+            scope = lifecycleScope,
+            remoteTts = { text ->
+                runCatching { app.edge.speak(text, voicePref.ifBlank { null }) }.getOrNull()
+            },
+            onFinalTranscript = { heard ->
+                spokeLast = true
+                send(heard)
+            },
+        )
+    }
+
+    /** aura-2 speaker, or empty for the device engine. Loaded from prefs. */
+    private var voicePref by mutableStateOf("")
+
+    /**
      * What was on screen when the assistant was invoked.
      *
      * Sent as context on the next turn and then cleared. Deliberately NOT put
@@ -137,6 +161,16 @@ class MainActivity : ComponentActivity() {
                 val syncStatus by app.sync.status.collectAsState()
                 val conversations by app.repo.conversations()
                     .collectAsState(initial = emptyList())
+
+                // Loaded once: which engine speaks is a setting, and asking
+                // the edge for it on every utterance would add a round trip to
+                // the one path that is trying to avoid them.
+                androidx.compose.runtime.LaunchedEffect(Unit) {
+                    runCatching { app.providers.prefs() }.getOrNull()?.let {
+                        voicePref = it.ttsVoice
+                        voice.remoteVoice = it.ttsVoice
+                    }
+                }
 
                 androidx.compose.runtime.LaunchedEffect(Unit) {
                     // Reopen whatever was last open, falling back to the most
@@ -265,6 +299,10 @@ class MainActivity : ComponentActivity() {
                                 thinkEnabled = think,
                                 onThinkChange = { think = it },
                                 onAttach = { picker.launch("*/*") },
+                                onMic = ::toggleMic,
+                                listening = voice.phase == org.tomsense.android.voice.VoiceController.Phase.Listening,
+                                speaking = voice.phase == org.tomsense.android.voice.VoiceController.Phase.Speaking,
+                                partialTranscript = voice.partial,
                                 pendingAttachments = pending,
                                 onRemoveAttachment = { pending = pending - it },
                                 loadAttachment = { key ->
@@ -315,7 +353,11 @@ class MainActivity : ComponentActivity() {
         incoming.imageUri?.let { attach(it) }
     }
 
+    /** True when the turn in flight arrived through the microphone. */
+    private var spokeLast = false
+
     override fun onDestroy() {
+        voice.shutdown()
         PermissionGate.detach(this)
         super.onDestroy()
     }
@@ -340,6 +382,35 @@ class MainActivity : ComponentActivity() {
         sendToModel(id, text)
     }
 
+    /**
+     * Open or close the microphone.
+     *
+     * The permission is requested HERE, on first use, rather than at launch —
+     * a prompt that arrives the moment you tap a mic explains itself.
+     */
+    private fun toggleMic() {
+        val v = voice
+        when (v.phase) {
+            org.tomsense.android.voice.VoiceController.Phase.Listening -> v.stopListening()
+            // Tapping the mic mid-reply is barge-in: stop talking and listen.
+            org.tomsense.android.voice.VoiceController.Phase.Speaking -> {
+                v.stopSpeaking()
+                requestMicThen { v.startListening() }
+            }
+            else -> requestMicThen { v.startListening() }
+        }
+    }
+
+    private fun requestMicThen(action: () -> Unit) {
+        lifecycleScope.launch {
+            val granted = org.tomsense.android.tools.PermissionGate.require(
+                this@MainActivity,
+                org.tomsense.android.voice.VoiceController.MIC_PERMISSION,
+            )
+            if (granted) action() else toast("Microphone permission needed to speak.")
+        }
+    }
+
     /** The ordinary path: persist the turn, then ask the model. */
     private fun sendToModel(id: String, text: String) {
         val attached = pending
@@ -347,14 +418,23 @@ class MainActivity : ComponentActivity() {
         // the message being sent, and leaving them staged would silently
         // attach them to the NEXT one too.
         pending = emptyList()
+        val speakThis = spokeLast
+        spokeLast = false
         lifecycleScope.launch {
-            runner.send(
+            if (speakThis) voice.beginReply()
+            val assistantId = runner.send(
                 convId = id,
                 text = text,
                 think = think,
                 attachments = attached,
                 extraContext = screenContextMessages(),
+                onText = if (speakThis) voice::speakStreaming else null,
             )
+            if (speakThis) {
+                val full = app.db.schemaQueries.messageById(assistantId)
+                    .executeAsOneOrNull()?.content.orEmpty()
+                voice.endReply(full)
+            }
             // Spent: a later turn is about the conversation, not still about a
             // screen the user has since left.
             screenContext = null
@@ -533,6 +613,12 @@ class MainActivity : ComponentActivity() {
             val replyId = app.repo.appendMessage(convId, "assistant", intent.summary)
             app.repo.recordUsage(replyId, LOCAL_USAGE, LOCAL_MODEL)
             app.repo.finishStreaming(replyId)
+            // Spoken as well, when the turn arrived by voice: a timer set by
+            // speaking should answer by speaking.
+            if (spokeLast) {
+                voice.beginReply()
+                voice.endReply(intent.summary)
+            }
         }
     }
 

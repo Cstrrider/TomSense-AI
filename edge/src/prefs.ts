@@ -31,11 +31,15 @@ export interface ToolModels {
 
 export interface UserPrefs {
   tool_models: ToolModels;
+  /** aura-2 speaker name. Empty means the device TTS is used instead. */
+  tts_voice: string;
   /** Difficulty routing. Defaults ON, matching stable. */
   auto_route: boolean;
 }
 
-const DEFAULTS: UserPrefs = { tool_models: {}, auto_route: true };
+// Empty tts_voice on purpose: speech defaults to the DEVICE engine, which
+// costs nothing and works offline. aura-2 is opt-in.
+const DEFAULTS: UserPrefs = { tool_models: {}, auto_route: true, tts_voice: "" };
 
 export async function getPrefs(env: Env, userId: string): Promise<UserPrefs> {
   const row = await env.DB.prepare(`SELECT prefs FROM users WHERE id = ?`)
@@ -54,6 +58,7 @@ export async function getPrefs(env: Env, userId: string): Promise<UserPrefs> {
   return {
     tool_models: parsed.tool_models ?? {},
     auto_route: parsed.auto_route ?? DEFAULTS.auto_route,
+    tts_voice: parsed.tts_voice ?? DEFAULTS.tts_voice,
   };
 }
 
@@ -68,7 +73,7 @@ export async function getPrefs(env: Env, userId: string): Promise<UserPrefs> {
 export async function setPrefs(
   env: Env,
   who: Principal,
-  patch: { tool_models?: ToolModels; auto_route?: boolean },
+  patch: { tool_models?: ToolModels; auto_route?: boolean; tts_voice?: string },
 ): Promise<UserPrefs> {
   const current = await getPrefs(env, who.userId);
 
@@ -83,6 +88,7 @@ export async function setPrefs(
   const next: UserPrefs = {
     tool_models,
     auto_route: patch.auto_route ?? current.auto_route,
+    tts_voice: patch.tts_voice ?? current.tts_voice,
   };
 
   await env.DB.prepare(`UPDATE users SET prefs = ? WHERE id = ?`)

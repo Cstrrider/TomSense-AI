@@ -36,6 +36,8 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Lightbulb
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
@@ -111,6 +113,12 @@ fun ChatScreen(
     /** Text handed in from outside — share sheet, ASK intent, assistant. */
     prefill: String = "",
     onPrefillConsumed: () -> Unit = {},
+    /** Null hides the mic on platforms with no speech engine. */
+    onMic: (() -> Unit)? = null,
+    listening: Boolean = false,
+    speaking: Boolean = false,
+    /** Live transcript while listening, shown in place of the draft. */
+    partialTranscript: String = "",
 ) {
     var draft by remember { mutableStateOf("") }
 
@@ -283,6 +291,21 @@ fun ChatScreen(
                         Icon(Icons.Filled.AttachFile, contentDescription = "Attach a file")
                     }
                 }
+                onMic?.let { mic ->
+                    IconButton(onClick = mic) {
+                        Icon(
+                            if (listening) Icons.Filled.MicOff else Icons.Filled.Mic,
+                            contentDescription = if (listening) "Stop listening" else "Speak",
+                            // Tinted while active so the mic state is readable
+                            // at a glance rather than from the icon shape.
+                            tint = if (listening || speaking) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                        )
+                    }
+                }
                 thinkEnabled?.let { on ->
                     // A toggle rather than a per-send choice: "think about
                     // this one" is usually a mode you stay in for a few turns.
@@ -299,10 +322,14 @@ fun ChatScreen(
                     }
                 }
                 OutlinedTextField(
-                    value = draft,
+                    // While listening, the field shows what is being heard.
+                    // Writing it into `draft` instead would leave a half-heard
+                    // sentence behind when recognition is cancelled.
+                    value = if (listening && partialTranscript.isNotEmpty()) partialTranscript else draft,
                     onValueChange = { draft = it },
                     modifier = Modifier.weight(1f),
-                    placeholder = { Text("Message") },
+                    readOnly = listening,
+                    placeholder = { Text(if (listening) "Listening…" else "Message") },
                     maxLines = 6,
                 )
                 // One button, two jobs. Stop has to be exactly where send was,

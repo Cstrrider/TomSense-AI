@@ -31,6 +31,7 @@ import {
 import { routeChat } from "./routing";
 import { getPrefs, setPrefs, setAnalyticsKey, hasAnalyticsKey } from "./prefs";
 import { usageToday } from "./usage";
+import { synthesize, TTS_VOICES } from "./tts";
 
 export { VoiceSession } from "./do/voice";
 export { DetachedRun } from "./do/run";
@@ -129,8 +130,23 @@ export default {
           // put flux in the default-model picker, where choosing it produces
           // a provider error on the next message.
           imageModels: await listImageModels(env),
+          ttsVoices: TTS_VOICES,
           defaultModel: await getDefaultModel(env, who),
           presets: PROVIDER_PRESETS,
+        });
+      }
+      if (path === "/voice/tts" && req.method === "POST") {
+        const b = (await req.json()) as { text?: string; voice?: string };
+        const prefs = await getPrefs(env, who.userId);
+        const r = await synthesize(env, b.text ?? "", b.voice || prefs.tts_voice);
+        if ("error" in r) return json(r, 400);
+        return new Response(r.audio as unknown as BodyInit, {
+          headers: {
+            "content-type": r.mime,
+            // Per-user speech behind an auth check; a shared cache holding it
+            // would serve one persons words to another.
+            "cache-control": "private, no-store",
+          },
         });
       }
       if (path === "/me/usage" && req.method === "GET") {

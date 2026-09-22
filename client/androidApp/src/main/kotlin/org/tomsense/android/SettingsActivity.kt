@@ -88,6 +88,7 @@ class SettingsActivity : ComponentActivity() {
                 var prefs by remember { mutableStateOf(UserPrefs()) }
                 var imageModels by remember { mutableStateOf<List<ModelOption>>(emptyList()) }
                 var usage by remember { mutableStateOf<UsageToday?>(null) }
+                var ttsVoices by remember { mutableStateOf<List<String>>(emptyList()) }
 
                 suspend fun refresh() {
                     runCatching {
@@ -95,6 +96,7 @@ class SettingsActivity : ComponentActivity() {
                         val m = app.providers.models()
                         models = m.models
                         imageModels = m.imageModels
+                        ttsVoices = m.ttsVoices
                         presets = m.presets
                         defaultModel = m.defaultModel
                         prefs = app.providers.prefs()
@@ -221,6 +223,32 @@ class SettingsActivity : ComponentActivity() {
                                                     cfAccountId = account,
                                                 ),
                                             )
+                                        }.onFailure { error = it.message }
+                                    }
+                                },
+                            )
+                        }
+
+                        item { HorizontalDivider(Modifier.padding(vertical = 8.dp)) }
+                        item { SectionHeader("Voice") }
+
+                        item {
+                            Text(
+                                "Speech in always uses the phone, which costs nothing and works " +
+                                    "offline. Speech OUT can use a better voice at the price of a " +
+                                    "round trip.",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+
+                        item {
+                            VoiceRow(
+                                current = prefs.ttsVoice,
+                                voices = ttsVoices,
+                                onPick = { v ->
+                                    lifecycleScope.launch {
+                                        runCatching {
+                                            prefs = app.providers.setPrefs(UpdatePrefs(ttsVoice = v))
                                         }.onFailure { error = it.message }
                                     }
                                 },
@@ -970,4 +998,48 @@ private fun formatUsdSettings(usd: Double): String {
     if (usd < 0.0001) return "<\$0.0001"
     val q = (usd * 10000).toInt()
     return "\$" + (q / 10000) + "." + (q % 10000).toString().padStart(4, '0')
+}
+
+
+/**
+ * Which engine speaks.
+ *
+ * "Phone" is first and is the default: no network, no cost, works offline. The
+ * aura voices sound better and are worth the round trip for anyone who listens
+ * to replies rather than reading them, which is exactly who turns this on.
+ */
+@Composable
+private fun VoiceRow(current: String, voices: List<String>, onPick: (String) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+
+    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("Spoken replies", style = MaterialTheme.typography.bodyMedium)
+            Text(
+                if (current.isBlank()) {
+                    "Phone voice — offline, instant, free"
+                } else {
+                    "aura-2 · $current"
+                },
+                style = MaterialTheme.typography.labelSmall,
+            )
+        }
+        Box {
+            TextButton(onClick = { open = true }) {
+                Text(if (current.isBlank()) "Phone" else current)
+            }
+            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                DropdownMenuItem(
+                    text = { Text("Phone voice") },
+                    onClick = { open = false; onPick("") },
+                )
+                voices.forEach { v ->
+                    DropdownMenuItem(
+                        text = { Text(v) },
+                        onClick = { open = false; onPick(v) },
+                    )
+                }
+            }
+        }
+    }
 }

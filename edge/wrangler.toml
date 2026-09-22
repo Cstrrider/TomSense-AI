@@ -64,7 +64,9 @@ TIER2_MODEL = "cf::@cf/meta/llama-4-scout-17b-16e-instruct"
 NEURON_DAILY_LIMIT = "10000"
 NEURON_SOFT_CAP_PCT = "80"
 STT_MODEL   = "@cf/deepgram/flux"
-TTS_MODEL   = "@cf/deepgram/aura-2"
+# aura-2-en, NOT aura-2: the bare name is unroutable and 502s. Nothing called
+# it until the voice path was built, so the wrong value sat here unnoticed.
+TTS_MODEL   = "@cf/deepgram/aura-2-en"
 
 # CF Access. ACCESS_AUD must be the AUD tag of the Access application that
 # fronts this Worker. While it is empty the Worker FAILS CLOSED and rejects

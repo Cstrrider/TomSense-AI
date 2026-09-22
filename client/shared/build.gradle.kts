@@ -119,3 +119,14 @@ tasks.register<JavaExec>("checkLocalIntents") {
         configurations.getByName("desktopRuntimeClasspath")
     mainClass.set("org.tomsense.tools.CheckLocalIntentsKt")
 }
+
+/** Exercise the sentence chunker. `./gradlew -q :shared:checkChunker` */
+tasks.register<JavaExec>("checkChunker") {
+    group = "verification"
+    description = "Check sentence splitting against decimals, abbreviations and markdown"
+    val desktopMain = kotlin.targets.getByName("desktop").compilations.getByName("main")
+    dependsOn(desktopMain.compileTaskProvider)
+    classpath = files(desktopMain.output.allOutputs) +
+        configurations.getByName("desktopRuntimeClasspath")
+    mainClass.set("org.tomsense.voice.CheckChunkerKt")
+}

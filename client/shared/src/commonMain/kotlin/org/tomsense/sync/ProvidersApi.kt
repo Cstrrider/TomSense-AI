@@ -129,6 +129,8 @@ data class ModelsResponse(
      * as the default model.
      */
     val imageModels: List<ModelOption> = emptyList(),
+    /** aura-2 speakers offered in settings. */
+    val ttsVoices: List<String> = emptyList(),
     val defaultModel: String = "",
     val presets: List<Preset> = emptyList(),
 )
@@ -197,6 +199,8 @@ data class UserPrefs(
     @SerialName("auto_route") val autoRoute: Boolean = true,
     /** Whether an analytics key is SET. The key itself is never returned. */
     val hasAnalyticsKey: Boolean = false,
+    /** aura-2 speaker, or empty for the device's own speech engine. */
+    @SerialName("tts_voice") val ttsVoice: String = "",
 )
 
 @Serializable
@@ -231,4 +235,5 @@ data class PrefsPatch(
     @SerialName("auto_route") val autoRoute: Boolean? = null,
     val cfAnalyticsKey: String? = null,
     val cfAccountId: String? = null,
+    @SerialName("tts_voice") val ttsVoice: String? = null,
 )

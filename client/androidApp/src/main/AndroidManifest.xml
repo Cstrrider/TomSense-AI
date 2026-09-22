@@ -8,13 +8,9 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
-    <!-- RECORD_AUDIO is NOT requested: nothing records audio yet. It comes
-         back with the duplex voice path (spec M5), asked for at the moment it
-         is first used rather than declared in advance. A microphone
-         permission on an app that never opens the mic is exactly the kind of
-         thing that erodes trust in every other permission it asks for. -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- Requested because it is now used: the recogniser needs it. Asked
+         for at the moment the mic is first opened, never at launch. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- ── Device tools ────────────────────────────────────────────────────

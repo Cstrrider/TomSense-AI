@@ -61,12 +61,20 @@ class TurnRunner(
         think: Boolean = false,
         attachments: List<String> = emptyList(),
         extraContext: List<WireMessage> = emptyList(),
+        /**
+         * Called with the reply so far on every token.
+         *
+         * Exists for speech: the sentence chunker needs the growing text to
+         * start speaking before the answer finishes. Null for typed turns, so
+         * nothing pays for it.
+         */
+        onText: ((String) -> Unit)? = null,
     ): String {
         app.repo.appendMessage(convId, "user", text, attachments = attachments)
         val assistantId = app.repo.appendMessage(convId, "assistant", "")
         val history = historyFor(convId, extraContext = extraContext)
 
-        consume(assistantId) {
+        consume(assistantId, onText = onText) {
             app.chat.stream(
                 ChatRequest(convId, history, tools = app.tools.schemas(), think = think),
             )
@@ -96,6 +104,7 @@ class TurnRunner(
     suspend fun consume(
         assistantId: String,
         knownRun: String? = null,
+        onText: ((String) -> Unit)? = null,
         source: () -> Flow<ChatEvent>,
     ) {
         onGenerating(true)
@@ -117,7 +126,9 @@ class TurnRunner(
                     }
                     "text" -> {
                         buffer.append(ev.text.orEmpty())
-                        app.repo.updateStreamingContent(assistantId, buffer.toString())
+                        val soFar = buffer.toString()
+                        app.repo.updateStreamingContent(assistantId, soFar)
+                        onText?.invoke(soFar)
                     }
                     "reasoning" -> {
                         thinking.append(ev.text.orEmpty())

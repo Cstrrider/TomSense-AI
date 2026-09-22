@@ -76,6 +76,19 @@ class EdgeApi(
             setBody(bytes)
         }.body()
 
+    /**
+     * Speech for one sentence.
+     *
+     * Per sentence rather than per reply, so playback can start while the
+     * rest of the answer is still being written.
+     */
+    suspend fun speak(text: String, voice: String?): ByteArray =
+        http.post("$baseUrl/voice/tts") {
+            auth()
+            contentType(ContentType.Application.Json)
+            setBody(SpeakRequest(text, voice))
+        }.body()
+
     /** Fetch an attachment's bytes. Authenticated, so it cannot be a plain URL. */
     suspend fun downloadFile(key: String): ByteArray =
         http.get("$baseUrl/files/" + key.split("/").joinToString("/") { encode(it) }) {
@@ -92,6 +105,9 @@ class EdgeApi(
         deviceToken()?.let { header("Authorization", "Bearer $it") }
     }
 }
+
+@kotlinx.serialization.Serializable
+data class SpeakRequest(val text: String, val voice: String? = null)
 
 @kotlinx.serialization.Serializable
 data class UploadedFile(val key: String, val mime: String, val bytes: Long)
