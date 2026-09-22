@@ -166,3 +166,8 @@ UPDATE sync_state SET lamport = MAX(lamport, ?) WHERE id = 0;
 -- row already exists. Not dirtied here: finishStreaming marks the row.
 updateMessageAttachments:
 UPDATE message SET attachments = ? WHERE id = ?;
+
+-- Written once per round from the done event. Local display only, so it does
+-- not dirty the row.
+updateMessageUsage:
+UPDATE message SET usage = ?, model = ? WHERE id = ?;

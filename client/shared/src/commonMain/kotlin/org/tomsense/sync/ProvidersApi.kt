@@ -58,6 +58,10 @@ class ProvidersApi(
             auth(); contentType(ContentType.Application.Json); setBody(req)
         }.body()
 
+    /** Today's tokens, cost and neurons. */
+    suspend fun usage(): UsageToday =
+        http.get("$baseUrl/me/usage") { auth() }.body()
+
     /** Routing preferences: model slots, auto-route, analytics key state. */
     suspend fun prefs(): UserPrefs =
         http.get("$baseUrl/me/prefs") { auth() }.body()
@@ -193,6 +197,31 @@ data class UserPrefs(
     @SerialName("auto_route") val autoRoute: Boolean = true,
     /** Whether an analytics key is SET. The key itself is never returned. */
     val hasAnalyticsKey: Boolean = false,
+)
+
+@Serializable
+data class ModelUsageRow(
+    val modelId: String = "",
+    val tokensIn: Int = 0,
+    val tokensOut: Int = 0,
+    val cacheRead: Int = 0,
+    val requests: Int = 0,
+    val costUsd: Double? = null,
+)
+
+@Serializable
+data class UsageToday(
+    val day: String = "",
+    val tokensIn: Int = 0,
+    val tokensOut: Int = 0,
+    val cacheRead: Int = 0,
+    val requests: Int = 0,
+    val costUsd: Double = 0.0,
+    val neurons: Int = 0,
+    /** False means the figure is derived from cost, not read from analytics. */
+    val neuronsMeasured: Boolean = false,
+    val neuronLimit: Int = 10000,
+    val byModel: List<ModelUsageRow> = emptyList(),
 )
 
 /** Slots are sent as a plain map so one can be cleared with an empty string. */

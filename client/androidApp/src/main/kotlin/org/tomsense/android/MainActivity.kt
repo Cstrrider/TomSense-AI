@@ -493,6 +493,16 @@ class MainActivity : ComponentActivity() {
                     // to go back even when every one of them failed — silence
                     // leaves the run parked until it is swept away.
                     "done" -> {
+                        // Recorded per ROUND. A tool-using reply emits several
+                        // done events, and the last one is what the footer
+                        // shows — the model that produced the visible answer.
+                        ev.usage?.let { u ->
+                            app.repo.recordUsage(
+                                assistantId,
+                                buildUsageJson(u, ev.costUsd),
+                                ev.model,
+                            )
+                        }
                         val calls = ev.toolCalls.orEmpty()
                         val id = runId
                         if (calls.isNotEmpty() && id != null) {
@@ -576,6 +586,21 @@ class MainActivity : ComponentActivity() {
             pending = pending + result.key
         }
     }
+
+    /**
+     * Usage as stored on the message row.
+     *
+     * Cost is folded in as `usd` rather than recomputed on the client: the
+     * price table lives at the edge, and a second implementation of the
+     * cached-input rule would drift from the first.
+     */
+    private fun buildUsageJson(u: org.tomsense.sync.WireUsage, costUsd: Double?): String =
+        kotlinx.serialization.json.buildJsonObject {
+            put("in", kotlinx.serialization.json.JsonPrimitive(u.tokensIn))
+            put("out", kotlinx.serialization.json.JsonPrimitive(u.out))
+            put("cache_read", kotlinx.serialization.json.JsonPrimitive(u.cacheRead))
+            costUsd?.let { put("usd", kotlinx.serialization.json.JsonPrimitive(it)) }
+        }.toString()
 
     private fun toast(msg: String) {
         android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_SHORT).show()

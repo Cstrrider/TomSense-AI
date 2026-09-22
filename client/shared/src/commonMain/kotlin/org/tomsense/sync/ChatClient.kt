@@ -158,6 +158,18 @@ data class ChatEvent(
     /** On a "attachment" event: the R2 key of a file the run produced. */
     val key: String? = null,
     val mime: String? = null,
+    /** On "done": what the round consumed, and which model served it. */
+    val usage: WireUsage? = null,
+    val model: String? = null,
+    val costUsd: Double? = null,
+)
+
+@Serializable
+data class WireUsage(
+    @SerialName("in") val tokensIn: Int = 0,
+    val out: Int = 0,
+    @SerialName("cache_read") val cacheRead: Int = 0,
+    @SerialName("cache_write") val cacheWrite: Int = 0,
 )
 
 @Serializable

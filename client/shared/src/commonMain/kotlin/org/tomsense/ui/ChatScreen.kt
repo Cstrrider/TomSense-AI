@@ -55,6 +55,8 @@ import androidx.compose.ui.unit.dp
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.tomsense.db.Message
 
 /**
@@ -355,6 +357,8 @@ private fun MessageBubble(
                 if (message.content.isNotBlank()) {
                     Text(message.content, style = MaterialTheme.typography.bodyMedium)
                 }
+
+                UsageFooter(message.model, message.usage)
             }
         }
     }
@@ -457,4 +461,64 @@ private fun AttachmentImage(key: String, load: (suspend (String) -> ByteArray?)?
             modifier = Modifier.padding(bottom = 6.dp),
         )
     }
+}
+
+
+/**
+ * What this reply cost, and which model produced it.
+ *
+ * The model is the point as much as the numbers: the router and the stall
+ * fallback both mean the model that answered is often not the one configured,
+ * and until this footer existed nothing in the transcript said which had run.
+ *
+ * Neurons are DERIVED from cost at Cloudflare's published rate, because no
+ * per-request neuron figure exists — they are an account-level analytics
+ * number. Shown with a tilde so it never reads as measured.
+ */
+@Composable
+private fun UsageFooter(model: String?, usageJson: String?) {
+    if (model.isNullOrBlank() && usageJson.isNullOrBlank()) return
+
+    val parts = buildList {
+        model?.takeIf { it.isNotBlank() }?.let { add(shortModel(it)) }
+        usageJson?.let { raw ->
+            val u = runCatching { Json.parseToJsonElement(raw).jsonObject }.getOrNull()
+            val tin = u?.get("in")?.jsonPrimitive?.content?.toIntOrNull() ?: 0
+            val tout = u?.get("out")?.jsonPrimitive?.content?.toIntOrNull() ?: 0
+            val cached = u?.get("cache_read")?.jsonPrimitive?.content?.toIntOrNull() ?: 0
+            val cost = u?.get("usd")?.jsonPrimitive?.content?.toDoubleOrNull()
+
+            if (tin > 0 || tout > 0) {
+                // Cached input is called out because it is billed at a lower
+                // rate — on a long conversation it is most of the input.
+                add(if (cached > 0) "${tin} in (${cached} cached) · ${tout} out" else "${tin} in · ${tout} out")
+            }
+            cost?.takeIf { it > 0 }?.let {
+                add(formatUsd(it))
+                add("~${neuronsFromUsd(it)} neurons")
+            }
+        }
+    }
+    if (parts.isEmpty()) return
+
+    Text(
+        parts.joinToString(" · "),
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = 6.dp),
+    )
+}
+
+private fun shortModel(spec: String): String =
+    spec.substringAfter("::").substringAfterLast('/')
+
+/** Cloudflare's published rate: $0.011 per 1,000 neurons. */
+internal fun neuronsFromUsd(usd: Double): Int = ((usd / 0.011) * 1000).toInt()
+
+/** Sub-cent costs are the normal case, so four decimals rather than two. */
+internal fun formatUsd(usd: Double): String {
+    if (usd <= 0) return "\$0"
+    if (usd < 0.0001) return "<\$0.0001"
+    val cents = (usd * 10000).toInt()
+    return "\$" + (cents / 10000) + "." + (cents % 10000).toString().padStart(4, '0')
 }

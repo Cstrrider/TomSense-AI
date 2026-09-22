@@ -55,6 +55,7 @@ import org.tomsense.sync.CreateProvider
 import org.tomsense.sync.ModelOption
 import org.tomsense.sync.PrefsPatch as UpdatePrefs
 import org.tomsense.sync.ToolModels
+import org.tomsense.sync.UsageToday
 import org.tomsense.sync.UserPrefs
 import org.tomsense.sync.Preset
 import org.tomsense.sync.ProviderView
@@ -86,6 +87,7 @@ class SettingsActivity : ComponentActivity() {
                 var query by remember { mutableStateOf("") }
                 var prefs by remember { mutableStateOf(UserPrefs()) }
                 var imageModels by remember { mutableStateOf<List<ModelOption>>(emptyList()) }
+                var usage by remember { mutableStateOf<UsageToday?>(null) }
 
                 suspend fun refresh() {
                     runCatching {
@@ -96,6 +98,7 @@ class SettingsActivity : ComponentActivity() {
                         presets = m.presets
                         defaultModel = m.defaultModel
                         prefs = app.providers.prefs()
+                        usage = app.providers.usage()
                     }.onFailure { error = it.message }
                 }
 
@@ -112,6 +115,12 @@ class SettingsActivity : ComponentActivity() {
                     ) {
                         error?.let {
                             item { Text("Error: $it", color = MaterialTheme.colorScheme.error) }
+                        }
+
+                        usage?.let { u ->
+                            item { SectionHeader("Today") }
+                            item { UsageCard(u) }
+                            item { HorizontalDivider(Modifier.padding(vertical = 8.dp)) }
                         }
 
                         item { SectionHeader("Routing") }
@@ -904,4 +913,61 @@ private fun BudgetModeCard(configured: Boolean, onSave: (String, String) -> Unit
             }
         }
     }
+}
+
+
+/**
+ * Today's spend.
+ *
+ * The neuron figure is labelled honestly. Cloudflare reports neurons only at
+ * the account level, so without an analytics token this is DERIVED from cost
+ * at the published rate — presenting an estimate as a measurement is the kind
+ * of thing that gets believed and then acted on.
+ */
+@Composable
+private fun UsageCard(u: UsageToday) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.fillMaxWidth().padding(12.dp)) {
+            val pct = if (u.neuronLimit > 0) {
+                (u.neurons * 100 / u.neuronLimit).coerceAtMost(999)
+            } else {
+                0
+            }
+            Text(
+                "${u.neurons} neurons · $pct% of the free daily ${u.neuronLimit}",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Text(
+                if (u.neuronsMeasured) {
+                    "Measured from Cloudflare analytics."
+                } else {
+                    "Estimated from token cost — add an analytics token under Budget mode for the real figure."
+                },
+                style = MaterialTheme.typography.labelSmall,
+            )
+
+            Text(
+                "${u.tokensIn} in · ${u.tokensOut} out" +
+                    (if (u.cacheRead > 0) " · ${u.cacheRead} cached" else "") +
+                    " · ${u.requests} requests · ${formatUsdSettings(u.costUsd)}",
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.padding(top = 6.dp),
+            )
+
+            u.byModel.take(6).forEach { m ->
+                Text(
+                    "  ${m.modelId.substringAfterLast('/')} — ${m.tokensIn}/${m.tokensOut}" +
+                        (m.costUsd?.let { " · ${formatUsdSettings(it)}" } ?: ""),
+                    style = MaterialTheme.typography.labelSmall,
+                )
+            }
+        }
+    }
+}
+
+private fun formatUsdSettings(usd: Double): String {
+    if (usd <= 0) return "\$0"
+    if (usd < 0.0001) return "<\$0.0001"
+    val q = (usd * 10000).toInt()
+    return "\$" + (q / 10000) + "." + (q % 10000).toString().padStart(4, '0')
 }

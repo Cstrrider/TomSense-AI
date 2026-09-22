@@ -1,0 +1,13 @@
+-- v2 → v3: per-message usage and the model that produced it.
+--
+-- The edge already recorded usage per DAY; what was missing was the per-turn
+-- record needed for a footer on each reply. The model matters as much as the
+-- numbers: the stall fallback and the router both mean the model that
+-- answered is often not the one configured, and until now nothing in the
+-- transcript said which had actually run.
+--
+-- Nullable and unsynced: this is a local display detail. D1's `messages.usage`
+-- column carries the canonical copy for anything server-side.
+
+ALTER TABLE message ADD COLUMN usage TEXT;
+ALTER TABLE message ADD COLUMN model TEXT;

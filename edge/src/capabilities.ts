@@ -81,6 +81,30 @@ export function isVisionModel(modelId: string): boolean {
  */
 let cfLive: Map<string, Capabilities> | null = null;
 let cfLiveAt = 0;
+
+/**
+ * Per-model pricing, from the same metadata call.
+ *
+ * Cloudflare quotes USD per million tokens, and separately for CACHED input —
+ * glm-5.2 is $1.40/M in, $0.26/M cached. That gap is why `cache_read` was worth
+ * instrumenting, and why a cost figure that ignores it overstates spend on any
+ * long conversation.
+ *
+ * There is no per-request neuron figure anywhere in the API; neurons are an
+ * account-level analytics number. Cost is the thing that can be known exactly
+ * per message, so it is what gets computed, with neurons derived from it.
+ */
+export interface ModelPrice {
+  inPerM: number;
+  outPerM: number;
+  /** Falls back to inPerM when a model does not price cached input separately. */
+  cachedPerM: number;
+}
+let cfPrice: Map<string, ModelPrice> | null = null;
+
+export function cfModelPrice(modelId: string): ModelPrice | null {
+  return cfPrice?.get(modelId) ?? null;
+}
 const CF_LIVE_TTL_MS = 60 * 60 * 1000;
 
 /** Property values arrive as booleans or as the strings "true"/"false". */
@@ -101,6 +125,7 @@ export async function warmCfCapabilities(env: Env): Promise<void> {
   try {
     const listed = await env.AI.models({ task: "Text Generation", per_page: 200 });
     const next = new Map<string, Capabilities>();
+    const prices = new Map<string, ModelPrice>();
     for (const model of listed) {
       const props: Record<string, unknown> = {};
       for (const prop of model.properties ?? []) {
@@ -112,17 +137,49 @@ export async function warmCfCapabilities(env: Env): Promise<void> {
         reasoning: truthy(props["reasoning"]),
         context: Number.isFinite(ctx) && ctx > 0 ? ctx : null,
       });
+
+      const price = readPrice(props["price"]);
+      if (price) prices.set(model.name, price);
     }
     // Only adopt a non-empty result: a transient empty response must not
     // replace good data with a map that says nothing can see.
     if (next.size) {
       cfLive = next;
+      cfPrice = prices;
       cfLiveAt = Date.now();
     }
   } catch {
     // Keep whatever is cached. Losing the live list is a degradation, not a
     // failure worth taking a generation down for.
   }
+}
+
+/**
+ * Parse Cloudflare's price array.
+ *
+ * Shape: [{ unit: "per M input tokens", price: 0.1, currency: "USD" }, …].
+ * Matched on the unit text because the array order is not guaranteed and not
+ * every model prices cached input at all.
+ */
+function readPrice(raw: unknown): ModelPrice | null {
+  const rows = Array.isArray(raw) ? raw : null;
+  if (!rows) return null;
+
+  let inPerM = 0;
+  let outPerM = 0;
+  let cachedPerM = -1;
+
+  for (const row of rows as { unit?: string; price?: number }[]) {
+    const unit = (row?.unit ?? "").toLowerCase();
+    const price = Number(row?.price);
+    if (!Number.isFinite(price)) continue;
+    if (unit.includes("cached")) cachedPerM = price;
+    else if (unit.includes("input")) inPerM = price;
+    else if (unit.includes("output")) outPerM = price;
+  }
+
+  if (!inPerM && !outPerM) return null;
+  return { inPerM, outPerM, cachedPerM: cachedPerM >= 0 ? cachedPerM : inPerM };
 }
 
 /** Step 1: capabilities explicitly declared on the provider's model entry. */

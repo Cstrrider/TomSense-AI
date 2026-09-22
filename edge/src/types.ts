@@ -77,7 +77,21 @@ export type StreamEvent =
    * /files route, so nothing large ever travels down the SSE stream.
    */
   | { type: "attachment"; key: string; mime: string }
-  | { type: "done"; content: string; toolCalls: ToolCall[]; usage: Usage; stalled?: boolean }
+  | {
+      type: "done";
+      content: string;
+      toolCalls: ToolCall[];
+      usage: Usage;
+      stalled?: boolean;
+      /**
+       * The model that actually served this round — not necessarily the one
+       * requested, since the stall fallback can swap it mid-run. Reported so
+       * the footer credits the model that did the work.
+       */
+      model?: string;
+      /** USD for this round. Null for providers with no published price. */
+      costUsd?: number | null;
+    }
   | { type: "end"; status: string; error?: string };
 
 export interface ToolCall {

@@ -24,6 +24,7 @@ import { parseModelStr, resolveProvider, chatCompletionsUrl } from "./../provide
 import { streamWithFallback } from "./../stream";
 import { isServerTool, runServerTool } from "./../server_tools";
 import { getPrefs } from "./../prefs";
+import { costUsd } from "./../usage";
 import { warmCfCapabilities } from "./../capabilities";
 
 /**
@@ -52,6 +53,8 @@ const PERSIST_INTERVAL_MS = 1_000;
 type RunStatus = "running" | "awaiting_tools" | "done" | "error" | "cancelled";
 
 interface CompletedRound {
+  /** Which model served it — the fallback, if the primary stalled. */
+  model?: string;
   content: string;
   toolCalls: ToolCall[];
   usage: Usage;
@@ -382,6 +385,11 @@ export class DetachedRun implements DurableObject {
           toolCalls: round.toolCalls,
           usage: round.usage,
           stalled: round.stalled,
+          model: round.model ?? rec.model,
+          costUsd: costUsd(
+            parseModelStr(round.model ?? rec.model, this.env.TIER2_MODEL).modelId,
+            round.usage,
+          ),
         });
 
         if (round.toolCalls.length) {
@@ -500,6 +508,9 @@ export class DetachedRun implements DurableObject {
           toolCalls: ev.toolCalls,
           usage: ev.usage,
           stalled: ev.stalled,
+          // The model that served THIS round. A stalled round falls back, so
+          // crediting rec.model would name the one that went silent.
+          model: ev.stalled && rec.fallbackModel ? rec.fallbackModel : rec.model,
         };
       }
 

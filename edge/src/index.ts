@@ -30,6 +30,7 @@ import {
 } from "./providers_api";
 import { routeChat } from "./routing";
 import { getPrefs, setPrefs, setAnalyticsKey, hasAnalyticsKey } from "./prefs";
+import { usageToday } from "./usage";
 
 export { VoiceSession } from "./do/voice";
 export { DetachedRun } from "./do/run";
@@ -131,6 +132,9 @@ export default {
           defaultModel: await getDefaultModel(env, who),
           presets: PROVIDER_PRESETS,
         });
+      }
+      if (path === "/me/usage" && req.method === "GET") {
+        return json(await usageToday(env, who.userId));
       }
       if (path === "/me/prefs") {
         if (req.method === "GET") {

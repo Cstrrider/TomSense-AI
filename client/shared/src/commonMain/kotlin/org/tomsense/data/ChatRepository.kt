@@ -355,6 +355,18 @@ class ChatRepository(
     }
 
     /**
+     * Record what a round cost and which model served it.
+     *
+     * Deliberately not dirtied: this is a local display detail, and pushing a
+     * write per round would undo the whole reason streaming updates stay
+     * clean until completion.
+     */
+    suspend fun recordUsage(msgId: String, usageJson: String?, model: String?) =
+        withContext(Dispatchers.Default) {
+            q.updateMessageUsage(usageJson, model, msgId)
+        }
+
+    /**
      * Attach a file to an existing message — used when the edge reports one it
      * generated mid-run, which is after the assistant row already exists.
      */
