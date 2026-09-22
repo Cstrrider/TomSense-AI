@@ -44,6 +44,25 @@ class MainActivity : ComponentActivity() {
     private val app by lazy { application as TomsenseApp }
 
     /**
+     * The turn loop, shared with the assistant overlay.
+     *
+     * Both entry points drive the same wire protocol, and it is subtle enough
+     * — `done` is a round boundary, tool results must go back even when they
+     * all failed, a reattach replays — that a second copy would drift.
+     */
+    private val runner by lazy {
+        TurnRunner(
+            app = app,
+            memory = object : TurnRunner.RunMemory {
+                override fun remember(runId: String, msgId: String) = rememberActiveRun(runId, msgId)
+                override fun clear() = clearActiveRun()
+            },
+            onGenerating = { generating = it },
+            onNotices = { notices = it },
+        )
+    }
+
+    /**
      * The open conversation.
      *
      * Compose state rather than a plain field: switching chats from the drawer
@@ -329,14 +348,16 @@ class MainActivity : ComponentActivity() {
         // attach them to the NEXT one too.
         pending = emptyList()
         lifecycleScope.launch {
-            app.repo.appendMessage(id, "user", text, attachments = attached)
-            val assistantId = app.repo.appendMessage(id, "assistant", "")
-            val history = historyForModelThenClearContext()
-            consume(assistantId) {
-                app.chat.stream(
-                    ChatRequest(id, history, tools = app.tools.schemas(), think = think),
-                )
-            }
+            runner.send(
+                convId = id,
+                text = text,
+                think = think,
+                attachments = attached,
+                extraContext = screenContextMessages(),
+            )
+            // Spent: a later turn is about the conversation, not still about a
+            // screen the user has since left.
+            screenContext = null
         }
     }
 
@@ -445,8 +466,8 @@ class MainActivity : ComponentActivity() {
             if (last == null || last.role != "assistant") return@launch
 
             app.repo.resetMessage(last.id)
-            val history = historyForModel(exclude = last.id)
-            consume(last.id) {
+            val history = runner.historyFor(id, exclude = last.id)
+            runner.consume(last.id) {
                 app.chat.stream(
                     ChatRequest(id, history, tools = app.tools.schemas(), think = think),
                 )
@@ -474,199 +495,9 @@ class MainActivity : ComponentActivity() {
                 clearActiveRun()
                 return@launch
             }
-            consume(msgId, runId) { app.chat.attach(runId) }
+            runner.consume(msgId, runId) { app.chat.attach(runId) }
         }
     }
-
-    /**
-     * The turns to send, with the device's own context in front.
-     *
-     * Rebuilt per request rather than stored, because the clock inside it is
-     * only true at the moment of sending.
-     */
-    private fun historyForModel(exclude: String? = null): List<WireMessage> {
-        val id = convId ?: return listOf(WireMessage("system", deviceSystemPrompt()))
-
-        // Screen context is a system message, used once and dropped. Keeping
-        // it in the conversation would make every later turn answer about a
-        // screen the user has long since navigated away from.
-        val context = screenContext?.let {
-            listOf(
-                WireMessage(
-                    "system",
-                    "The user invoked the assistant while this was on their screen. " +
-                        "Use it only if their message refers to it:\n\n" + it,
-                ),
-            )
-        } ?: emptyList()
-
-        return listOf(WireMessage("system", deviceSystemPrompt())) + context +
-            app.db.schemaQueries.messagesFor(id).executeAsList()
-                .filter { it.id != exclude && (it.content.isNotBlank() || it.attachments != null) }
-                .map { WireMessage(it.role, it.content, attachmentKeys(it.attachments)) }
-    }
-
-    /**
-     * Drive one generation into [assistantId], whether newly started or rejoined.
-     *
-     * Content and reasoning are rebuilt from scratch on every event rather than
-     * appended to what is on screen, because a reattach replays the answer so
-     * far — appending would print the first half twice.
-     */
-    private suspend fun consume(
-        assistantId: String,
-        knownRun: String? = null,
-        source: () -> kotlinx.coroutines.flow.Flow<org.tomsense.sync.ChatEvent>,
-    ) {
-        generating = true
-        // Cleared per turn: a notice explains THIS reply, and leaving the last
-        // one up would attribute it to the wrong answer.
-        notices = emptyList()
-        var runId = knownRun
-        val buffer = StringBuilder()
-        val thinking = StringBuilder()
-
-        runCatching {
-            source().collect { ev ->
-                when (ev.type) {
-                    "run" -> ev.runId?.let {
-                        runId = it
-                        rememberActiveRun(it, assistantId)
-                    }
-                    "text" -> {
-                        buffer.append(ev.text.orEmpty())
-                        app.repo.updateStreamingContent(assistantId, buffer.toString())
-                    }
-                    "reasoning" -> {
-                        thinking.append(ev.text.orEmpty())
-                        app.repo.updateStreamingReasoning(assistantId, thinking.toString())
-                    }
-                    // heartbeat carries no payload; it exists so a long
-                    // silent reasoning stretch isn't mistaken for a dead
-                    // connection. Nothing to render.
-                    // A routing override the edge wants the user to see.
-                    "notice" -> ev.text?.let { notices = notices + it }
-
-                    // A file the run produced — currently a generated image.
-                    // Attached to the assistant row so it survives a restart
-                    // and syncs like any other part of the reply.
-                    "attachment" -> ev.key?.let { app.repo.addAttachment(assistantId, it) }
-
-                    "heartbeat" -> Unit
-
-                    // End of a ROUND, not of the run. Tool calls here mean the
-                    // edge is parked waiting on this device, so results have
-                    // to go back even when every one of them failed — silence
-                    // leaves the run parked until it is swept away.
-                    "done" -> {
-                        // Recorded per ROUND. A tool-using reply emits several
-                        // done events, and the last one is what the footer
-                        // shows — the model that produced the visible answer.
-                        ev.usage?.let { u ->
-                            app.repo.recordUsage(
-                                assistantId,
-                                buildUsageJson(u, ev.costUsd),
-                                ev.model,
-                            )
-                        }
-                        val calls = ev.toolCalls.orEmpty()
-                        val id = runId
-                        if (calls.isNotEmpty() && id != null) {
-                            app.chat.sendToolResults(id, calls.map { runTool(it) })
-                        }
-                    }
-                    "end" -> app.repo.finishStreaming(assistantId)
-                }
-            }
-        }.onFailure {
-            app.repo.updateStreamingContent(
-                assistantId,
-                buffer.toString().ifEmpty { "[offline — will retry]" },
-            )
-            app.repo.finishStreaming(assistantId)
-        }
-
-        generating = false
-        clearActiveRun()
-    }
-
-    /**
-     * Run one tool call on this device.
-     *
-     * The whole point of the native rewrite in one function: the model asks
-     * for the calendar and the calendar is right here, rather than four hops
-     * away through a backend and a WebView bridge.
-     *
-     * Arguments are normalised to an object because models occasionally send
-     * `"{}"` as a string, or nothing at all, and a tool that takes no
-     * arguments is the most common case of all.
-     */
-    private suspend fun runTool(call: org.tomsense.sync.WireToolCall): org.tomsense.sync.ToolResult {
-        val args = when (val raw = call.arguments) {
-            is kotlinx.serialization.json.JsonObject -> raw
-            is kotlinx.serialization.json.JsonPrimitive ->
-                runCatching {
-                    kotlinx.serialization.json.Json.parseToJsonElement(raw.content)
-                        as? kotlinx.serialization.json.JsonObject
-                }.getOrNull() ?: kotlinx.serialization.json.JsonObject(emptyMap())
-            else -> kotlinx.serialization.json.JsonObject(emptyMap())
-        }
-        return org.tomsense.sync.ToolResult(
-            id = call.id,
-            name = call.name,
-            content = app.tools.call(call.name, args),
-        )
-    }
-
-    // ─── active run, device-local ────────────────────────────────────────────
-    //
-    // Kept in prefs rather than on the message row on purpose. A run id is
-    // meaningful only to the device that started it; putting it in the synced
-    // message table would push device-local scratch state to every other
-    // device and to D1.
-
-    /**
-     * Prepare and upload one picked file, then stage its key.
-     *
-     * Upload happens at PICK time, not at send time: it is the slow part, and
-     * doing it here means pressing send is still instant and the failure — a
-     * dead network, a file too large — surfaces while the user is still
-     * thinking about the attachment rather than about their message.
-     */
-    private fun attach(uri: android.net.Uri) {
-        lifecycleScope.launch {
-            val prepared = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                Attachments.prepare(this@MainActivity, uri)
-            }
-            if (prepared == null) {
-                toast("Couldn't read that file.")
-                return@launch
-            }
-            val result = runCatching {
-                app.edge.uploadFile(prepared.bytes, prepared.mime, prepared.name)
-            }.getOrNull()
-            if (result == null) {
-                toast("Upload failed — check your connection.")
-                return@launch
-            }
-            pending = pending + result.key
-        }
-    }
-
-    /**
-     * Usage as stored on the message row.
-     *
-     * Cost is folded in as `usd` rather than recomputed on the client: the
-     * price table lives at the edge, and a second implementation of the
-     * cached-input rule would drift from the first.
-     */
-    private fun buildUsageJson(u: org.tomsense.sync.WireUsage, costUsd: Double?): String =
-        kotlinx.serialization.json.buildJsonObject {
-            put("in", kotlinx.serialization.json.JsonPrimitive(u.tokensIn))
-            put("out", kotlinx.serialization.json.JsonPrimitive(u.out))
-            put("cache_read", kotlinx.serialization.json.JsonPrimitive(u.cacheRead))
-            costUsd?.let { put("usd", kotlinx.serialization.json.JsonPrimitive(it)) }
-        }.toString()
 
     /**
      * Answer without the network.
@@ -705,11 +536,44 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** History for one turn, after which the screen context is spent. */
-    private fun historyForModelThenClearContext(): List<WireMessage> {
-        val history = historyForModel()
-        screenContext = null
-        return history
+    /** Screen context as a single-use system message, or nothing. */
+    private fun screenContextMessages(): List<WireMessage> =
+        screenContext?.let {
+            listOf(
+                WireMessage(
+                    "system",
+                    "The user invoked the assistant while this was on their screen. " +
+                        "Use it only if their message refers to it:\n\n" + it,
+                ),
+            )
+        } ?: emptyList()
+
+    /**
+     * Prepare and upload one picked file, then stage its key.
+     *
+     * Upload happens at PICK time, not at send time: it is the slow part, and
+     * doing it here means pressing send is still instant and the failure — a
+     * dead network, a file too large — surfaces while the user is still
+     * thinking about the attachment rather than about their message.
+     */
+    private fun attach(uri: android.net.Uri) {
+        lifecycleScope.launch {
+            val prepared = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                Attachments.prepare(this@MainActivity, uri)
+            }
+            if (prepared == null) {
+                toast("Couldn't read that file.")
+                return@launch
+            }
+            val result = runCatching {
+                app.edge.uploadFile(prepared.bytes, prepared.mime, prepared.name)
+            }.getOrNull()
+            if (result == null) {
+                toast("Upload failed — check your connection.")
+                return@launch
+            }
+            pending = pending + result.key
+        }
     }
 
     private fun toast(msg: String) {

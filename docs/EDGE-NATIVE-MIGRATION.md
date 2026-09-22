@@ -795,7 +795,74 @@ back to the model rather than reporting an error.
 
 ---
 
-## 19. What this is not
+## 19. The assistant overlay (2026-09-22)
+
+The power-button hold now shows a card over whatever you were doing, rather
+than launching the app. That is the point of holding the assistant role: an
+interruption should answer and get out of the way, leaving the screen you
+were on visible above it.
+
+Deliberately not the chat screen — no history, no drawer, no settings. One
+tap opens the full app, continuing the same conversation rather than
+starting over.
+
+### Hosting Compose in a window with no Activity
+
+A `VoiceInteractionSession` owns its own window, and Compose refuses to run
+in a view tree without a lifecycle, a saved-state registry and a ViewModel
+store. It throws at first composition rather than degrading — which, inside
+a power-button hold, would crash the assistant every single time it was
+invoked. `SessionHost` supplies all three, driven from the session
+callbacks.
+
+Two ordering traps: `performRestore` must run before anything reads the
+registry, and the lifecycle must reach RESUMED before the view is attached
+or composition never starts.
+
+One naming trap worth recording: the UI state class was originally
+`AssistState`, which collides with the inherited
+`VoiceInteractionSession.AssistState`. Inside the subclass the inherited
+nested type wins over an import, so every reference resolved to the wrong
+type and the compiler reported it as a recursion problem. Renamed
+`AssistUiState`.
+
+### TurnRunner
+
+There are now two places a turn can start, so the wire protocol moved into
+`TurnRunner` and both use it. That protocol is subtle enough that a second
+copy would drift: `done` is a ROUND boundary rather than the end of a
+generation, tool results must go back even when every one of them failed,
+and a reattach replays what was already sent. Getting any of those wrong in
+one copy and not the other is a bug that only appears from one entry point.
+
+Run memory is an interface with a no-op default. Only the full app remembers
+an in-flight run id — the overlay is dismissed the moment the user looks
+away, and a reconnect belongs to the chat screen.
+
+### What the overlay gets right
+
+- **Tier 0 runs first.** "Set a timer for ten minutes" from a power-button
+  hold never reaches the network, which is the invocation that benefits most.
+- **Screen context is visible and removable.** A chip says it is being used;
+  answering about the wrong thing is worse than answering with none. It is
+  single-use — a follow-up is about the conversation, not the screen the
+  user has since left.
+- **Permission failures are surfaced.** A tool needing a runtime permission
+  cannot prompt from here, because a permission dialog needs an Activity.
+  The overlay detects `permission not granted` in the result and offers to
+  open the app, rather than reporting "I couldn't access your calendar" with
+  no recourse.
+- **A conversation per invocation, titled from the question.** Otherwise the
+  drawer fills with rows reading "New chat", and an assistant that quietly
+  litters the history is one you stop trusting with it.
+
+**Not verified on a device.** The Compose-in-a-session-window path in
+particular has only been compiled, and it is the one that fails loudly if it
+fails at all.
+
+---
+
+## 20. What this is not
 
 This plan does **not** aim for 1:1 endpoint parity with `main`. Roughly 14 of
 the 98 routes are dropped or replaced outright, and several more collapse into

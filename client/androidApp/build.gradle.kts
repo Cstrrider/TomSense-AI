@@ -48,6 +48,9 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.browser)
+    implementation(libs.androidx.lifecycle.runtime)
+    implementation(libs.androidx.lifecycle.viewmodel)
+    implementation(libs.androidx.savedstate)
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.ktor.client.okhttp)
     // shared declares these as `implementation`, so they are not on the

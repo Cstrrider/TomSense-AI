@@ -7,7 +7,22 @@ import android.app.assist.AssistStructure.ViewNode
 import android.os.Bundle
 import android.content.Context
 import android.util.Log
+import android.view.View
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.ui.platform.ComposeView
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import org.tomsense.android.Launch
+import org.tomsense.android.TomsenseApp
+import org.tomsense.android.TurnRunner
+import org.tomsense.sync.WireMessage
+import org.tomsense.tools.matchLocalIntent
 
 /**
  * Assistant role (spec §12) — the single highest-value thing a native client
@@ -46,57 +61,187 @@ class TomsenseSessionService : VoiceInteractionSessionService() {
 /**
  * What happens on a power-button hold.
  *
- * Previously `onShow` was a comment, so holding the power button with
- * TomSense set as assistant produced a blank overlay — the role was granted
- * and delivered nothing.
+ * An overlay over whatever you were doing, not a launch into the app. That is
+ * the whole point of holding the assistant role: an interruption should answer
+ * and get out of the way, leaving the screen you were on visible above it.
  *
- * This opens a turn instead, carrying whatever the system offered about the
- * current screen. That uses the ASSIST API rather than an AccessibilityService,
- * which matters: assist context is handed over per-invocation, by the user, at
- * the moment they ask for it. An accessibility service reads everything,
- * always, and is the wrong trade for this.
- *
- * Not yet the in-place overlay the spec describes — that needs a Compose
- * surface hosted in the session window, and voice with it. This is the honest
- * intermediate: the role does something real and the screen text is not lost.
+ * Screen text comes from the ASSIST API rather than an AccessibilityService.
+ * That distinction matters: assist context is handed over per invocation, by
+ * the user, at the moment they ask. An accessibility service reads everything,
+ * always.
  */
 class TomsenseSession(context: Context) : VoiceInteractionSession(context) {
 
+    private val host = SessionHost()
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    private val app get() = context.applicationContext as TomsenseApp
+
     /** Set by onHandleAssist, which can arrive before or after onShow. */
     private var screenText: String? = null
-    private var shown = false
+    private var convId: String? = null
+    private var turn: Job? = null
+
+    // Type stated explicitly: the callbacks below close over `state`, and
+    // inferring the type from an initialiser that references itself sends the
+    // compiler into a recursion it reports as an unresolved reference.
+    private val state: AssistUiState = AssistUiState(
+        onSend = { send() },
+        onStop = { stop() },
+        onDismiss = { hide() },
+        onOpenApp = { openApp() },
+        onDropScreenContext = {
+            screenText = null
+            state.hasScreenContext = false
+        },
+        onDraftChange = { state.draft = it },
+    )
+
+    override fun onCreate() {
+        super.onCreate()
+        host.create()
+    }
+
+    override fun onCreateContentView(): View {
+        val view = ComposeView(context).apply {
+            setContent { MaterialTheme { AssistOverlay(state) } }
+        }
+        // Must happen before the view is attached, or Compose throws looking
+        // for owners that are not there yet.
+        host.attachTo(view)
+        host.resume()
+        return view
+    }
 
     override fun onShow(args: Bundle?, showFlags: Int) {
         super.onShow(args, showFlags)
-        shown = true
-        open()
+        state.hasScreenContext = screenText != null
+        state.canOpenApp = true
     }
 
-    override fun onHandleAssist(state: AssistState) {
-        super.onHandleAssist(state)
-        screenText = runCatching { readScreen(state) }.getOrNull()
-        // Ordering between the two callbacks is not guaranteed, so whichever
-        // arrives second does the work. Without this the context is captured
-        // and then dropped roughly half the time.
-        if (shown) open()
+    override fun onHandleAssist(assist: AssistState) {
+        super.onHandleAssist(assist)
+        screenText = runCatching { readScreen(assist) }.getOrNull()
+        // Ordering between the two callbacks is not guaranteed, so this
+        // reflects whatever arrived. Without it the context is captured and
+        // then dropped roughly half the time.
+        state.hasScreenContext = screenText != null
     }
 
-    private fun open() {
-        Launch.openWith(context, screenContext = screenText)
+    override fun onHide() {
+        super.onHide()
+        host.pause()
+    }
+
+    override fun onDestroy() {
+        turn?.cancel()
+        scope.cancel()
+        host.destroy()
+        super.onDestroy()
+    }
+
+    // ─── the turn ───────────────────────────────────────────────────────────
+
+    private fun send() {
+        val text = state.draft.trim()
+        if (text.isEmpty() || state.generating) return
+
+        state.draft = ""
+        state.reply = ""
+        state.needsPermission = false
+
+        turn = scope.launch {
+            val id = convId ?: newConversation(text).also { convId = it }
+
+            // Tier 0 first: "set a timer for ten minutes" from a power-button
+            // hold should never reach the network. This is the invocation that
+            // benefits most from it.
+            if (screenText == null) {
+                matchLocalIntent(text)?.let { intent ->
+                    val args = buildJsonObject {
+                        intent.args.forEach { (k, v) ->
+                            when (v) {
+                                is Int -> put(k, JsonPrimitive(v))
+                                is Boolean -> put(k, JsonPrimitive(v))
+                                else -> put(k, JsonPrimitive(v.toString()))
+                            }
+                        }
+                    }
+                    val ok = runCatching { app.tools.call(intent.tool, args) }.getOrNull()
+                    if (ok != null) {
+                        app.repo.appendMessage(id, "user", text)
+                        val replyId = app.repo.appendMessage(id, "assistant", intent.summary)
+                        app.repo.finishStreaming(replyId)
+                        state.reply = intent.summary
+                        return@launch
+                    }
+                }
+            }
+
+            val runner = TurnRunner(
+                app = app,
+                onGenerating = { state.generating = it },
+                onNotices = { state.notices = it },
+            )
+
+            val context = screenText?.let {
+                listOf(
+                    WireMessage(
+                        "system",
+                        "The user invoked the assistant while this was on their screen. " +
+                            "Use it only if their message refers to it:\n\n" + it,
+                    ),
+                )
+            } ?: emptyList()
+
+            val assistantId = runner.send(id, text, extraContext = context)
+            // Spent: a follow-up in the same overlay is about the conversation,
+            // not still about the screen they have since left.
+            screenText = null
+            state.hasScreenContext = false
+
+            val reply = app.db.schemaQueries.messageById(assistantId).executeAsOneOrNull()
+            state.reply = reply?.content.orEmpty()
+            state.needsPermission = state.reply.contains("permission not granted", ignoreCase = true)
+        }
+    }
+
+    private fun stop() {
+        turn?.cancel()
+        state.generating = false
+    }
+
+    /**
+     * A conversation per invocation, titled from the question.
+     *
+     * Titled because otherwise the drawer fills with rows reading "New chat",
+     * and an assistant that quietly litters the history is one you stop
+     * trusting with it.
+     */
+    private suspend fun newConversation(firstMessage: String): String {
+        val id = app.repo.createConversation()
+        app.repo.rename(id, firstMessage.take(48).trim())
+        return id
+    }
+
+    /** Hand the conversation to the full app and get out of the way. */
+    private fun openApp() {
+        Launch.openWith(context, prefill = state.draft.takeIf { it.isNotBlank() })
         hide()
     }
+
+    // ─── screen context ─────────────────────────────────────────────────────
 
     /**
      * Flatten the assist structure into readable text.
      *
      * Capped, because a long article yields kilobytes of view text and the
-     * whole point is a fast turn — not paying for a page of markup the user
-     * did not ask about.
+     * point is a fast answer — not paying for a page of markup nobody asked
+     * about.
      */
-    private fun readScreen(state: AssistState): String? {
-        val structure = state.assistStructure ?: return null
+    private fun readScreen(assist: AssistState): String? {
+        val structure = assist.assistStructure ?: return null
         val out = StringBuilder()
-
         for (i in 0 until structure.windowNodeCount) {
             appendNode(structure.getWindowNodeAt(i).rootViewNode, out)
             if (out.length >= MAX_SCREEN_CHARS) break
