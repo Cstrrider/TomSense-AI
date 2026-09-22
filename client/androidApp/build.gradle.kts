@@ -19,7 +19,11 @@ android {
         versionName = "0.1.0-beta"
     }
 
-    buildFeatures { compose = true }
+    buildFeatures {
+        // The launcher overlay protocol is AIDL; see feed/FeedOverlayService.kt.
+        aidl = true
+        compose = true
+    }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -48,6 +52,7 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.browser)
+    implementation(libs.androidx.datastore.preferences)
     implementation(libs.androidx.lifecycle.runtime)
     implementation(libs.androidx.lifecycle.viewmodel)
     implementation(libs.androidx.savedstate)

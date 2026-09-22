@@ -14,6 +14,8 @@ androidxBrowser = "1.8.0"
 # owners itself. See assist/SessionHost.kt.
 androidxLifecycle = "2.8.7"
 androidxSavedState = "1.2.1"
+# News-feed config (base URL + API key) for the launcher panel.
+androidxDatastore = "1.1.1"
 
 [libraries]
 kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }
@@ -39,6 +41,7 @@ androidx-browser = { module = "androidx.browser:browser", version.ref = "android
 androidx-lifecycle-runtime = { module = "androidx.lifecycle:lifecycle-runtime-ktx", version.ref = "androidxLifecycle" }
 androidx-lifecycle-viewmodel = { module = "androidx.lifecycle:lifecycle-viewmodel-ktx", version.ref = "androidxLifecycle" }
 androidx-savedstate = { module = "androidx.savedstate:savedstate-ktx", version.ref = "androidxSavedState" }
+androidx-datastore-preferences = { module = "androidx.datastore:datastore-preferences", version.ref = "androidxDatastore" }
 
 
 [plugins]

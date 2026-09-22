@@ -230,6 +230,18 @@ class SettingsActivity : ComponentActivity() {
                         }
 
                         item { HorizontalDivider(Modifier.padding(vertical = 8.dp)) }
+                        item { SectionHeader("Home screen feed") }
+                        item {
+                            Text(
+                                "Shows left of the home screen in Lawnchair. Enable " +
+                                    "Debug menu \u2192 Ignore feed whitelist, then Home screen " +
+                                    "\u2192 Feed provider \u2192 TomSense.",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        item { NewsSourceCard() }
+
+                        item { HorizontalDivider(Modifier.padding(vertical = 8.dp)) }
                         item { SectionHeader("Voice") }
 
                         item {
@@ -1039,6 +1051,75 @@ private fun VoiceRow(current: String, voices: List<String>, onPick: (String) -> 
                         onClick = { open = false; onPick(v) },
                     )
                 }
+            }
+        }
+    }
+}
+
+
+/**
+ * Where the news comes from.
+ *
+ * The key is write-only in the UI for the same reason provider keys are: it is
+ * shown as set or not set, never echoed back. It is stored on the device
+ * rather than at the edge because the panel talks to news-worker directly —
+ * routing it through TomSense would put a second hop in front of a feed that
+ * already caches locally.
+ */
+@Composable
+private fun NewsSourceCard() {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+
+    var baseUrl by remember { mutableStateOf("") }
+    var apiKey by remember { mutableStateOf("") }
+    var configured by remember { mutableStateOf(false) }
+    var saved by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        val cfg = org.tomsense.android.feed.NewsClient.config(context)
+        baseUrl = cfg.baseUrl
+        configured = cfg.isComplete
+    }
+
+    Column(Modifier.fillMaxWidth()) {
+        OutlinedTextField(
+            value = baseUrl,
+            onValueChange = { baseUrl = it; saved = false },
+            label = { Text("News worker URL") },
+            placeholder = { Text("https://news-worker.example.workers.dev") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        OutlinedTextField(
+            value = apiKey,
+            onValueChange = { apiKey = it; saved = false },
+            label = { Text(if (configured) "API key (set \u2014 type to replace)" else "API key") },
+            singleLine = true,
+            visualTransformation = PasswordVisualTransformation(),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton(
+                enabled = baseUrl.isNotBlank() && (apiKey.isNotBlank() || configured),
+                onClick = {
+                    scope.launch {
+                        val existing = org.tomsense.android.feed.NewsClient.config(context)
+                        org.tomsense.android.feed.NewsClient.save(
+                            context,
+                            baseUrl,
+                            // Blank means "leave it alone", matching how an
+                            // omitted provider key behaves at the edge.
+                            apiKey.ifBlank { existing.apiKey },
+                        )
+                        apiKey = ""
+                        configured = true
+                        saved = true
+                    }
+                },
+            ) { Text("Save") }
+            if (saved) {
+                Text("Saved", style = MaterialTheme.typography.labelSmall)
             }
         }
     }

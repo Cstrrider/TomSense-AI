@@ -128,6 +128,24 @@
 
         <!-- Required alongside the voice-interaction service. Does not
              recognise speech yet; see TomsenseRecognitionService. -->
+        <!-- The panel left of the home screen (Launcher3 overlay protocol).
+             Lawnchair binds this once "ignore feed whitelist" is enabled in
+             its debug menu and TomSense is picked as the feed provider; the
+             data scheme is what its provider scan matches on. -->
+        <!-- No android:permission. The overlay protocol defines no guard
+             permission, and requiring one means the CALLER must hold it —
+             BIND_APPWIDGET is privileged, so a third-party launcher cannot,
+             and binding would fail silently with nothing to explain why. -->
+        <service
+            android:name=".feed.FeedOverlayService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.android.launcher3.WINDOW_OVERLAY" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="app" />
+            </intent-filter>
+        </service>
+
         <service
             android:name=".assist.TomsenseRecognitionService"
             android:exported="true">

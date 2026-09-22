@@ -66,6 +66,8 @@ class TomsenseApp : Application() {
         repo = ChatRepository(db, deviceId, driver)
         tools = AndroidToolset(this)
 
+        // Exposed for the feed panel, which talks to a DIFFERENT backend
+        // (news-worker) and should not spin up a second engine to do it.
         val http = HttpClient(OkHttp) {
             install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
         }
@@ -75,6 +77,7 @@ class TomsenseApp : Application() {
         // lets login take effect without restarting the app.
         val token = { prefs.getString(KEY_DEVICE_TOKEN, null) }
 
+        httpClient = http
         edge = EdgeApi(http, url, token)
         providers = ProvidersApi(http, url, token)
         chat = ChatClient(http, url, token)
@@ -97,6 +100,9 @@ class TomsenseApp : Application() {
 
     /** Also used directly for share links, which are not part of sync. */
     lateinit var edge: EdgeApi
+        private set
+
+    lateinit var httpClient: HttpClient
         private set
 
     /**
