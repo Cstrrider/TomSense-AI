@@ -34,7 +34,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
@@ -64,18 +63,17 @@ import org.tomsense.ui.decodeImageBytes
  */
 @Composable
 fun FeedPanel(app: TomsenseApp, state: FeedPanelState) {
-    // Fades with the swipe so the panel arrives with the gesture rather than
-    // snapping in at the end.
-    val shade = state.progress.coerceIn(0f, 1f)
-
     LaunchedEffect(state.visible) {
         if (state.visible) state.load(app)
     }
 
+    // NO view-level alpha here. Fading is done with the WINDOW alpha in
+    // FeedOverlayService — a Modifier.alpha driven by scroll progress renders
+    // a fully transparent panel whenever the launcher does not deliver a
+    // scroll event, which looks exactly like a blank home screen.
     Column(
         Modifier
             .fillMaxSize()
-            .alpha(shade)
             .background(MaterialTheme.colorScheme.surface)
             .statusBarsPadding(),
     ) {

@@ -1,12 +1,15 @@
 package org.tomsense.android.feed
 
+import android.app.Dialog
 import android.app.Service
+import android.content.ComponentName
 import android.content.Intent
-import android.graphics.PixelFormat
 import android.os.Bundle
+import android.os.Handler
 import android.os.IBinder
-import android.view.Gravity
+import android.util.Log
 import android.view.View
+import android.view.Window
 import android.view.WindowManager
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.platform.ComposeView
@@ -16,43 +19,59 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import org.tomsense.android.R
 import org.tomsense.android.TomsenseApp
 import org.tomsense.android.assist.SessionHost
 
 /**
  * The panel left of the home screen.
  *
- * This is the Launcher3 overlay protocol — the same one the Google app
- * implements to provide Discover, and the reason that slot has only ever had
- * one occupant on most phones. Lawnchair will bind ANY app that exposes it,
- * provided "ignore feed whitelist" is on in the debug menu; without that flag
- * it checks the package against a hardcoded signature list we are not on.
- * Hence a dev build, and hence no fork.
+ * Launcher3's overlay protocol — the same one the Google app implements for
+ * Discover. Lawnchair binds any app exposing it once "ignore feed whitelist"
+ * is on in its debug menu, which is why this is an addon and not a fork.
  *
- * ## How the window works, which is the unobvious part
+ * ## The window, which is the whole difficulty
  *
- * The launcher does not host our content. It hands us its own window TOKEN in
- * `windowAttached2`, and we add a window of our own with it. That is why the
- * panel can scroll in perfect lockstep with the workspace: there is no IPC per
- * frame, only a progress float, and each side moves its own surface.
+ * The launcher does not host the content. It hands over its own window TOKEN,
+ * and the provider builds a window of its own parented to it. The first
+ * attempt here did that by calling `WindowManager.addView` with the token
+ * copied onto some fresh LayoutParams, which produced a panel that was either
+ * absent or invisible — indistinguishable from each other, and both looking
+ * like "the home screen with nothing on it".
  *
- * It also means the usual Android lifecycle does not apply. There is no
- * Activity, so Compose has to be given owners explicitly — the same problem
- * the assistant overlay solved, so it reuses [SessionHost] rather than
- * inventing a second answer.
+ * The sequence below follows the one every working implementation uses:
+ *
+ *   1. Borrow a real [Window] from a [Dialog] that is never shown. There is no
+ *      public way to construct one otherwise, and a raw View added to the
+ *      WindowManager is not the same thing — it has no decor view, no theme
+ *      and no attributes of its own to animate.
+ *   2. `setWindowManager(null, token, …)` reparents it onto the launcher.
+ *   3. Mutate the launcher's OWN LayoutParams rather than building new ones,
+ *      so every field it set that we do not know about survives.
+ *   4. Drive visibility with WINDOW alpha, never view alpha. A Compose
+ *      `Modifier.alpha(progress)` starting at zero renders a fully
+ *      transparent panel if the launcher never delivers a scroll event, which
+ *      is exactly the blank screen it looks like.
+ *
+ * Touchability is toggled with visibility for the same reason: the window is
+ * created NOT_TOUCHABLE and NOT_FOCUSABLE so it cannot eat home-screen
+ * gestures while closed, and both flags clear when it opens — otherwise the
+ * panel renders and ignores every tap.
  */
 class FeedOverlayService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val app get() = applicationContext as TomsenseApp
+    private val main by lazy { Handler(mainLooper) }
 
     private var callback: ILauncherOverlayCallback? = null
+    private var window: Window? = null
     private var windowView: View? = null
+    private var windowManager: WindowManager? = null
     private var host: SessionHost? = null
-    private var attachedParams: WindowManager.LayoutParams? = null
 
-    /** 0 = closed, 1 = fully open. Driven by the launcher's swipe. */
     private var progress = 0f
+    private var visible = false
 
     private val state = FeedPanelState(
         onOpenApp = { openApp(it) },
@@ -70,71 +89,50 @@ class FeedOverlayService : Service() {
     private val binder = object : ILauncherOverlay.Stub() {
 
         override fun windowAttached(lp: WindowManager.LayoutParams?, cb: ILauncherOverlayCallback?, flags: Int) {
-            attach(lp, cb)
+            onMain { attach(lp, cb) }
         }
 
         override fun windowAttached2(bundle: Bundle?, cb: ILauncherOverlayCallback?) {
             @Suppress("DEPRECATION")
             val lp = bundle?.getParcelable<WindowManager.LayoutParams>("layout_params")
-            attach(lp, cb)
+            onMain { attach(lp, cb) }
         }
 
-        override fun windowDetached(isChangingConfigurations: Boolean) {
-            runOnMain { detachWindow() }
+        override fun windowDetached(isChangingConfigurations: Boolean) = onMain { detachWindow() }
+
+        override fun startScroll() = onMain { setVisible(true) }
+
+        override fun onScroll(p: Float) = onMain {
+            progress = p.coerceIn(0f, 1f)
+            state.progress = progress
+            setWindowAlpha(progress)
+            runCatching { callback?.overlayScrollChanged(progress) }
         }
 
-        override fun startScroll() {
-            runOnMain {
-                ensureWindow()
-                state.visible = true
-            }
+        override fun endScroll() = onMain {
+            if (progress <= 0.01f) setVisible(false)
         }
 
-        override fun onScroll(p: Float) {
-            runOnMain {
-                progress = p.coerceIn(0f, 1f)
-                state.progress = progress
-                // Report back so the launcher can fade its own workspace in
-                // step with us; without this the two surfaces drift apart
-                // visibly during a slow swipe.
-                runCatching { callback?.overlayScrollChanged(progress) }
-            }
+        override fun openOverlay(flags: Int) = onMain {
+            progress = 1f
+            state.progress = 1f
+            setVisible(true)
+            runCatching { callback?.overlayScrollChanged(1f) }
         }
 
-        override fun endScroll() {
-            runOnMain { if (progress <= 0.01f) hideWindow() }
-        }
-
-        override fun openOverlay(flags: Int) {
-            runOnMain {
-                ensureWindow()
-                progress = 1f
-                state.progress = 1f
-                state.visible = true
-                runCatching { callback?.overlayScrollChanged(1f) }
-            }
-        }
-
-        override fun closeOverlay(flags: Int) {
-            runOnMain { closePanel() }
-        }
+        override fun closeOverlay(flags: Int) = onMain { closePanel() }
 
         override fun onPause() = Unit
         override fun onResume() = Unit
 
-        override fun setActivityState(flags: Int) {
-            // Bit 1 is "launcher resumed". Content is refreshed on open rather
-            // than here: the launcher resumes constantly, and refetching the
-            // feed every time someone returns to the home screen would hammer
-            // the worker for a panel nobody opened.
-        }
+        override fun setActivityState(flags: Int) = Unit
 
         /**
-         * Whether the launcher should offer the panel at all.
+         * Whether the launcher offers the panel at all.
          *
-         * Answering false makes the swipe do nothing, which is the honest
-         * state before the feed is configured — better than a blank page the
-         * user has to discover is empty.
+         * Always true: the panel has local content (recent chats, the next
+         * calendar event, the ask box) even with no news source configured, so
+         * there is never a state where opening it is pointless.
          */
         override fun hasOverlayContent(): Boolean = true
 
@@ -145,101 +143,188 @@ class FeedOverlayService : Service() {
         override fun startSearch(data: ByteArray?, bundle: Bundle?): Boolean = false
     }
 
-    // ─── window plumbing ────────────────────────────────────────────────────
+    // ─── window ─────────────────────────────────────────────────────────────
 
     private fun attach(lp: WindowManager.LayoutParams?, cb: ILauncherOverlayCallback?) {
         callback = cb
-        attachedParams = lp
-        runOnMain {
-            // Status bit 1 tells the launcher the overlay is live and may
-            // receive scroll. Without it Lawnchair drops every onScroll on the
-            // floor and the panel never moves.
-            runCatching { cb?.overlayStatusChanged(STATUS_ATTACHED) }
+
+        if (lp?.token == null) {
+            // Loud, because the alternative is a blank panel and no clue why.
+            Log.e(TAG, "windowAttached with no window token — cannot build the panel")
+            return
+        }
+
+        detachWindow()
+        if (!buildWindow(lp)) return
+
+        // Bit 1 is what makes the launcher forward scroll at all: Lawnchair
+        // checks (mServiceState & 1) before delivering onScroll, so without
+        // this the panel attaches and then never moves.
+        runCatching { cb?.overlayStatusChanged(STATUS_ATTACHED) }
+            .onFailure { Log.e(TAG, "overlayStatusChanged failed", it) }
+    }
+
+    private fun buildWindow(lp: WindowManager.LayoutParams): Boolean {
+        try {
+            // Never shown. It exists only to hand over a real Window, which
+            // has no public constructor.
+            val dialog = Dialog(this, R.style.Theme_Tomsense)
+            val win = dialog.window ?: run {
+                Log.e(TAG, "dialog produced no window")
+                return false
+            }
+
+            win.setWindowManager(
+                null,
+                lp.token,
+                ComponentName(this, javaClass).flattenToShortString(),
+                true,
+            )
+            val wm = win.windowManager ?: run {
+                Log.e(TAG, "window manager missing after reparenting")
+                return false
+            }
+
+            val sessionHost = SessionHost().also { host = it }
+            sessionHost.create()
+
+            val content = ComposeView(this).apply {
+                setContent { MaterialTheme { FeedPanel(app, state) } }
+            }
+            sessionHost.attachTo(content)
+            sessionHost.resume()
+
+            // The launcher's own params, mutated — not replaced. It sets
+            // fields we do not know about, and discarding them is how a panel
+            // ends up positioned or sized wrongly on one device only.
+            lp.width = WindowManager.LayoutParams.MATCH_PARENT
+            lp.height = WindowManager.LayoutParams.MATCH_PARENT
+            lp.type = TYPE_DRAWN_APPLICATION
+            lp.flags = lp.flags or LAUNCHER_OVERLAY_FLAGS or
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+            lp.alpha = 0f
+            lp.dimAmount = 0f
+            lp.gravity = android.view.Gravity.START
+            lp.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_STATE_UNSPECIFIED
+
+            win.attributes = lp
+            win.setContentView(content)
+
+            val decor = win.decorView
+            wm.addView(decor, win.attributes)
+
+            window = win
+            windowView = decor
+            windowManager = wm
+            visible = false
+            Log.i(TAG, "panel window attached")
+            return true
+        } catch (e: Throwable) {
+            // Swallowing this is what made the first version undiagnosable:
+            // a failed addView and a transparent window look identical from
+            // the home screen.
+            Log.e(TAG, "failed to build the panel window", e)
+            detachWindow()
+            return false
         }
     }
 
-    private fun ensureWindow() {
-        if (windowView != null) return
-        val token = attachedParams?.token ?: return
-
-        val sessionHost = SessionHost().also { host = it }
-        sessionHost.create()
-
-        val view = ComposeView(this).apply {
-            setContent { MaterialTheme { FeedPanel(app, state) } }
-        }
-        sessionHost.attachTo(view)
-        sessionHost.resume()
-
-        val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
-            // SUB_PANEL rather than an overlay type: we are borrowing the
-            // launcher's token, so this is a child of its window and needs no
-            // SYSTEM_ALERT_WINDOW permission.
-            WindowManager.LayoutParams.TYPE_APPLICATION_SUB_PANEL,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.TRANSLUCENT,
-        ).apply {
-            this.token = token
-            gravity = Gravity.START or Gravity.TOP
-            windowAnimations = 0
-        }
-
-        runCatching {
-            getSystemService(WindowManager::class.java).addView(view, params)
-            windowView = view
-        }.onFailure {
-            // A bad token or a launcher that has gone away. Dropping the
-            // window rather than crashing keeps the home screen usable — this
-            // service runs inside the launcher's swipe gesture.
-            host?.destroy()
-            host = null
-        }
+    /**
+     * Visible AND interactive, together.
+     *
+     * They have to move as one: a panel that is drawn but not touchable takes
+     * taps nowhere, and one that is touchable while closed steals home-screen
+     * gestures.
+     */
+    private fun setVisible(show: Boolean) {
+        if (visible == show) return
+        visible = show
+        state.visible = show
+        setFocusable(show)
+        setWindowAlpha(if (show) 1f else 0f)
     }
 
-    private fun hideWindow() {
-        state.visible = false
+    private fun setFocusable(focusable: Boolean) {
+        val win = window ?: return
+        val attrs = win.attributes
+        val mask = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+            WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+
+        val changed = if (focusable) {
+            (attrs.flags and mask) != 0
+        } else {
+            (attrs.flags and mask) != mask
+        }
+        if (!changed) return
+
+        attrs.flags = if (focusable) attrs.flags and mask.inv() else attrs.flags or mask
+        win.attributes = attrs
+        if (focusable) windowView?.requestFocus()
+    }
+
+    private fun setWindowAlpha(alpha: Float) {
+        val win = window ?: return
+        val attrs = win.attributes
+        val target = alpha.coerceIn(0f, 1f)
+        if (attrs.alpha == target) return
+        attrs.alpha = target
+        win.attributes = attrs
     }
 
     private fun closePanel() {
         progress = 0f
         state.progress = 0f
-        state.visible = false
+        setVisible(false)
         runCatching { callback?.overlayScrollChanged(0f) }
     }
 
     private fun detachWindow() {
         windowView?.let { view ->
-            runCatching { getSystemService(WindowManager::class.java).removeViewImmediate(view) }
+            runCatching { windowManager?.removeViewImmediate(view) }
+                .onFailure { Log.w(TAG, "removing the panel window failed", it) }
         }
         windowView = null
+        window = null
+        windowManager = null
         host?.destroy()
         host = null
-        callback = null
-        attachedParams = null
+        visible = false
         progress = 0f
     }
 
-    /** Open the full app from a panel tap, and get the panel out of the way. */
     private fun openApp(intent: Intent) {
-        runCatching {
-            startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        }
+        runCatching { startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+            .onFailure { Log.w(TAG, "could not open the app", it) }
         closePanel()
     }
 
     /**
      * Every AIDL call arrives on a binder thread; windows and Compose are
-     * main-thread only. Forgetting this is an intermittent crash rather than a
-     * consistent one, which is worse.
+     * main-thread only. Getting this wrong is an intermittent crash, which is
+     * worse than a consistent one.
      */
-    private fun runOnMain(block: () -> Unit) {
-        android.os.Handler(mainLooper).post(block)
+    private fun onMain(block: () -> Unit) {
+        main.post(block)
     }
 
     private companion object {
+        const val TAG = "TomSenseFeed"
         const val STATUS_ATTACHED = 1
+
+        /**
+         * TYPE_DRAWN_APPLICATION. Not public API, and not a sub-panel: the
+         * window is parented by the launcher's token rather than being a
+         * child of one of its views.
+         */
+        const val TYPE_DRAWN_APPLICATION = 4
+
+        /**
+         * The flag set every overlay provider uses (0x840000): split-touch
+         * plus hardware acceleration. Kept as a literal because that is how it
+         * appears in the implementations this was derived from, and guessing
+         * at the decomposition risks dropping one.
+         */
+        const val LAUNCHER_OVERLAY_FLAGS = 8650752
     }
 }
