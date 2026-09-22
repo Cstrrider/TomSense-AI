@@ -3,9 +3,11 @@ package org.tomsense.android.assist
 import android.service.voice.VoiceInteractionService
 import android.service.voice.VoiceInteractionSession
 import android.service.voice.VoiceInteractionSessionService
+import android.app.assist.AssistStructure.ViewNode
 import android.os.Bundle
 import android.content.Context
 import android.util.Log
+import org.tomsense.android.Launch
 
 /**
  * Assistant role (spec §12) — the single highest-value thing a native client
@@ -42,30 +44,75 @@ class TomsenseSessionService : VoiceInteractionSessionService() {
 }
 
 /**
- * The overlay shown on assistant invocation.
+ * What happens on a power-button hold.
  *
- * Two things must be true for this to beat Gemini, and both are latency, not
- * features:
+ * Previously `onShow` was a comment, so holding the power button with
+ * TomSense set as assistant produced a blank overlay — the role was granted
+ * and delivered nothing.
  *
- *   1. It draws IMMEDIATELY. The UI reads from local SQLite, so there is no
- *      network on the path to first paint. This is the local-first payoff
- *      made visible — the old WebView could not do it at any price.
- *   2. Simple requests are answered by the on-device tier-0 model without
- *      ever opening a socket.
+ * This opens a turn instead, carrying whatever the system offered about the
+ * current screen. That uses the ASSIST API rather than an AccessibilityService,
+ * which matters: assist context is handed over per-invocation, by the user, at
+ * the moment they ask for it. An accessibility service reads everything,
+ * always, and is the wrong trade for this.
+ *
+ * Not yet the in-place overlay the spec describes — that needs a Compose
+ * surface hosted in the session window, and voice with it. This is the honest
+ * intermediate: the role does something real and the screen text is not lost.
  */
 class TomsenseSession(context: Context) : VoiceInteractionSession(context) {
 
+    /** Set by onHandleAssist, which can arrive before or after onShow. */
+    private var screenText: String? = null
+    private var shown = false
+
     override fun onShow(args: Bundle?, showFlags: Int) {
         super.onShow(args, showFlags)
-        // M5: inflate the Compose overlay, start the duplex voice session,
-        // and hand any assist context (screen text, screenshot) to the model.
+        shown = true
+        open()
     }
 
     override fun onHandleAssist(state: AssistState) {
         super.onHandleAssist(state)
-        // Screen content arrives here when the user has granted assist access.
-        // "What does this say?" / "Summarise this page" without a screenshot
-        // round-trip is a thing the big three do and a self-hosted WebView
-        // fundamentally cannot.
+        screenText = runCatching { readScreen(state) }.getOrNull()
+        // Ordering between the two callbacks is not guaranteed, so whichever
+        // arrives second does the work. Without this the context is captured
+        // and then dropped roughly half the time.
+        if (shown) open()
+    }
+
+    private fun open() {
+        Launch.openWith(context, screenContext = screenText)
+        hide()
+    }
+
+    /**
+     * Flatten the assist structure into readable text.
+     *
+     * Capped, because a long article yields kilobytes of view text and the
+     * whole point is a fast turn — not paying for a page of markup the user
+     * did not ask about.
+     */
+    private fun readScreen(state: AssistState): String? {
+        val structure = state.assistStructure ?: return null
+        val out = StringBuilder()
+
+        for (i in 0 until structure.windowNodeCount) {
+            appendNode(structure.getWindowNodeAt(i).rootViewNode, out)
+            if (out.length >= MAX_SCREEN_CHARS) break
+        }
+        return out.toString().trim().takeIf { it.isNotEmpty() }?.take(MAX_SCREEN_CHARS)
+    }
+
+    private fun appendNode(node: ViewNode?, out: StringBuilder) {
+        if (node == null || out.length >= MAX_SCREEN_CHARS) return
+        node.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let {
+            out.append(it).append('\n')
+        }
+        for (i in 0 until node.childCount) appendNode(node.getChildAt(i), out)
+    }
+
+    private companion object {
+        const val MAX_SCREEN_CHARS = 4000
     }
 }

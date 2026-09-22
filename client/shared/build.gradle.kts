@@ -48,9 +48,6 @@ kotlin {
             dependencies {
                 implementation(libs.ktor.client.okhttp)
                 implementation(libs.sqldelight.android)
-                // Tier-0, on-device. The reason "set a timer" never touches
-                // the network (spec §4).
-                implementation(libs.mediapipe.genai)
             }
         }
         val desktopMain by getting {
@@ -104,4 +101,21 @@ tasks.register<JavaExec>("dumpToolSchemas") {
     classpath = files(desktopMain.output.allOutputs) +
         configurations.getByName("desktopRuntimeClasspath")
     mainClass.set("org.tomsense.tools.DumpToolSchemasKt")
+}
+
+/**
+ * Exercise the tier-0 intent matcher on the JVM.
+ *
+ * `./gradlew -q :shared:checkLocalIntents` — the false-positive cases are the
+ * reason this exists: a pattern made slightly too generous starts eating
+ * ordinary messages, and that is not visible from reading the regex.
+ */
+tasks.register<JavaExec>("checkLocalIntents") {
+    group = "verification"
+    description = "Check the tier-0 matcher against known good and bad inputs"
+    val desktopMain = kotlin.targets.getByName("desktop").compilations.getByName("main")
+    dependsOn(desktopMain.compileTaskProvider)
+    classpath = files(desktopMain.output.allOutputs) +
+        configurations.getByName("desktopRuntimeClasspath")
+    mainClass.set("org.tomsense.tools.CheckLocalIntentsKt")
 }

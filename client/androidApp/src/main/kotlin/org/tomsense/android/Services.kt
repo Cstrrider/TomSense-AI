@@ -1,11 +1,6 @@
 package org.tomsense.android
 
-import android.accessibilityservice.AccessibilityService
 import android.app.Activity
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.Service
 import android.appwidget.AppWidgetManager
 import android.appwidget.AppWidgetProvider
 import android.content.ComponentName
@@ -13,102 +8,53 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
-import android.os.IBinder
-import android.service.notification.NotificationListenerService
-import android.service.notification.StatusBarNotification
 import android.service.quicksettings.TileService
-import android.view.accessibility.AccessibilityEvent
 import android.widget.RemoteViews
 
 /**
  * The Android integration surface (spec §12).
  *
  * These are the entry points that make TomSense reachable the way Gemini is —
- * a tile, a widget, an intent, a notification listener. None of them are
- * expressible from a WebView on server.url, and collectively they are the
- * moat: things the big three won't do because they can't be this specific to
- * one person's setup.
+ * a tile, a widget, an intent. None of them are expressible from a WebView on
+ * server.url, and collectively they are the moat: things the big three won't
+ * do because they can't be this specific to one person's setup.
  *
- * Everything invasive here (screen reading, notification access) is OPT-IN and
- * inert until the user grants it in system settings.
+ * A NotificationListenerService and an AccessibilityService used to be
+ * declared here with empty bodies. They are REMOVED rather than left pending,
+ * because declaring them advertises the two most invasive permissions on the
+ * platform, and a user who granted either would have handed over every
+ * notification and every screen in exchange for a pair of no-op methods.
+ * Screen text now comes from the assist API instead, which is granted
+ * per-invocation at the moment the user asks — see assist/.
  */
 
 /**
- * Foreground service hosting a duplex voice turn.
+ * Quick Settings tile: one pull-down into a turn.
  *
- * Foreground is required, not cosmetic: a background service loses the
- * microphone the moment the screen turns off, which would cut the assistant
- * off mid-sentence every time the display timed out.
+ * It used to start a VoiceService that did nothing but post a notification —
+ * a tile that looked functional and wasn't. Until the duplex voice path is
+ * real (spec M5) this opens the app, which is at least honest.
  */
-class VoiceService : Service() {
-
-    override fun onBind(intent: Intent?): IBinder? = null
-
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(NOTIF_ID, buildNotification())
-        // M5: open the WebSocket to /voice on the edge, stream mic PCM up,
-        // play aura-2 audio down, and fire a barge message on local VAD.
-        return START_NOT_STICKY
-    }
-
-    private fun buildNotification(): Notification {
-        val mgr = getSystemService(NotificationManager::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            mgr.createNotificationChannel(
-                NotificationChannel(CHANNEL, "Voice", NotificationManager.IMPORTANCE_LOW),
-            )
-        }
-        return Notification.Builder(this, CHANNEL)
-            .setContentTitle("TomSense listening")
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .build()
-    }
-
-    companion object {
-        private const val CHANNEL = "voice"
-        private const val NOTIF_ID = 1
-    }
-}
-
-/** Quick Settings tile: one pull-down to start talking. */
 class TomsenseTileService : TileService() {
     override fun onClick() {
         super.onClick()
-        val intent = Intent(this, VoiceService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(intent)
+        // Required on recent Android: a tile may not launch an activity
+        // directly, and doing so silently does nothing on the lock screen.
+        val intent = Launch.intent(this)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startActivityAndCollapse(
+                android.app.PendingIntent.getActivity(
+                    this,
+                    0,
+                    intent,
+                    android.app.PendingIntent.FLAG_IMMUTABLE,
+                ),
+            )
         } else {
-            startService(intent)
+            @Suppress("DEPRECATION")
+            startActivityAndCollapse(intent)
         }
     }
-}
-
-/**
- * Notification triage (opt-in).
- *
- * Deliberately does NOT forward notification contents anywhere yet. Shipping
- * a listener that silently streams every notification to a server would be a
- * serious privacy change smuggled in as a feature; the filtering policy has
- * to be user-visible before anything leaves the device.
- */
-class NotificationTriageService : NotificationListenerService() {
-    override fun onNotificationPosted(sbn: StatusBarNotification?) {
-        // M7: apply the user's triage rules locally, surface only summaries.
-    }
-}
-
-/**
- * Screen read and act.
- *
- * The most invasive permission on the platform, so it stays inert unless the
- * user has explicitly enabled the service AND asked a question that needs it.
- */
-class ScreenReaderService : AccessibilityService() {
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // M5: capture the active window's text on demand, never continuously.
-    }
-
-    override fun onInterrupt() = Unit
 }
 
 /**

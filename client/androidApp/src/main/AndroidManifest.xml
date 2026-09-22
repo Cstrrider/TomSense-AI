@@ -8,7 +8,11 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- RECORD_AUDIO is NOT requested: nothing records audio yet. It comes
+         back with the duplex voice path (spec M5), asked for at the moment it
+         is first used rather than declared in advance. A microphone
+         permission on an app that never opens the mic is exactly the kind of
+         thing that erodes trust in every other permission it asks for. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -67,6 +71,7 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTop"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -130,50 +135,8 @@
             android:exported="false"
             android:permission="android.permission.BIND_VOICE_INTERACTION" />
 
-        <!-- Screen read AND act. The accessibility route is the only way to
-             reach content the assist API does not expose. It is also the most
-             invasive permission on the platform, so it stays strictly opt-in
-             and is not required for anything else to work. -->
-        <service
-            android:name=".assist.ScreenReaderService"
-            android:exported="false"
-            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
-            <intent-filter>
-                <action android:name="android.accessibilityservice.AccessibilityService" />
-            </intent-filter>
-            <meta-data
-                android:name="android.accessibilityservice"
-                android:resource="@xml/accessibility_config" />
-        </service>
-
         <!-- Duplex voice runs in a foreground service so a turn survives the
              screen going off mid-sentence. -->
-        <service
-            android:name=".voice.VoiceService"
-            android:exported="false"
-            android:foregroundServiceType="microphone" />
-
-        <!-- Quick Settings tile: one pull-down to talk. -->
-        <service
-            android:name=".tile.TomsenseTileService"
-            android:exported="true"
-            android:icon="@drawable/ic_tile"
-            android:label="TomSense"
-            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
-            <intent-filter>
-                <action android:name="android.service.quicksettings.action.QS_TILE" />
-            </intent-filter>
-        </service>
-
-        <!-- Notification triage (spec §12). Opt-in, off by default. -->
-        <service
-            android:name=".notify.NotificationTriageService"
-            android:exported="false"
-            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
-            <intent-filter>
-                <action android:name="android.service.notification.NotificationListenerService" />
-            </intent-filter>
-        </service>
 
         <!-- Home-screen widget. -->
         <receiver

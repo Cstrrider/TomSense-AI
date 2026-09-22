@@ -1,5 +1,6 @@
 package org.tomsense.android
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -63,6 +64,18 @@ class MainActivity : ComponentActivity() {
     /** R2 keys uploaded and staged for the next send. */
     private var pending by mutableStateOf<List<String>>(emptyList())
 
+    /** Text handed in from outside — share sheet, ASK intent, assistant. */
+    private var prefill by mutableStateOf("")
+
+    /**
+     * What was on screen when the assistant was invoked.
+     *
+     * Sent as context on the next turn and then cleared. Deliberately NOT put
+     * in the composer: it is background, not something the user typed, and
+     * showing it as their words would be both confusing and wrong.
+     */
+    private var screenContext: String? = null
+
     /** Registered in onCreate — a picker launcher created later than that throws. */
     private lateinit var picker: androidx.activity.result.ActivityResultLauncher<String>
 
@@ -73,6 +86,7 @@ class MainActivity : ComponentActivity() {
         // is called later. This is what lets a tool ask for a permission at
         // the moment the model needs it.
         PermissionGate.attach(this)
+        applyIncoming(intent)
 
         // Registered before RESUMED for the same reason as PermissionGate.
         // GetContent rather than a storage permission: the picker grants
@@ -226,6 +240,8 @@ class MainActivity : ComponentActivity() {
                                 title = conversations.firstOrNull { it.id == convId }
                                     ?.title.orEmpty(),
                                 onOpenDrawer = { scope.launch { drawerState.open() } },
+                                prefill = prefill,
+                                onPrefillConsumed = { prefill = "" },
                                 notices = notices,
                                 thinkEnabled = think,
                                 onThinkChange = { think = it },
@@ -257,6 +273,29 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * A second invocation while already running.
+     *
+     * singleTop plus CLEAR_TOP means the share sheet reuses this instance
+     * rather than stacking another, so without this the second share would be
+     * silently ignored — the same bug as before, just harder to notice.
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        applyIncoming(intent)
+    }
+
+    /** Apply whatever an incoming intent carried. */
+    private fun applyIncoming(intent: Intent?) {
+        val incoming = Launch.read(intent)
+        if (incoming.isEmpty) return
+
+        incoming.prefill?.let { prefill = it }
+        incoming.screenContext?.let { screenContext = it }
+        incoming.imageUri?.let { attach(it) }
+    }
+
     override fun onDestroy() {
         PermissionGate.detach(this)
         super.onDestroy()
@@ -271,6 +310,19 @@ class MainActivity : ComponentActivity() {
      */
     private fun send(text: String) {
         val id = convId ?: return
+
+        // Tier 0. Only when the turn is plain text — an attachment or screen
+        // context means the user is asking ABOUT something, which no pattern
+        // here can answer.
+        if (pending.isEmpty() && screenContext == null) {
+            org.tomsense.tools.matchLocalIntent(text)?.let { return handleLocally(id, text, it) }
+        }
+
+        sendToModel(id, text)
+    }
+
+    /** The ordinary path: persist the turn, then ask the model. */
+    private fun sendToModel(id: String, text: String) {
         val attached = pending
         // Cleared here rather than after the send completes: they belong to
         // the message being sent, and leaving them staged would silently
@@ -279,7 +331,7 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             app.repo.appendMessage(id, "user", text, attachments = attached)
             val assistantId = app.repo.appendMessage(id, "assistant", "")
-            val history = historyForModel()
+            val history = historyForModelThenClearContext()
             consume(assistantId) {
                 app.chat.stream(
                     ChatRequest(id, history, tools = app.tools.schemas(), think = think),
@@ -434,7 +486,21 @@ class MainActivity : ComponentActivity() {
      */
     private fun historyForModel(exclude: String? = null): List<WireMessage> {
         val id = convId ?: return listOf(WireMessage("system", deviceSystemPrompt()))
-        return listOf(WireMessage("system", deviceSystemPrompt())) +
+
+        // Screen context is a system message, used once and dropped. Keeping
+        // it in the conversation would make every later turn answer about a
+        // screen the user has long since navigated away from.
+        val context = screenContext?.let {
+            listOf(
+                WireMessage(
+                    "system",
+                    "The user invoked the assistant while this was on their screen. " +
+                        "Use it only if their message refers to it:\n\n" + it,
+                ),
+            )
+        } ?: emptyList()
+
+        return listOf(WireMessage("system", deviceSystemPrompt())) + context +
             app.db.schemaQueries.messagesFor(id).executeAsList()
                 .filter { it.id != exclude && (it.content.isNotBlank() || it.attachments != null) }
                 .map { WireMessage(it.role, it.content, attachmentKeys(it.attachments)) }
@@ -602,6 +668,50 @@ class MainActivity : ComponentActivity() {
             costUsd?.let { put("usd", kotlinx.serialization.json.JsonPrimitive(it)) }
         }.toString()
 
+    /**
+     * Answer without the network.
+     *
+     * The device tool runs directly and the reply is written straight into the
+     * conversation, so it syncs and reads like any other turn — with a footer
+     * saying it was handled on device, because a reply that cost nothing and
+     * involved no model should not be silently indistinguishable from one that
+     * did.
+     *
+     * A tool failure falls back to the normal path rather than reporting an
+     * error: if the shortcut cannot do it, the model may still be able to.
+     */
+    private fun handleLocally(convId: String, text: String, intent: org.tomsense.tools.LocalIntent) {
+        lifecycleScope.launch {
+            val args = kotlinx.serialization.json.buildJsonObject {
+                intent.args.forEach { (k, v) ->
+                    when (v) {
+                        is Int -> put(k, kotlinx.serialization.json.JsonPrimitive(v))
+                        is Boolean -> put(k, kotlinx.serialization.json.JsonPrimitive(v))
+                        else -> put(k, kotlinx.serialization.json.JsonPrimitive(v.toString()))
+                    }
+                }
+            }
+
+            val ok = runCatching { app.tools.call(intent.tool, args) }.getOrNull()
+            if (ok == null) {
+                sendToModel(convId, text)
+                return@launch
+            }
+
+            app.repo.appendMessage(convId, "user", text)
+            val replyId = app.repo.appendMessage(convId, "assistant", intent.summary)
+            app.repo.recordUsage(replyId, LOCAL_USAGE, LOCAL_MODEL)
+            app.repo.finishStreaming(replyId)
+        }
+    }
+
+    /** History for one turn, after which the screen context is spent. */
+    private fun historyForModelThenClearContext(): List<WireMessage> {
+        val history = historyForModel()
+        screenContext = null
+        return history
+    }
+
     private fun toast(msg: String) {
         android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_SHORT).show()
     }
@@ -633,6 +743,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private companion object {
+        /** Marks a turn answered on device; rendered by the usage footer. */
+        const val LOCAL_MODEL = "on-device"
+        const val LOCAL_USAGE = """{"in":0,"out":0,"cache_read":0,"usd":0}"""
+
         const val ACTIVE_RUN = "active_run"
         const val LAST_CONV = "last_conv"
     }

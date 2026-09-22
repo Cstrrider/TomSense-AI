@@ -723,7 +723,79 @@ row in Routing, with a warning that the flux-2-klein family will not work.
 
 ---
 
-## 18. What this is not
+## 18. Audit follow-ups (2026-09-22)
+
+An audit against the original design conversation found the architecture
+delivered and two of its three headline goals untouched. Voice stays parked
+until it can be tested on hardware. These are the other three.
+
+### The entry points were dead
+
+MainActivity was registered for `ACTION_SEND` (text and images) and
+`AskActivity` passed a `prefill` extra — and **no incoming intent was ever
+read**. Sharing a link to TomSense opened an empty composer; `adb ... --es text`
+threw the text away. Both advertised to the OS, neither wired.
+
+All five entry points now route through `Launch`: launcher, share sheet, QS
+tile, `org.tomsense.ASK`, assistant role. Shared text lands in the composer
+UNSENT — something arriving from elsewhere should be reviewable before it is
+asked — and appends rather than replacing, so a half-typed message survives.
+`singleTop` was added, without which a second share stacks a new activity and
+is silently ignored.
+
+### Two invasive permissions were advertised for nothing
+
+A `NotificationListenerService` and an `AccessibilityService` were declared
+with empty bodies, and `RECORD_AUDIO` was requested by an app that never opens
+a microphone. Granting either service would have handed over every
+notification, or every screen, in exchange for a no-op method.
+
+All three are **removed** rather than left pending. Screen text now comes from
+the **assist API** instead, which is the right trade: assist context is handed
+over per invocation, by the user, at the moment they ask — an accessibility
+service reads everything, always.
+
+### The assistant role now does something
+
+`TomsenseSession.onShow` was a comment, so a power-button hold produced a
+blank overlay. It opens a turn carrying the screen text the system offered.
+Ordering between `onShow` and `onHandleAssist` is not guaranteed, so whichever
+lands second does the work; without that the context is captured and dropped
+about half the time. Screen text rides as a single-use system message — keeping
+it in the conversation would have every later turn answering about a screen the
+user had long since left.
+
+Not yet the in-place overlay the spec describes. That needs a Compose surface
+in the session window, and voice with it.
+
+### Tier 0 without the model
+
+MediaPipe `tasks-genai` shipped **8.4 MB of native inference engine**
+referenced by zero lines of code. Removing it took the debug APK from 73 MB to
+58 MB.
+
+What it was FOR was worth keeping, so `tools/LocalIntents.kt` answers the
+common commands — timer, alarm, volume, brightness, media — by deterministic
+matching onto device tools that already exist. Instant, offline, free, and it
+cannot hallucinate a tool call. The trade is real: no paraphrase, no ambiguity,
+no "turn the lights down a bit". An on-device model can slot in above this
+later; the routing seam is the same.
+
+**The rule that matters: anything not matched with high confidence falls
+through to the model.** A miss costs a round trip; a false positive hijacks a
+message meant as conversation and answers it with a timer.
+`./gradlew -q :shared:checkLocalIntents` exercises both directions — 14 matches
+and 15 guards including "how do I set a timer on my oven", "skip the
+pleasantries", "pause and consider the implications" and "turn it up to eleven,
+metaphorically speaking". All 29 pass.
+
+Locally answered turns carry an `on-device` footer, because a reply that cost
+nothing should not be indistinguishable from one that did. A tool failure falls
+back to the model rather than reporting an error.
+
+---
+
+## 19. What this is not
 
 This plan does **not** aim for 1:1 endpoint parity with `main`. Roughly 14 of
 the 98 routes are dropped or replaced outright, and several more collapse into

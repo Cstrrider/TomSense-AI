@@ -108,8 +108,21 @@ fun ChatScreen(
     /** Keys staged for the next send, shown as removable chips. */
     pendingAttachments: List<String> = emptyList(),
     onRemoveAttachment: (String) -> Unit = {},
+    /** Text handed in from outside — share sheet, ASK intent, assistant. */
+    prefill: String = "",
+    onPrefillConsumed: () -> Unit = {},
 ) {
     var draft by remember { mutableStateOf("") }
+
+    // Dropped into the composer UNSENT, on purpose: something arriving from a
+    // share sheet should be reviewable before it is asked, not fired off.
+    // Appended rather than replacing, so a half-typed message is not lost.
+    LaunchedEffect(prefill) {
+        if (prefill.isNotBlank()) {
+            draft = if (draft.isBlank()) prefill else draft.trimEnd() + " " + prefill
+            onPrefillConsumed()
+        }
+    }
     val listState = rememberLazyListState()
 
     // Follow the tail as tokens stream in. Keyed on the last message's length
