@@ -2,6 +2,7 @@ package org.tomsense.android.feed
 
 import android.content.Context
 import android.view.MotionEvent
+import android.view.VelocityTracker
 import android.view.ViewConfiguration
 import android.widget.FrameLayout
 import kotlin.math.abs
@@ -24,15 +25,27 @@ class DismissFrameLayout(context: Context) : FrameLayout(context) {
     /** Progress 1..0 as the panel is dragged away; drives the window alpha. */
     var onDragTo: (Float) -> Unit = {}
 
-    /** Final progress on release — close below the threshold, snap open above. */
-    var onDragSettled: (Float) -> Unit = {}
+    /**
+     * Release, with both the distance travelled and the horizontal velocity in
+     * px/s (negative is leftward).
+     *
+     * Velocity is reported because distance alone makes dismissal feel stuck:
+     * a quick flick is the gesture people actually make, and it covers very
+     * little of the screen before the finger lifts.
+     */
+    var onDragSettled: (Float, Float) -> Unit = { _, _ -> }
 
     private val slop = ViewConfiguration.get(context).scaledTouchSlop
     private var downX = 0f
     private var downY = 0f
     private var dragging = false
+    private var tracker: VelocityTracker? = null
 
     override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
+        // Track from the very first event. Velocity measured only from where
+        // the drag was recognised would miss the fastest part of a flick.
+        trackerFor(ev).addMovement(ev)
+
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 downX = ev.x
@@ -48,12 +61,16 @@ class DismissFrameLayout(context: Context) : FrameLayout(context) {
                     return true
                 }
             }
+
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> releaseTracker()
         }
         return false
     }
 
     override fun onTouchEvent(ev: MotionEvent): Boolean {
         val span = width.coerceAtLeast(1)
+        trackerFor(ev).addMovement(ev)
+
         when (ev.actionMasked) {
             MotionEvent.ACTION_MOVE -> {
                 if (dragging) {
@@ -63,14 +80,30 @@ class DismissFrameLayout(context: Context) : FrameLayout(context) {
             }
 
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                val velocity = tracker?.let {
+                    it.computeCurrentVelocity(1000)
+                    it.xVelocity
+                } ?: 0f
+                releaseTracker()
+
                 if (dragging) {
-                    onDragSettled(progressOf(ev, span))
+                    onDragSettled(progressOf(ev, span), velocity)
                     dragging = false
                     return true
                 }
             }
         }
         return dragging
+    }
+
+    private fun trackerFor(ev: MotionEvent): VelocityTracker {
+        if (ev.actionMasked == MotionEvent.ACTION_DOWN) releaseTracker()
+        return tracker ?: VelocityTracker.obtain().also { tracker = it }
+    }
+
+    private fun releaseTracker() {
+        tracker?.recycle()
+        tracker = null
     }
 
     /**

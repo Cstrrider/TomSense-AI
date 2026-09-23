@@ -11,7 +11,6 @@ import android.util.Log
 import android.view.View
 import android.view.Window
 import android.view.WindowManager
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.platform.ComposeView
 import com.google.android.libraries.launcherclient.ILauncherOverlay
 import com.google.android.libraries.launcherclient.ILauncherOverlayCallback
@@ -22,6 +21,7 @@ import kotlinx.coroutines.cancel
 import org.tomsense.android.R
 import org.tomsense.android.TomsenseApp
 import org.tomsense.android.assist.SessionHost
+import org.tomsense.android.ui.TomsenseTheme
 
 /**
  * The panel left of the home screen.
@@ -205,7 +205,10 @@ class FeedOverlayService : Service() {
             sessionHost.create()
 
             val content = ComposeView(this).apply {
-                setContent { MaterialTheme { FeedPanel(app, state) } }
+                // opaque = false: the panel paints its own surface and the
+                // service animates the WINDOW alpha, so a second full-screen
+                // Surface here would fight both.
+                setContent { TomsenseTheme(opaque = false) { FeedPanel(app, state) } }
             }
 
             // Dismissal lives in the view layer, above Compose — see
@@ -220,8 +223,12 @@ class FeedOverlayService : Service() {
                     setWindowAlpha(p)
                     runCatching { callback?.overlayScrollChanged(p) }
                 }
-                onDragSettled = { p ->
-                    if (p < SETTLE_CLOSED) closePanel() else openFully()
+                onDragSettled = { p, velocityX ->
+                    // Either a deliberate drag OR a flick. Distance alone made
+                    // this feel stuck: a quick leftward flick barely moves the
+                    // finger before it lifts, so it kept snapping back open.
+                    val flicked = velocityX <= FLING_DISMISS
+                    if (flicked || p < SETTLE_CLOSED) closePanel() else openFully()
                 }
                 isFocusableInTouchMode = true
                 setOnKeyListener { _, keyCode, event ->
@@ -386,8 +393,22 @@ class FeedOverlayService : Service() {
         const val TAG = "TomSenseFeed"
         const val STATUS_ATTACHED = 1
 
-        /** Below this, a released drag closes rather than snapping back open. */
-        const val SETTLE_CLOSED = 0.65f
+        /**
+         * Below this, a released drag closes rather than snapping back open.
+         *
+         * Raised from 0.65, which demanded a drag across 35% of the screen
+         * before the panel would let go — far more travel than the gesture
+         * people actually make, so it usually snapped back. 0.85 is about a
+         * sixth of the width, and a flick closes at any distance.
+         */
+        const val SETTLE_CLOSED = 0.85f
+
+        /**
+         * Leftward px/s that dismisses regardless of how far the finger got.
+         * Roughly a brisk flick; a slow deliberate drag stays under it and is
+         * judged on distance instead.
+         */
+        const val FLING_DISMISS = -700f
 
         /**
          * TYPE_DRAWN_APPLICATION. Not public API, and not a sub-panel: the
