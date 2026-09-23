@@ -11,7 +11,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -95,11 +99,25 @@ fun NewsScreen(app: TomsenseApp, state: FeedPanelState, modifier: Modifier = Mod
             }
         }
 
-        if (state.loading && state.news.isNotEmpty()) {
+        // Floating rather than in a bar: this screen has no chrome of its own,
+        // and a whole app bar for one control would cost more height than the
+        // control is worth.
+        if (state.loading) {
             CircularProgressIndicator(
-                Modifier.align(Alignment.TopCenter).padding(8.dp).size(20.dp),
+                Modifier.align(Alignment.TopEnd).padding(16.dp).size(20.dp),
                 strokeWidth = 2.dp,
             )
+        } else {
+            FilledTonalIconButton(
+                onClick = { state.refresh() },
+                modifier = Modifier.align(Alignment.TopEnd).padding(12.dp).size(36.dp),
+            ) {
+                Icon(
+                    Icons.Filled.Refresh,
+                    contentDescription = "Refresh news",
+                    modifier = Modifier.size(18.dp),
+                )
+            }
         }
     }
 }

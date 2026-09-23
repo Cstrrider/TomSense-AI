@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.ThumbDown
 import androidx.compose.material.icons.filled.ThumbUp
 import androidx.compose.material3.Card
@@ -115,7 +116,13 @@ fun FeedPanel(app: TomsenseApp, state: FeedPanelState) {
                 // Recent chats live INSIDE the ask card now — they are the same
                 // thing as asking, just already started.
     
-                item { SectionLabel("News") }
+                item {
+                    SectionLabel(
+                        "News",
+                        onRefresh = { state.refresh() },
+                        busy = state.loading,
+                    )
+                }
     
                 if (state.loading && state.news.isEmpty()) {
                     item {
@@ -287,13 +294,34 @@ private fun String.timeOnly(): String =
     substringAfter('T', missingDelimiterValue = this).take(5).ifBlank { this }
 
 @Composable
-private fun SectionLabel(text: String) {
-    Text(
-        text,
-        style = MaterialTheme.typography.labelMedium,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(top = 6.dp),
-    )
+private fun SectionLabel(text: String, onRefresh: (() -> Unit)? = null, busy: Boolean = false) {
+    Row(
+        Modifier.fillMaxWidth().padding(top = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f),
+        )
+        onRefresh?.let { action ->
+            // The spinner replaces the button rather than sitting beside it,
+            // so a second tap during a refresh is impossible by construction.
+            if (busy) {
+                CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+            } else {
+                IconButton(onClick = action, modifier = Modifier.size(28.dp)) {
+                    Icon(
+                        Icons.Filled.Refresh,
+                        contentDescription = "Refresh news",
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -579,6 +607,19 @@ class FeedPanelState(
     }
 
     /** Continue the panel's thread in the app, where it can be scrolled. */
+    /**
+     * Deliberate refresh, bypassing the refetch cooldown.
+     *
+     * The cooldown exists so opening the panel repeatedly does not spend an
+     * impression for the same snapshot; asking for new stories out loud is
+     * exactly the case it should not apply to.
+     */
+    fun refresh() {
+        val application = app ?: return
+        if (loading) return
+        CoroutineScope(Dispatchers.Main).launch { load(application, force = true) }
+    }
+
     fun openAsked() {
         app?.let { onOpenApp(Launch.intent(it)) }
     }
