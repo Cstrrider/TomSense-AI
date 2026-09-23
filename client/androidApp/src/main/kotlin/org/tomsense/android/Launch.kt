@@ -35,13 +35,23 @@ object Launch {
      */
     const val EXTRA_SCREEN_CONTEXT = "screen_context"
 
+    /**
+     * Which conversation to open.
+     *
+     * Without this the app falls back to whichever chat was open last, so
+     * every "recent chat" row in the panel landed on the same conversation
+     * regardless of which one was tapped.
+     */
+    const val EXTRA_CONVERSATION = "conversation_id"
+
     fun openWith(
         context: Context,
         prefill: String? = null,
         imageUri: Uri? = null,
         screenContext: String? = null,
+        conversationId: String? = null,
     ) {
-        context.startActivity(intent(context, prefill, imageUri, screenContext))
+        context.startActivity(intent(context, prefill, imageUri, screenContext, conversationId))
     }
 
     fun intent(
@@ -49,9 +59,11 @@ object Launch {
         prefill: String? = null,
         imageUri: Uri? = null,
         screenContext: String? = null,
+        conversationId: String? = null,
     ): Intent = Intent(context, MainActivity::class.java).apply {
         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
         prefill?.takeIf { it.isNotBlank() }?.let { putExtra(EXTRA_PREFILL, it) }
+        conversationId?.takeIf { it.isNotBlank() }?.let { putExtra(EXTRA_CONVERSATION, it) }
         imageUri?.let {
             putExtra(EXTRA_IMAGE, it)
             // Without this the receiving activity gets a Uri it is not
@@ -86,6 +98,7 @@ object Launch {
             prefill = intent.getStringExtra(EXTRA_PREFILL) ?: shared,
             imageUri = intent.getParcelableExtra<Uri>(EXTRA_IMAGE) ?: sharedImage,
             screenContext = intent.getStringExtra(EXTRA_SCREEN_CONTEXT),
+            conversationId = intent.getStringExtra(EXTRA_CONVERSATION),
         )
     }
 
@@ -93,8 +106,11 @@ object Launch {
         val prefill: String? = null,
         val imageUri: Uri? = null,
         val screenContext: String? = null,
+        /** Open THIS conversation rather than whichever was open last. */
+        val conversationId: String? = null,
     ) {
         val isEmpty: Boolean
-            get() = prefill.isNullOrBlank() && imageUri == null && screenContext.isNullOrBlank()
+            get() = prefill.isNullOrBlank() && imageUri == null &&
+                screenContext.isNullOrBlank() && conversationId.isNullOrBlank()
     }
 }

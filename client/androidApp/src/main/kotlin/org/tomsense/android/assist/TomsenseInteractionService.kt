@@ -215,17 +215,18 @@ class TomsenseSession(context: Context) : VoiceInteractionSession(context) {
     }
 
     /**
-     * A conversation per invocation, titled from the question.
+     * A conversation per invocation.
      *
-     * Titled because otherwise the drawer fills with rows reading "New chat",
-     * and an assistant that quietly litters the history is one you stop
-     * trusting with it.
+     * Left UNTITLED on purpose now: TurnRunner names it from the whole
+     * exchange once the reply lands. This used to truncate the question to 48
+     * characters, which was better than a drawer full of "New chat" but is
+     * strictly worse than a real title — and since a non-blank title is what
+     * tells the namer to leave a conversation alone, keeping it would have
+     * suppressed the model on exactly the surface that needs it most.
      */
-    private suspend fun newConversation(firstMessage: String): String {
-        val id = app.repo.createConversation()
-        app.repo.rename(id, firstMessage.take(48).trim())
-        return id
-    }
+    @Suppress("UNUSED_PARAMETER")
+    private suspend fun newConversation(firstMessage: String): String =
+        app.repo.createConversation()
 
     /** Hand the conversation to the full app and get out of the way. */
     private fun openApp() {

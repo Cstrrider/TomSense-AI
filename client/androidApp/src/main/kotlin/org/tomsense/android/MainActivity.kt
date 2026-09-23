@@ -410,6 +410,13 @@ class MainActivity : ComponentActivity() {
         val incoming = Launch.read(intent)
         if (incoming.isEmpty) return
 
+        // Before the rest: the others act on whatever chat is open, so the
+        // chat has to be the right one first.
+        incoming.conversationId?.takeIf { it.isNotBlank() }?.let { id ->
+            convId = id
+            prefs().edit().putString(LAST_CONV, id).apply()
+        }
+
         incoming.prefill?.let { prefill = it }
         incoming.screenContext?.let { screenContext = it }
         incoming.imageUri?.let { attach(it) }

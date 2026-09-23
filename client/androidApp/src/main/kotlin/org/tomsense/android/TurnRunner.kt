@@ -79,7 +79,37 @@ class TurnRunner(
                 ChatRequest(convId, history, tools = app.tools.schemas(), think = think),
             )
         }
+
+        nameIfUntitled(convId, text, assistantId)
         return assistantId
+    }
+
+    /**
+     * Give a new conversation a name, once.
+     *
+     * Lives HERE rather than in the chat screen so every surface gets it —
+     * the app, the feed panel and the assistant overlay all run their turns
+     * through this. Nothing was naming chats at all: the edge had a "title"
+     * purpose that no caller ever invoked, so everything outside the overlay
+     * stayed "New chat" forever and the overlay only truncated the first
+     * message to 48 characters.
+     *
+     * Deliberately after the reply rather than before it. Titling from the
+     * question alone produces a name for what was ASKED rather than what the
+     * conversation turned out to be, and it would spend the call even on a
+     * turn that failed.
+     */
+    private suspend fun nameIfUntitled(convId: String, question: String, assistantId: String) {
+        val conv = app.db.schemaQueries.conversationById(convId).executeAsOneOrNull() ?: return
+        if (conv.title.isNotBlank()) return
+
+        val answer = app.db.schemaQueries.messageById(assistantId).executeAsOneOrNull()?.content
+        // An empty or failed reply means there is nothing to name it from, and
+        // a title generated off a "connection lost" marker would stick.
+        if (answer.isNullOrBlank() || answer.startsWith("⚠")) return
+
+        val title = app.edge.title(question, answer) ?: return
+        if (title.isNotBlank()) app.repo.rename(convId, title)
     }
 
     /** The turns to send, with the device's own context in front. */

@@ -62,6 +62,25 @@ class EdgeApi(
         }.body()
 
     /**
+     * Name a conversation from its opening exchange.
+     *
+     * Runs on the edge's utility model rather than here: it keeps one warm
+     * prompt prefix per user so this is mostly a cache hit, and the device
+     * never has to hold a model for a four-word job. Null when the model had
+     * nothing useful to say — a chat keeping its placeholder title is
+     * cosmetic and must never be worth failing a turn over, which is why this
+     * swallows rather than throws.
+     */
+    suspend fun title(question: String, answer: String?): String? =
+        runCatching {
+            http.post("$baseUrl/title") {
+                auth()
+                contentType(ContentType.Application.Json)
+                setBody(TitleRequest(question, answer))
+            }.body<TitleResponse>().title
+        }.getOrNull()
+
+    /**
      * Upload one file, returning its R2 key.
      *
      * Raw body rather than multipart: there is exactly one file per call, and
@@ -117,6 +136,12 @@ data class ShareRequest(val shared: Boolean)
 
 @kotlinx.serialization.Serializable
 data class ShareResult(val shareToken: String? = null, val error: String? = null)
+
+@kotlinx.serialization.Serializable
+data class TitleRequest(val question: String, val answer: String? = null)
+
+@kotlinx.serialization.Serializable
+data class TitleResponse(val title: String? = null)
 
 @kotlinx.serialization.Serializable
 data class ExchangeRequest(val code: String, val verifier: String, val platform: String)

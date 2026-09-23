@@ -46,6 +46,8 @@ import io.ktor.client.request.header
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.tomsense.android.Launch
@@ -512,20 +514,33 @@ class FeedPanelState(
         config: NewsClient.Config,
         items: List<NewsClient.Item>,
     ) = withContext(Dispatchers.IO) {
-        val out = thumbs.toMutableMap()
-        // Capped: the panel shows a handful before any scrolling, and every
-        // fetch is an edge transformation that counts against quota.
-        for (item in items.take(12)) {
-            val url = item.imageUrl ?: continue
-            if (out.containsKey(item.id)) continue
-            val bytes = runCatching {
-                application.httpClient.get(client.thumbUrl(config, url, 480)) {
-                    header("Authorization", "Bearer ${config.apiKey}")
-                }.body<ByteArray>()
-            }.getOrNull() ?: continue
-            decodeImageBytes(bytes)?.let { out[item.id] = it }
+        // Every story with an image, not the first twelve. The cap was there
+        // to limit edge transformations, but the worker's /img proxy caches
+        // each transform, so the twelfth-onwards were simply missing forever —
+        // which on a thirty-story feed is most of it.
+        val wanted = items.filter { it.imageUrl != null && !thumbs.containsKey(it.id) }
+
+        // Six at a time, and PUBLISHED as they land. This used to be a plain
+        // sequential loop that assigned `thumbs` once at the very end, so
+        // nothing appeared until all of them had finished one after another —
+        // a handful of seconds of blank cards, then everything at once. Six
+        // because the images come from one origin and hammering it is how the
+        // og:image backfill got itself throttled.
+        for (batch in wanted.chunked(6)) {
+            val fetched = batch.map { item ->
+                async {
+                    val bytes = runCatching {
+                        application.httpClient.get(client.thumbUrl(config, item.imageUrl!!, 480)) {
+                            header("Authorization", "Bearer ${config.apiKey}")
+                        }.body<ByteArray>()
+                    }.getOrNull()
+                    item.id to bytes?.let { decodeImageBytes(it) }
+                }
+            }.awaitAll()
+
+            val landed = fetched.mapNotNull { (id, bmp) -> bmp?.let { id to it } }
+            if (landed.isNotEmpty()) thumbs = thumbs + landed
         }
-        thumbs = out
     }
 
     // Calendar, device, weather and feed stats now live in Glance.kt — the
@@ -620,8 +635,11 @@ class FeedPanelState(
         CoroutineScope(Dispatchers.Main).launch { load(application, force = true) }
     }
 
+    /** Continue the panel's own thread in the app, where it can be scrolled. */
     fun openAsked() {
-        app?.let { onOpenApp(Launch.intent(it)) }
+        // panelConvId, not whichever chat was open last — landing somewhere
+        // else after "Open in app" loses the answer just given.
+        app?.let { onOpenApp(Launch.intent(it, conversationId = panelConvId)) }
     }
 
     fun clearReply() {
@@ -630,8 +648,15 @@ class FeedPanelState(
         reply = ""
     }
 
-    fun openChat(@Suppress("UNUSED_PARAMETER") id: String) {
-        app?.let { onOpenApp(Launch.intent(it)) }
+    /**
+     * Open the conversation that was tapped.
+     *
+     * The id used to be discarded, so every recent-chat row opened whichever
+     * chat happened to be open last — which on a panel whose whole purpose is
+     * picking between them made the list decorative.
+     */
+    fun openChat(id: String) {
+        app?.let { onOpenApp(Launch.intent(it, conversationId = id)) }
     }
 
     fun openSettings() {

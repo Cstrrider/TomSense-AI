@@ -29,6 +29,7 @@ import {
   PROVIDER_PRESETS,
 } from "./providers_api";
 import { routeChat } from "./routing";
+import { runTaskModel } from "./task_model";
 import { getPrefs, setPrefs, setAnalyticsKey, hasAnalyticsKey } from "./prefs";
 import { usageToday } from "./usage";
 import { synthesize, TTS_VOICES } from "./tts";
@@ -210,6 +211,7 @@ export default {
       if (path === "/voice") return await voice(req, env, who);
       if (path === "/runs" && req.method === "GET") return await listRuns(url, env, who);
       if (path.startsWith("/run/")) return await run(req, env, who, path);
+      if (path === "/title" && req.method === "POST") return await title(req, env, who);
       if (path === "/home/tools") return await homeTools(env);
       if (path === "/home/call" && req.method === "POST") return await homeCall(req, env);
       return json({ error: "not found" }, 404);
@@ -512,6 +514,53 @@ async function listRuns(url: URL, env: Env, who: Principal): Promise<Response> {
 
   const { results } = await stmt.all();
   return json({ runs: results });
+}
+
+/**
+ * Name a conversation from its opening exchange.
+ *
+ * The utility model has had a "title" purpose since task_model.ts was written
+ * and nothing ever called it, so every chat outside the assistant overlay
+ * stayed "New chat" forever — and the overlay only truncated the first message
+ * to 48 characters. This is the call that was missing.
+ *
+ * Runs on the task model rather than the chat model: it is a four-word
+ * classification, and taskSession keeps one warm prefix per user so it is
+ * mostly a cache hit. Failure returns null rather than an error, because a
+ * chat with no title is a cosmetic problem and must never fail a turn.
+ */
+async function title(req: Request, env: Env, who: Principal): Promise<Response> {
+  const body = (await req.json().catch(() => ({}))) as {
+    question?: string;
+    answer?: string;
+  };
+  const question = (body.question ?? "").trim();
+  if (!question) return json({ error: "question required" }, 400);
+
+  const prefs = await getPrefs(env, who.userId);
+  const text = await runTaskModel(env, who, {
+    purpose: "title",
+    slots: prefs.tool_models,
+    maxTokens: 16,
+    prompt:
+      "Write a title of at most six words for this conversation. " +
+      "Plain words only: no quotes, no punctuation at the end, no prefix like " +
+      '"Title:". Reply with the title and nothing else.\n\n' +
+      `User: ${question.slice(0, 500)}\n` +
+      (body.answer?.trim() ? `Assistant: ${body.answer.trim().slice(0, 500)}\n` : ""),
+  });
+
+  // Models add quotes and "Title:" prefixes no matter how firmly they are
+  // asked not to, so strip rather than trust — and cap the length, because a
+  // model that ignores "six words" should not produce a drawer row that runs
+  // off the screen.
+  const cleaned = (text ?? "")
+    .replace(/^\s*title\s*:\s*/i, "")
+    .replace(/^["'“”]+|["'“”.]+$/g, "")
+    .trim()
+    .slice(0, 60);
+
+  return json({ title: cleaned || null });
 }
 
 /**
