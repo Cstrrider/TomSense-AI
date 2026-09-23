@@ -148,6 +148,16 @@ class SyncEngine(
                 val convId = o.string("conv_id")
                 val content = o.string("content")
                 val deleted = o.long("deleted")
+
+                // `usage` and `model` are recorded locally from the done event
+                // and are deliberately NOT synced, so the row arriving from
+                // the server carries neither. upsertMessage is INSERT OR
+                // REPLACE, which drops every column it does not list — so
+                // without carrying these across by hand, a reply's usage
+                // footer appeared the moment it was recorded and then vanished
+                // on the very next sync, which is exactly how it looked.
+                val local = q.messageById(msgId).executeAsOneOrNull()
+
                 q.upsertMessage(
                     id = msgId,
                     conv_id = convId,
@@ -163,6 +173,10 @@ class SyncEngine(
                     device_id = o.string("device_id"),
                     dirty = 0,
                 )
+
+                if (local?.usage != null || local?.model != null) {
+                    q.updateMessageUsage(usage = local.usage, model = local.model, id = msgId)
+                }
                 // Keep search consistent with what arrived. Without this a
                 // message written on the laptop is readable on the phone but
                 // unfindable there — the worst kind of search bug, because

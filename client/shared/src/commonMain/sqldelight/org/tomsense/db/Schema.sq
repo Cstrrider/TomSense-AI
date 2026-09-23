@@ -35,6 +35,16 @@ INSERT OR REPLACE INTO conversation(
   created_at, updated_at, deleted, lamport, device_id, dirty
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
+-- DESTRUCTIVE on an existing row, and deliberately left that way. REPLACE
+-- deletes the row and re-inserts it, so `usage` and `model` — added in a later
+-- migration, local display only, and absent from this column list — revert to
+-- NULL. An ON CONFLICT DO UPDATE would preserve them, but the configured
+-- dialect is sqlite_3_18 and UPSERT needs 3.24.
+--
+-- Both ChatRepository callers insert freshly generated ids, so they can never
+-- hit an existing row. SyncEngine is the only caller that re-upserts a message
+-- that already exists, and it restores the two columns itself — see the note
+-- there. If a third caller ever appears, it has to do the same.
 upsertMessage:
 INSERT OR REPLACE INTO message(
   id, conv_id, role, content, encrypted, reasoning, tool_calls, attachments,

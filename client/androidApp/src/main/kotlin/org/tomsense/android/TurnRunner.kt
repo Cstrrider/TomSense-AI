@@ -160,13 +160,36 @@ class TurnRunner(
                             app.chat.sendToolResults(id, calls.map { runTool(it) })
                         }
                     }
-                    "end" -> app.repo.finishStreaming(assistantId)
+                    // The run is over, and HOW it ended matters. The edge puts
+                    // the failure on this event (status/error), and ignoring
+                    // both meant a run that died server-side finalised as an
+                    // empty bubble — indistinguishable from a model that
+                    // genuinely answered with nothing.
+                    "end" -> {
+                        if (ev.status == "error") {
+                            val why = ev.error?.takeIf { it.isNotBlank() } ?: "the run failed"
+                            app.repo.updateStreamingContent(
+                                assistantId,
+                                buffer.toString().let { if (it.isBlank()) "⚠ $why" else "$it\n\n⚠ $why" },
+                            )
+                        }
+                        // "cancelled" is the user pressing stop. Whatever
+                        // arrived before that is theirs to keep, unannotated.
+                        app.repo.finishStreaming(assistantId)
+                    }
                 }
             }
         }.onFailure {
+            // NOT "will retry". Nothing retries — there is no queue and no
+            // scheduled resend — and a message promising one that never comes
+            // is worse than an honest dead end. Regenerate is the actual
+            // recovery, so say that instead.
             app.repo.updateStreamingContent(
                 assistantId,
-                buffer.toString().ifEmpty { "[offline — will retry]" },
+                buffer.toString().let {
+                    val note = "⚠ connection lost — tap regenerate to retry"
+                    if (it.isBlank()) note else "$it\n\n$note"
+                },
             )
             app.repo.finishStreaming(assistantId)
         }

@@ -19,6 +19,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -44,9 +45,11 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -59,6 +62,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.coroutines.launch
 import org.tomsense.db.Message
 
 /**
@@ -133,11 +137,27 @@ fun ChatScreen(
     }
     val listState = rememberLazyListState()
 
+    /**
+     * Whether the tail is on screen.
+     *
+     * This is what stops the auto-scroll below from being a nuisance: it used
+     * to jump to the bottom on EVERY token, so scrolling up to re-read
+     * something during a reply dragged you straight back down again, once per
+     * token. Following only while already at the tail is what people expect.
+     */
+    val atTail by remember {
+        derivedStateOf {
+            val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()
+                ?: return@derivedStateOf true
+            last.index >= listState.layoutInfo.totalItemsCount - 2
+        }
+    }
+
     // Follow the tail as tokens stream in. Keyed on the last message's length
     // as well as the count, or the view freezes mid-answer while a single
     // message grows.
     LaunchedEffect(messages.size, messages.lastOrNull()?.content?.length) {
-        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
+        if (messages.isNotEmpty() && atTail) listState.animateScrollToItem(messages.lastIndex)
     }
 
     Scaffold(
@@ -220,9 +240,13 @@ fun ChatScreen(
                     )
                 }
             } else {
+                // Boxed so the jump-to-latest control can float over the list.
+                // Now that scrolling up stops the auto-follow, there has to be
+                // a way back down that is not a manual fling.
+                Box(Modifier.weight(1f).fillMaxWidth()) {
                 LazyColumn(
                     state = listState,
-                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    modifier = Modifier.fillMaxSize(),
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
@@ -245,6 +269,26 @@ fun ChatScreen(
                             }
                         }
                     }
+                }
+
+                // Only while the tail is off screen — it is both the way back
+                // and the signal that the view has stopped following.
+                if (!atTail) {
+                    val scope = rememberCoroutineScope()
+                    FilledTonalIconButton(
+                        onClick = { scope.launch { listState.animateScrollToItem(messages.lastIndex) } },
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 12.dp)
+                            .size(36.dp),
+                    ) {
+                        Icon(
+                            Icons.Filled.ExpandMore,
+                            contentDescription = "Jump to latest",
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                }
                 }
             }
 

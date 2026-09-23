@@ -210,13 +210,28 @@ private suspend fun send(deps: Deps, convId: String, text: String) {
                 // only `end` is terminal. Desktop has no tools, so in practice
                 // the two arrive together, but finishing on `done` would mark
                 // the message complete mid-generation the moment it does not.
-                "end" -> deps.repo.finishStreaming(assistantId)
+                "end" -> {
+                    // Same as TurnRunner: the failure rides on this event, and
+                    // dropping it finalises a dead run as an empty bubble.
+                    if (ev.status == "error") {
+                        val why = ev.error?.takeIf { it.isNotBlank() } ?: "the run failed"
+                        deps.repo.updateStreamingContent(
+                            assistantId,
+                            buffer.toString().let { if (it.isBlank()) "⚠ $why" else "$it\n\n⚠ $why" },
+                        )
+                    }
+                    deps.repo.finishStreaming(assistantId)
+                }
             }
         }
     }.onFailure {
+        // Not "will retry" — nothing does. See TurnRunner for the same fix.
         deps.repo.updateStreamingContent(
             assistantId,
-            buffer.toString().ifEmpty { "[offline — will retry]" },
+            buffer.toString().let {
+                val note = "⚠ connection lost — regenerate to retry"
+                if (it.isBlank()) note else "$it\n\n$note"
+            },
         )
         deps.repo.finishStreaming(assistantId)
     }
