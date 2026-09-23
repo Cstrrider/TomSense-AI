@@ -66,6 +66,27 @@ import org.tomsense.android.TurnRunner
 import org.tomsense.sync.ChatRequest
 import org.tomsense.sync.WireMessage
 import org.tomsense.ui.decodeImageBytes
+import org.tomsense.ui.MarkdownText
+import org.tomsense.android.ui.PromptPill
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.outlined.ThumbDown
+import androidx.compose.material.icons.outlined.ThumbUp
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.ui.draw.clip
+import org.tomsense.android.voice.VoiceController
 
 /**
  * What lives left of the home screen.
@@ -116,35 +137,36 @@ fun FeedPanel(app: TomsenseApp, state: FeedPanelState) {
                 .navigationBarsPadding()
                 .imePadding(),
         ) {
+            // Laid out like the Pixel's Discover feed: a header, the search
+            // pill, an at-a-glance block written straight onto the
+            // background, then cards. Wider side margins than a list, because
+            // this is a page to read rather than a list to scan.
             LazyColumn(
                 Modifier.fillMaxSize(),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
+                item { PanelHeader(state) }
+
                 // Ask first, because most openings of this panel are a question
                 // rather than a reading session — the same reason the Google app
                 // puts search at the top.
-                item { AskCard(state) }
-    
+                item { AskSection(state) }
+
+                item { Glance(state) }
+
                 if (state.calendar.isNotEmpty()) {
                     item { CalendarCard(state) }
                 }
-    
-                if (!state.insights.isEmpty) {
-                    item { InsightsCard(state) }
-                }
-    
-                // Recent chats live INSIDE the ask card now — they are the same
-                // thing as asking, just already started.
-    
+
                 item {
                     SectionLabel(
-                        "News",
+                        "Your news",
                         onRefresh = { state.refresh() },
                         busy = state.loading,
                     )
                 }
-    
+
                 if (state.loading && state.news.isEmpty()) {
                     item {
                         Row(Modifier.fillMaxWidth().padding(24.dp), horizontalArrangement = Arrangement.Center) {
@@ -152,7 +174,7 @@ fun FeedPanel(app: TomsenseApp, state: FeedPanelState) {
                         }
                     }
                 }
-    
+
                 state.error?.let { message ->
                     item {
                         Column {
@@ -161,7 +183,7 @@ fun FeedPanel(app: TomsenseApp, state: FeedPanelState) {
                         }
                     }
                 }
-    
+
                 items(state.news, key = { it.id }) { item ->
                     NewsCard(
                         item = item,
@@ -196,62 +218,126 @@ fun FeedPanel(app: TomsenseApp, state: FeedPanelState) {
  * following up.
  */
 @Composable
-private fun AskCard(state: FeedPanelState) {
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(
-                    value = state.draft,
-                    onValueChange = { state.draft = it },
-                    modifier = Modifier.weight(1f),
-                    placeholder = { Text("Ask TomSense") },
-                    singleLine = true,
-                )
-                IconButton(
-                    onClick = { state.ask() },
-                    enabled = state.draft.isNotBlank() && !state.asking,
-                ) {
-                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Ask")
+private fun PanelHeader(state: FeedPanelState) {
+    Row(
+        Modifier.fillMaxWidth().padding(top = 4.dp, start = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            Icons.Filled.AutoAwesome,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(26.dp),
+        )
+        Text(
+            "TomSense",
+            style = MaterialTheme.typography.headlineSmall,
+            modifier = Modifier.padding(start = 10.dp).weight(1f),
+        )
+        // Where the Google app keeps your account avatar: the way into
+        // everything that is not the feed.
+        FilledTonalIconButton(onClick = { state.openSettings() }) {
+            Icon(Icons.Filled.Settings, contentDescription = "Settings")
+        }
+    }
+}
+
+/**
+ * Ask, and read the answer without leaving the home screen.
+ *
+ * The turn runs HERE rather than launching the app: handing a question to an
+ * activity meant every "what time is my meeting" cost a cold start and a
+ * context switch, which is most of the reason to have a panel at all. The
+ * reply streams in; the app is one tap away when it needs following up.
+ */
+@Composable
+private fun AskSection(state: FeedPanelState) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        PromptPill(
+            value = state.draft,
+            onValueChange = { state.draft = it },
+            placeholder = "Ask TomSense",
+            think = state.think,
+            onThinkChange = { state.think = it },
+            listening = state.voice?.phase == VoiceController.Phase.Listening,
+            speaking = state.voice?.phase == VoiceController.Phase.Speaking,
+            partial = state.voice?.partial.orEmpty(),
+            onMic = { state.toggleMic() },
+            generating = state.asking,
+            onSend = { state.ask() },
+            onStop = { state.clearReply() },
+            modifier = Modifier.fillMaxWidth(),
+            maxLines = 3,
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        )
+
+        (state.micError ?: state.voice?.error)?.let {
+            Text(
+                it,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(horizontal = 16.dp),
+            )
+        }
+
+        if (state.asking || state.reply.isNotBlank()) {
+            Surface(
+                Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(24.dp),
+                color = MaterialTheme.colorScheme.surfaceContainer,
+            ) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (state.asked.isNotBlank()) {
+                        Text(
+                            state.asked,
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                    if (state.reply.isBlank()) {
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    } else {
+                        // Bounded and scrollable, like the assistant overlay.
+                        // Left unbounded a long answer grew the card until the
+                        // calendar and every news story were pushed off the panel.
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 280.dp)
+                                .verticalScroll(rememberScrollState()),
+                        ) {
+                            MarkdownText(state.reply)
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            TextButton(onClick = { state.openAsked() }) { Text("Continue in app") }
+                            TextButton(onClick = { state.clearReply() }) { Text("Clear") }
+                        }
+                    }
                 }
             }
+        }
 
-            if (state.asking && state.reply.isBlank()) {
-                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-            }
-
-            if (state.reply.isNotBlank()) {
-                // Bounded and scrollable, like the assistant overlay. Left
-                // unbounded a long answer grew the card until the calendar,
-                // insights and every news story were pushed off the panel.
-                Column(
-                    Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 260.dp)
-                        .verticalScroll(rememberScrollState()),
-                ) {
-                    Text(state.reply, style = MaterialTheme.typography.bodyMedium)
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    TextButton(onClick = { state.openAsked() }) { Text("Open in app") }
-                    TextButton(onClick = { state.clearReply() }) { Text("Clear") }
-                }
-            }
-
-            // Recent chats belong to this card: continuing a conversation and
-            // starting one are the same action, and on the panel background
-            // they were unreadable anyway.
-            if (state.recent.isNotEmpty()) {
-                HorizontalDivider(
-                    Modifier.padding(top = 2.dp),
-                    color = MaterialTheme.colorScheme.outlineVariant,
-                )
-                Text(
-                    "Recent",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                state.recent.forEach { (id, title) ->
-                    RecentRow(title) { state.openChat(id) }
+        // Recent chats as chips under the pill, where the Google app puts
+        // recent searches: continuing a conversation and starting one are
+        // the same action. Horizontal so they cost one line, not five.
+        if (state.recent.isNotEmpty()) {
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(state.recent, key = { it.first }) { (id, title) ->
+                    AssistChip(
+                        onClick = { state.openChat(id) },
+                        shape = CircleShape,
+                        label = {
+                            Text(
+                                title.ifBlank { "New chat" },
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.widthIn(max = 180.dp),
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(Icons.Filled.History, contentDescription = null, modifier = Modifier.size(18.dp))
+                        },
+                    )
                 }
             }
         }
@@ -267,18 +353,31 @@ private fun AskCard(state: FeedPanelState) {
  */
 @Composable
 private fun CalendarCard(state: FeedPanelState) {
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Surface(
+        Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(24.dp),
+        color = MaterialTheme.colorScheme.surfaceContainer,
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text(
                 "Today",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.primary,
             )
             state.calendar.forEach { entry ->
-                Column {
+                // The coloured rule is the Pixel calendar's event marker: it
+                // makes each entry a separate thing at a glance.
+                Row(Modifier.height(IntrinsicSize.Min)) {
+                    Box(
+                        Modifier
+                            .fillMaxHeight()
+                            .width(4.dp)
+                            .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(2.dp)),
+                    )
+                    Column(Modifier.padding(start = 12.dp)) {
                     Text(
                         entry.title,
-                        style = MaterialTheme.typography.bodyMedium,
+                        style = MaterialTheme.typography.bodyLarge,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -289,9 +388,10 @@ private fun CalendarCard(state: FeedPanelState) {
                     if (detail.isNotBlank()) {
                         Text(
                             detail,
-                            style = MaterialTheme.typography.labelSmall,
+                            style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                    }
                     }
                 }
             }
@@ -308,26 +408,30 @@ private fun CalendarCard(state: FeedPanelState) {
  * renders perfectly well without it.
  */
 @Composable
-private fun InsightsCard(state: FeedPanelState) {
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+private fun Glance(state: FeedPanelState) {
+    // Straight onto the background, no card — the Pixel's At a Glance is
+    // type on the wallpaper, and it is the one block here that should read as
+    // a headline rather than as one more item in a list.
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            java.time.LocalDate.now().format(java.time.format.DateTimeFormatter.ofPattern("EEEE, MMMM d")),
+            style = MaterialTheme.typography.headlineMedium,
+        )
+        state.insights.weather?.let { InsightRow(Icons.Filled.WbSunny, it, prominent = true) }
+        if (state.insights.summary.isNotBlank()) {
             Text(
-                "Insights",
-                style = MaterialTheme.typography.labelMedium,
+                state.insights.summary,
+                style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            if (state.insights.summary.isNotBlank()) {
-                Text(state.insights.summary, style = MaterialTheme.typography.bodyLarge)
-            }
-
-            // Icons and bodyMedium, not a stack of bodySmall strings. These
-            // are meant to be READ AT A GLANCE from a home screen, and three
-            // identical grey lines are read linearly — the icon is what makes
-            // "battery" findable without parsing the sentence.
-            state.insights.device?.let { InsightRow(Icons.Filled.BatteryFull, it) }
-            state.insights.weather?.let { InsightRow(Icons.Filled.WbSunny, it) }
-            state.insights.feed?.let { InsightRow(Icons.Filled.Newspaper, it) }
         }
+        // Icons, not a stack of identical grey lines: the icon is what
+        // makes "battery" findable without parsing the sentence.
+        state.insights.device?.let { InsightRow(Icons.Filled.BatteryFull, it) }
+        state.insights.feed?.let { InsightRow(Icons.Filled.Newspaper, it) }
     }
 }
 
@@ -381,17 +485,21 @@ internal fun UndoBar(
 
 /** One glanceable fact: icon, then the fact, at a size meant to be read. */
 @Composable
-private fun InsightRow(icon: androidx.compose.ui.graphics.vector.ImageVector, text: String) {
+private fun InsightRow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    text: String,
+    prominent: Boolean = false,
+) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Icon(
             icon,
             contentDescription = null,
-            modifier = Modifier.size(16.dp),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(if (prominent) 22.dp else 16.dp),
+            tint = if (prominent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Text(
             text,
-            style = MaterialTheme.typography.bodyMedium,
+            style = if (prominent) MaterialTheme.typography.titleMedium else MaterialTheme.typography.bodyMedium,
             modifier = Modifier.padding(start = 8.dp),
         )
     }
@@ -409,9 +517,8 @@ private fun SectionLabel(text: String, onRefresh: (() -> Unit)? = null, busy: Bo
     ) {
         Text(
             text,
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.weight(1f).padding(start = 4.dp),
         )
         onRefresh?.let { action ->
             // The spinner replaces the button rather than sitting beside it,
@@ -436,21 +543,6 @@ private fun SectionLabel(text: String, onRefresh: (() -> Unit)? = null, busy: Bo
     }
 }
 
-@Composable
-private fun RecentRow(title: String, onClick: () -> Unit) {
-    Text(
-        title.ifBlank { "New chat" },
-        style = MaterialTheme.typography.bodyMedium,
-        // Explicit, not inherited. This is exactly the text that was rendering
-        // black on the dark panel, and stating the colour means it cannot go
-        // invisible again if it is ever moved outside a Card.
-        color = MaterialTheme.colorScheme.onSurface,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 6.dp),
-    )
-}
-
 /** Shared with the in-app News tab — the panel is not the only surface. */
 @Composable
 internal fun NewsCard(
@@ -461,68 +553,90 @@ internal fun NewsCard(
     onLess: () -> Unit,
     onRead: () -> Unit,
 ) {
-    Card(Modifier.fillMaxWidth().clickable(onClick = onOpen)) {
-        Column {
+    // Discover-style: tonal card, big corner radius, image inset with its
+    // own rounded corners, headline in title weight, source and age beneath.
+    Surface(
+        onClick = onOpen,
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(24.dp),
+        color = MaterialTheme.colorScheme.surfaceContainer,
+    ) {
+        Column(Modifier.padding(8.dp)) {
             thumb?.let {
                 androidx.compose.foundation.Image(
                     bitmap = it,
                     contentDescription = null,
-                    modifier = Modifier.fillMaxWidth().height(160.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(16f / 9f)
+                        .clip(RoundedCornerShape(18.dp)),
                     contentScale = ContentScale.Crop,
                 )
             }
-            Column(Modifier.padding(12.dp)) {
+            Column(Modifier.padding(start = 8.dp, end = 8.dp, top = 10.dp)) {
                 Text(
                     item.title,
-                    style = MaterialTheme.typography.bodyLarge,
+                    style = MaterialTheme.typography.titleMedium,
                     maxLines = 3,
                     overflow = TextOverflow.Ellipsis,
                 )
                 Row(
-                    Modifier.fillMaxWidth().padding(top = 6.dp),
+                    Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        item.outlet.orEmpty(),
-                        style = MaterialTheme.typography.labelSmall,
+                        listOfNotNull(item.outlet?.takeIf { it.isNotBlank() }, ago(item.publishedAt))
+                            .joinToString(" · "),
+                        style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f),
                     )
-                    // Vector icons, never emoji: emoji render in the system
-                    // colour font and ignore tinting, so they look pasted on
-                    // against Material You.
-                    // Clearing without judging. Sits before the thumbs because
-                    // it is the one with no opinion attached — "I'm done with
-                    // this" is a far more common thing to mean than "show me
-                    // less of this", and it should not require picking a side.
+                    // Vector icons, never emoji: emoji ignore tinting and look
+                    // pasted on against Material You. Full 48dp containers —
+                    // "less like this" DELETES the story, so it must be the
+                    // hardest thing here to hit by accident. Mark-as-read sits
+                    // first because it is the one with no opinion attached.
                     IconButton(onClick = onRead) {
                         Icon(
                             Icons.Filled.DoneAll,
                             contentDescription = "Mark as read",
-                            modifier = Modifier.size(18.dp),
+                            modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    // Full-size containers: these were 32dp, well under the
-                    // 48dp minimum, and "less like this" DELETES the story —
-                    // a destructive action should be the hardest thing here to
-                    // hit by accident, not the easiest.
                     IconButton(onClick = onMore) {
                         Icon(
-                            Icons.Filled.ThumbUp,
+                            Icons.Outlined.ThumbUp,
                             contentDescription = "More like this",
-                            modifier = Modifier.size(18.dp),
+                            modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                     IconButton(onClick = onLess) {
                         Icon(
-                            Icons.Filled.ThumbDown,
+                            Icons.Outlined.ThumbDown,
                             contentDescription = "Less like this",
-                            modifier = Modifier.size(18.dp),
+                            modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 }
             }
         }
+    }
+}
+
+/** Seconds since epoch -> "5m", "3h", "2d"; null when unknown. */
+private fun ago(epochSeconds: Long): String? {
+    if (epochSeconds <= 0) return null
+    val mins = (System.currentTimeMillis() / 1000 - epochSeconds) / 60
+    return when {
+        mins < 1 -> "now"
+        mins < 60 -> "${mins}m"
+        mins < 60 * 24 -> "${mins / 60}h"
+        else -> "${mins / (60 * 24)}d"
     }
 }
 
@@ -545,6 +659,25 @@ class FeedPanelState(
     /** The answer to the question asked in the panel, streaming as it arrives. */
     var reply by mutableStateOf("")
     var asking by mutableStateOf(false)
+
+    /** The question the reply answers, shown above it. */
+    var asked by mutableStateOf("")
+
+    /** Think mode for panel questions. Sticky while the service lives, like the app's. */
+    var think by mutableStateOf(false)
+
+    /**
+     * Speech in and out, built on the first mic tap — most panel opens never
+     * speak, and the recogniser and TTS engine are not free to set up.
+     * State-backed so the card recomposes when it appears.
+     */
+    var voice by mutableStateOf<VoiceController?>(null)
+        private set
+    var micError by mutableStateOf<String?>(null)
+        private set
+
+    /** The next reply is spoken: the question arrived by voice. */
+    private var spokeLast = false
 
     private var app: TomsenseApp? = null
     private var lastLoad = 0L
@@ -730,6 +863,7 @@ class FeedPanelState(
         val application = app ?: return
 
         draft = ""
+        asked = text
         reply = ""
         asking = true
         turn?.cancel()
@@ -738,7 +872,15 @@ class FeedPanelState(
                 val active = runner ?: TurnRunner(app = application).also { runner = it }
                 val conversation = panelConvId
                     ?: application.repo.createConversation().also { panelConvId = it }
-                active.send(conversation, text, onText = { reply = it })
+                val speakThis = spokeLast
+                spokeLast = false
+                val speaker = voice?.takeIf { speakThis }
+                speaker?.beginReply()
+                active.send(conversation, text, think = think, onText = {
+                    reply = it
+                    speaker?.speakStreaming(it)
+                })
+                speaker?.endReply(reply)
             }.onFailure {
                 android.util.Log.w("TomSenseFeed", "panel turn failed", it)
                 reply = "Couldn't answer: " + (it.message ?: "unknown error")
@@ -768,9 +910,53 @@ class FeedPanelState(
         app?.let { onOpenApp(Launch.intent(it, conversationId = panelConvId)) }
     }
 
+    /**
+     * The mic. The panel is a window owned by a Service, so it cannot show the
+     * permission dialog — without the grant, say where to give it.
+     */
+    fun toggleMic() {
+        val application = app ?: return
+        if (!VoiceController.hasMicPermission(application)) {
+            micError = "Open TomSense and tap its mic once to allow the microphone."
+            return
+        }
+        micError = null
+        val v = voice ?: VoiceController(
+            context = application,
+            scope = CoroutineScope(Dispatchers.Main),
+            remoteTts = { text ->
+                runCatching { application.edge.speak(text, voice?.remoteVoice?.ifBlank { null }) }.getOrNull()
+            },
+            onFinalTranscript = { heard ->
+                spokeLast = true
+                draft = heard
+                ask()
+            },
+        ).also { created ->
+            voice = created
+            CoroutineScope(Dispatchers.Main).launch {
+                runCatching { application.providers.prefs() }.getOrNull()?.let { created.remoteVoice = it.ttsVoice }
+            }
+        }
+        v.toggleListening()
+    }
+
+    /** Panel closed: no mic left open, no reply talking over the home screen. */
+    fun silence() {
+        voice?.stopListening()
+        voice?.stopSpeaking()
+    }
+
+    fun shutdownVoice() {
+        voice?.shutdown()
+        voice = null
+    }
+
     fun clearReply() {
         turn?.cancel()
+        voice?.stopSpeaking()
         asking = false
+        asked = ""
         reply = ""
     }
 

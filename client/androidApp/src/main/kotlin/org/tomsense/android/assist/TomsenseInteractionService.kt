@@ -22,6 +22,7 @@ import org.tomsense.android.Launch
 import org.tomsense.android.TomsenseApp
 import org.tomsense.android.ui.TomsenseTheme
 import org.tomsense.android.TurnRunner
+import org.tomsense.android.voice.VoiceController
 import org.tomsense.sync.WireMessage
 import org.tomsense.tools.matchLocalIntent
 
@@ -83,6 +84,25 @@ class TomsenseSession(context: Context) : VoiceInteractionSession(context) {
     private var convId: String? = null
     private var turn: Job? = null
 
+    /** The next reply is spoken: the question arrived by voice. */
+    private var spokeLast = false
+    private var voiceLoaded = false
+
+    // Cheap to construct — the recogniser and TTS engine are only built on
+    // first use, so an invocation that stays typed pays nothing for it.
+    private val voice: VoiceController = VoiceController(
+        context = context,
+        scope = scope,
+        remoteTts = { text ->
+            runCatching { app.edge.speak(text, voice.remoteVoice.ifBlank { null }) }.getOrNull()
+        },
+        onFinalTranscript = { heard ->
+            spokeLast = true
+            state.draft = heard
+            send()
+        },
+    )
+
     // Type stated explicitly: the callbacks below close over `state`, and
     // inferring the type from an initialiser that references itself sends the
     // compiler into a recursion it reports as an unresolved reference.
@@ -92,6 +112,8 @@ class TomsenseSession(context: Context) : VoiceInteractionSession(context) {
         onDismiss = { hide() },
         onOpenApp = { openApp() },
         onDraftChange = { state.draft = it },
+        onMic = { toggleMic() },
+        voice = voice,
     )
 
     override fun onCreate() {
@@ -114,6 +136,16 @@ class TomsenseSession(context: Context) : VoiceInteractionSession(context) {
 
     override fun onShow(args: Bundle?, showFlags: Int) {
         super.onShow(args, showFlags)
+        // A new chat every time. The system is free to REUSE this session for
+        // the next power-button hold rather than building a fresh one, and the
+        // conversation id and last reply used to survive in it — so the
+        // overlay sometimes opened on the previous exchange and appended the
+        // new question to that old conversation.
+        turn?.cancel()
+        turn = null
+        convId = null
+        spokeLast = false
+        state.reset()
         state.hasScreenContext = screenText != null
         state.canOpenApp = true
     }
@@ -132,11 +164,20 @@ class TomsenseSession(context: Context) : VoiceInteractionSession(context) {
 
     override fun onHide() {
         super.onHide()
+        // Dismissed means quiet: no mic left open and no reply still
+        // talking over whatever app the user went back to.
+        voice.stopListening()
+        voice.stopSpeaking()
+        // Cleared on hide rather than on show: onHandleAssist may arrive
+        // BEFORE onShow, so clearing there could throw away this invocation's
+        // screen. Clearing here only ever drops the last one's.
+        screenText = null
         host.pause()
     }
 
     override fun onDestroy() {
         turn?.cancel()
+        voice.shutdown()
         scope.cancel()
         host.destroy()
         super.onDestroy()
@@ -149,6 +190,7 @@ class TomsenseSession(context: Context) : VoiceInteractionSession(context) {
         if (text.isEmpty() || state.generating) return
 
         state.draft = ""
+        state.asked = text
         state.reply = ""
         state.needsPermission = false
 
@@ -202,7 +244,16 @@ class TomsenseSession(context: Context) : VoiceInteractionSession(context) {
                 )
             } ?: emptyList()
 
-            val assistantId = runner.send(id, text, extraContext = context)
+            val speakThis = spokeLast
+            spokeLast = false
+            if (speakThis) voice.beginReply()
+            val assistantId = runner.send(
+                id,
+                text,
+                think = state.think,
+                extraContext = context,
+                onText = if (speakThis) voice::speakStreaming else null,
+            )
             // Spent: a follow-up in the same overlay is about the conversation,
             // not still about the screen they have since left.
             screenText = null
@@ -210,12 +261,33 @@ class TomsenseSession(context: Context) : VoiceInteractionSession(context) {
 
             val reply = app.db.schemaQueries.messageById(assistantId).executeAsOneOrNull()
             state.reply = reply?.content.orEmpty()
+            if (speakThis) voice.endReply(state.reply)
             state.needsPermission = state.reply.contains("permission not granted", ignoreCase = true)
         }
     }
 
+    /**
+     * The mic. A session has no Activity, so it cannot show the permission
+     * dialog — without the grant it sends you to the app, which asks the
+     * first time its own mic is tapped.
+     */
+    private fun toggleMic() {
+        if (!VoiceController.hasMicPermission(context)) {
+            state.needsPermission = true
+            return
+        }
+        if (!voiceLoaded) {
+            voiceLoaded = true
+            scope.launch {
+                runCatching { app.providers.prefs() }.getOrNull()?.let { voice.remoteVoice = it.ttsVoice }
+            }
+        }
+        voice.toggleListening()
+    }
+
     private fun stop() {
         turn?.cancel()
+        voice.stopSpeaking()
         state.generating = false
     }
 
@@ -235,7 +307,13 @@ class TomsenseSession(context: Context) : VoiceInteractionSession(context) {
 
     /** Hand the conversation to the full app and get out of the way. */
     private fun openApp() {
-        Launch.openWith(context, prefill = state.draft.takeIf { it.isNotBlank() })
+        // THIS conversation, not whichever one the app had open last — that
+        // was the other way the overlay led back to an old chat.
+        Launch.openWith(
+            context,
+            prefill = state.draft.takeIf { it.isNotBlank() },
+            conversationId = convId,
+        )
         hide()
     }
 

@@ -154,6 +154,15 @@ class VoiceController(
         )
     }
 
+    /**
+     * The mic button on surfaces that cannot ask for permission themselves
+     * (the assistant overlay, the feed panel): no Activity, no dialog.
+     * Tapping mid-reply barges in, because [startListening] stops speech.
+     */
+    fun toggleListening() {
+        if (phase == Phase.Listening) stopListening() else startListening()
+    }
+
     fun stopListening() {
         recognizer?.stopListening()
         phase = Phase.Idle
@@ -312,5 +321,8 @@ class VoiceController(
 
     companion object {
         val MIC_PERMISSION = Manifest.permission.RECORD_AUDIO
+
+        fun hasMicPermission(context: Context): Boolean =
+            context.checkSelfPermission(MIC_PERMISSION) == android.content.pm.PackageManager.PERMISSION_GRANTED
     }
 }

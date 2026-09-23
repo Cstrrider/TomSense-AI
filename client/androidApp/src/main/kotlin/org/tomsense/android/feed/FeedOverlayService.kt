@@ -86,6 +86,7 @@ class FeedOverlayService : Service() {
     override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onDestroy() {
+        state.shutdownVoice()
         detachWindow()
         scope.cancel()
         super.onDestroy()
@@ -297,6 +298,7 @@ class FeedOverlayService : Service() {
         if (visible == show) return
         visible = show
         state.visible = show
+        if (!show) state.silence()
 
         // Alpha and focusability in ONE submission: they belong to the same
         // params object, so pushing them separately would round-trip the

@@ -14,17 +14,21 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
-import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Smartphone
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Surface
+import org.tomsense.android.ui.PromptPill
+import org.tomsense.ui.MarkdownText
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -35,6 +39,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import org.tomsense.android.voice.VoiceController
 
 /**
  * The assistant surface: a card over whatever you were doing.
@@ -60,21 +65,37 @@ fun AssistOverlay(state: AssistUiState) {
         Modifier.fillMaxSize().navigationBarsPadding(),
         contentAlignment = Alignment.BottomCenter,
     ) {
-        Card(Modifier.fillMaxWidth().padding(12.dp)) {
-            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-
+        // Modelled on the Pixel's own assistant sheet: one floating rounded
+        // surface, tonal rather than outlined, hugging the bottom edge with a
+        // small margin so the app underneath still reads as "behind" it.
+        Surface(
+            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp),
+            shape = RoundedCornerShape(32.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            shadowElevation = 8.dp,
+        ) {
+            Column(
+                Modifier.padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Filled.AutoAwesome,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(start = 6.dp).size(20.dp),
+                    )
                     Text(
                         "TomSense",
-                        style = MaterialTheme.typography.labelLarge,
-                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.padding(start = 8.dp).weight(1f),
                     )
                     if (state.canOpenApp) {
                         IconButton(onClick = state.onOpenApp) {
                             Icon(
                                 Icons.AutoMirrored.Filled.OpenInNew,
                                 contentDescription = "Open in TomSense",
-                                modifier = Modifier.size(18.dp),
+                                modifier = Modifier.size(20.dp),
                             )
                         }
                     }
@@ -82,42 +103,56 @@ fun AssistOverlay(state: AssistUiState) {
                         Icon(
                             Icons.Filled.Close,
                             contentDescription = "Close",
-                            modifier = Modifier.size(18.dp),
+                            modifier = Modifier.size(20.dp),
                         )
                     }
                 }
 
-                // A TOGGLE, not a dismiss. It used to be a chip with an X that
-                // threw the screen text away permanently — one tap, no way
-                // back except re-invoking the assistant, and no way to tell
-                // afterwards whether the next answer would use the screen or
-                // not. Both states are now visible and either is one tap away.
-                if (state.hasScreenContext) {
-                    FilterChip(
-                        selected = state.useScreenContext,
-                        onClick = { state.useScreenContext = !state.useScreenContext },
-                        label = {
-                            Text(
-                                if (state.useScreenContext) {
-                                    "Using what's on screen"
-                                } else {
-                                    "Ignoring what's on screen"
-                                },
-                                style = MaterialTheme.typography.labelSmall,
-                            )
-                        },
-                        leadingIcon = if (state.useScreenContext) {
-                            {
-                                Icon(
-                                    Icons.Filled.Check,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(14.dp),
+                if (state.asked.isNotBlank() || state.reply.isNotBlank() || state.generating) {
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 360.dp)
+                            .verticalScroll(rememberScrollState())
+                            .padding(horizontal = 4.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        // Your question, echoed back as a bubble: without it a
+                        // spoken question vanishes the moment it is sent, and
+                        // the answer arrives with nothing to say what it is to.
+                        if (state.asked.isNotBlank()) {
+                            Surface(
+                                Modifier.align(Alignment.End).widthIn(max = 300.dp),
+                                shape = RoundedCornerShape(20.dp, 4.dp, 20.dp, 20.dp),
+                                color = MaterialTheme.colorScheme.primaryContainer,
+                            ) {
+                                Text(
+                                    state.asked,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
                                 )
                             }
+                        }
+                        if (state.reply.isBlank()) {
+                            if (state.generating) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                                    Text(
+                                        if (state.think) "Thinking it through…" else "Thinking…",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(start = 10.dp),
+                                    )
+                                }
+                            }
                         } else {
-                            null
-                        },
-                    )
+                            // Rendered markdown, same as the chat screen — a
+                            // reply full of literal asterisks looks broken on
+                            // the surface people see most.
+                            MarkdownText(state.reply)
+                        }
+                    }
                 }
 
                 state.notices.forEach {
@@ -125,29 +160,8 @@ fun AssistOverlay(state: AssistUiState) {
                         it,
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 4.dp),
                     )
-                }
-
-                if (state.reply.isNotBlank() || state.generating) {
-                    Column(
-                        Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 280.dp)
-                            .verticalScroll(rememberScrollState()),
-                    ) {
-                        if (state.reply.isBlank()) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
-                                Text(
-                                    "Thinking…",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    modifier = Modifier.padding(start = 8.dp),
-                                )
-                            }
-                        } else {
-                            Text(state.reply, style = MaterialTheme.typography.bodyMedium)
-                        }
-                    }
                 }
 
                 // Surfaced rather than swallowed: a tool that needs a
@@ -160,27 +174,49 @@ fun AssistOverlay(state: AssistUiState) {
                     }
                 }
 
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedTextField(
-                        value = state.draft,
-                        onValueChange = state.onDraftChange,
-                        modifier = Modifier.weight(1f),
-                        placeholder = { Text("Ask anything") },
-                        maxLines = 4,
+                state.voice.error?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(horizontal = 4.dp),
                     )
-                    if (state.generating) {
-                        IconButton(onClick = state.onStop) {
-                            Icon(Icons.Filled.Stop, contentDescription = "Stop")
-                        }
-                    } else {
-                        IconButton(
-                            onClick = state.onSend,
-                            enabled = state.draft.isNotBlank(),
-                        ) {
-                            Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
-                        }
-                    }
                 }
+
+                // A TOGGLE, not a dismiss — both states visible, either one
+                // tap away. Worded and placed like the Pixel's "Ask about
+                // screen" chip, directly above the prompt it applies to.
+                if (state.hasScreenContext) {
+                    FilterChip(
+                        selected = state.useScreenContext,
+                        onClick = { state.useScreenContext = !state.useScreenContext },
+                        shape = CircleShape,
+                        label = { Text("Ask about screen") },
+                        leadingIcon = {
+                            Icon(
+                                if (state.useScreenContext) Icons.Filled.Check else Icons.Filled.Smartphone,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        },
+                    )
+                }
+
+                PromptPill(
+                    value = state.draft,
+                    onValueChange = state.onDraftChange,
+                    placeholder = if (state.asked.isBlank()) "Ask TomSense" else "Ask a follow-up",
+                    think = state.think,
+                    onThinkChange = { state.think = it },
+                    listening = state.voice.phase == VoiceController.Phase.Listening,
+                    speaking = state.voice.phase == VoiceController.Phase.Speaking,
+                    partial = state.voice.partial,
+                    onMic = state.onMic,
+                    generating = state.generating,
+                    onSend = state.onSend,
+                    onStop = state.onStop,
+                    modifier = Modifier.fillMaxWidth(),
+                )
             }
         }
     }
@@ -198,9 +234,17 @@ class AssistUiState(
     val onDismiss: () -> Unit,
     val onOpenApp: () -> Unit,
     val onDraftChange: (String) -> Unit,
+    val onMic: () -> Unit,
+    /** Owned by the session; read here for phase, partial text and errors. */
+    val voice: VoiceController,
 ) {
+    /** Think mode for this invocation. Starts off: a power-button question wants a fast answer. */
+    var think by mutableStateOf(false)
     var draft by mutableStateOf("")
     var reply by mutableStateOf("")
+
+    /** The question the current reply answers, echoed above it. */
+    var asked by mutableStateOf("")
     var generating by mutableStateOf(false)
     var notices by mutableStateOf<List<String>>(emptyList())
 
@@ -214,4 +258,19 @@ class AssistUiState(
     var useScreenContext by mutableStateOf(true)
     var needsPermission by mutableStateOf(false)
     var canOpenApp by mutableStateOf(false)
+
+    /**
+     * Back to a blank sheet. Every invocation is a new question: the system
+     * can hand back the SAME session object for the next power-button hold,
+     * and without this it reopened showing the previous answer.
+     */
+    fun reset() {
+        draft = ""
+        reply = ""
+        asked = ""
+        generating = false
+        notices = emptyList()
+        needsPermission = false
+        think = false
+    }
 }

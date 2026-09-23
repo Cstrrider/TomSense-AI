@@ -37,10 +37,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
-import androidx.compose.material.icons.filled.Lightbulb
 import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
@@ -56,11 +53,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.dp
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
@@ -342,36 +339,8 @@ fun ChatScreen(
                         Icon(Icons.Filled.AttachFile, contentDescription = "Attach a file")
                     }
                 }
-                onMic?.let { mic ->
-                    IconButton(onClick = mic) {
-                        Icon(
-                            if (listening) Icons.Filled.MicOff else Icons.Filled.Mic,
-                            contentDescription = if (listening) "Stop listening" else "Speak",
-                            // Tinted while active so the mic state is readable
-                            // at a glance rather than from the icon shape.
-                            tint = if (listening || speaking) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                            },
-                        )
-                    }
-                }
-                thinkEnabled?.let { on ->
-                    // A toggle rather than a per-send choice: "think about
-                    // this one" is usually a mode you stay in for a few turns.
-                    IconButton(onClick = { onThinkChange(!on) }) {
-                        Icon(
-                            Icons.Filled.Lightbulb,
-                            contentDescription = if (on) "Think mode on" else "Think mode off",
-                            tint = if (on) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                            },
-                        )
-                    }
-                }
+                onMic?.let { mic -> MicToggle(listening, speaking, mic) }
+                thinkEnabled?.let { on -> ThinkToggle(on, onThinkChange) }
                 OutlinedTextField(
                     // While listening, the field shows what is being heard.
                     // Writing it into `draft` instead would leave a half-heard
