@@ -110,7 +110,9 @@ fun NewsScreen(app: TomsenseApp, state: FeedPanelState, modifier: Modifier = Mod
         } else {
             FilledTonalIconButton(
                 onClick = { state.refresh() },
-                modifier = Modifier.align(Alignment.TopEnd).padding(12.dp).size(36.dp),
+                // 48dp, not 36 — a floating control with nothing adjacent to
+                // mis-hit still has to be reachable with a thumb.
+                modifier = Modifier.align(Alignment.TopEnd).padding(12.dp).size(48.dp),
             ) {
                 Icon(
                     Icons.Filled.Refresh,

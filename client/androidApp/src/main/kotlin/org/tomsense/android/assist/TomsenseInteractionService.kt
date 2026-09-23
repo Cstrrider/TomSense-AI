@@ -91,10 +91,6 @@ class TomsenseSession(context: Context) : VoiceInteractionSession(context) {
         onStop = { stop() },
         onDismiss = { hide() },
         onOpenApp = { openApp() },
-        onDropScreenContext = {
-            screenText = null
-            state.hasScreenContext = false
-        },
         onDraftChange = { state.draft = it },
     )
 
@@ -129,6 +125,9 @@ class TomsenseSession(context: Context) : VoiceInteractionSession(context) {
         // reflects whatever arrived. Without it the context is captured and
         // then dropped roughly half the time.
         state.hasScreenContext = screenText != null
+        // Fresh screen, fresh default. A new invocation is a new question, so
+        // it should not inherit a toggle turned off during the last one.
+        state.useScreenContext = true
     }
 
     override fun onHide() {
@@ -159,7 +158,10 @@ class TomsenseSession(context: Context) : VoiceInteractionSession(context) {
             // Tier 0 first: "set a timer for ten minutes" from a power-button
             // hold should never reach the network. This is the invocation that
             // benefits most from it.
-            if (screenText == null) {
+            // Gated on whether the screen will actually be SENT, not on
+            // whether it was captured: with the toggle off this is a plain
+            // "set a timer" again and should stay off the network.
+            if (screenText == null || !state.useScreenContext) {
                 matchLocalIntent(text)?.let { intent ->
                     val args = buildJsonObject {
                         intent.args.forEach { (k, v) ->
@@ -187,7 +189,10 @@ class TomsenseSession(context: Context) : VoiceInteractionSession(context) {
                 onNotices = { state.notices = it },
             )
 
-            val context = screenText?.let {
+            // Honour the toggle. The text stays captured either way, so the
+            // user can change their mind before sending — turning it off no
+            // longer destroys it.
+            val context = screenText?.takeIf { state.useScreenContext }?.let {
                 listOf(
                     WireMessage(
                         "system",

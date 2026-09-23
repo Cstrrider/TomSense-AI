@@ -280,7 +280,10 @@ fun ChatScreen(
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
                             .padding(bottom = 12.dp)
-                            .size(36.dp),
+                            // 48dp: below that this is a thumb-sized target
+                            // sitting directly above the composer, which is
+                            // the worst place to need a precise tap.
+                            .size(48.dp),
                     ) {
                         Icon(
                             Icons.Filled.ExpandMore,

@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -18,7 +17,8 @@ import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material3.AssistChip
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -50,8 +50,14 @@ import androidx.compose.ui.unit.dp
  */
 @Composable
 fun AssistOverlay(state: AssistUiState) {
+    // NO imePadding here. This view is hosted by the VoiceInteractionSession's
+    // own window, and the framework already moves that window for the
+    // keyboard. Insetting on top of it is additive — the window shifts up and
+    // then the content is inset by another keyboard's height again, which is
+    // why the card shot to the top of the screen the moment the composer took
+    // focus.
     Box(
-        Modifier.fillMaxSize().imePadding().navigationBarsPadding(),
+        Modifier.fillMaxSize().navigationBarsPadding(),
         contentAlignment = Alignment.BottomCenter,
     ) {
         Card(Modifier.fillMaxWidth().padding(12.dp)) {
@@ -81,20 +87,35 @@ fun AssistOverlay(state: AssistUiState) {
                     }
                 }
 
-                // Shown only when the system actually offered screen text, and
-                // removable — answering about the wrong thing is worse than
-                // answering with no context, and the user can see which they
-                // are getting.
+                // A TOGGLE, not a dismiss. It used to be a chip with an X that
+                // threw the screen text away permanently — one tap, no way
+                // back except re-invoking the assistant, and no way to tell
+                // afterwards whether the next answer would use the screen or
+                // not. Both states are now visible and either is one tap away.
                 if (state.hasScreenContext) {
-                    AssistChip(
-                        onClick = state.onDropScreenContext,
-                        label = { Text("Using what's on screen", style = MaterialTheme.typography.labelSmall) },
-                        trailingIcon = {
-                            Icon(
-                                Icons.Filled.Close,
-                                contentDescription = "Ignore screen",
-                                modifier = Modifier.size(14.dp),
+                    FilterChip(
+                        selected = state.useScreenContext,
+                        onClick = { state.useScreenContext = !state.useScreenContext },
+                        label = {
+                            Text(
+                                if (state.useScreenContext) {
+                                    "Using what's on screen"
+                                } else {
+                                    "Ignoring what's on screen"
+                                },
+                                style = MaterialTheme.typography.labelSmall,
                             )
+                        },
+                        leadingIcon = if (state.useScreenContext) {
+                            {
+                                Icon(
+                                    Icons.Filled.Check,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(14.dp),
+                                )
+                            }
+                        } else {
+                            null
                         },
                     )
                 }
@@ -176,14 +197,21 @@ class AssistUiState(
     val onStop: () -> Unit,
     val onDismiss: () -> Unit,
     val onOpenApp: () -> Unit,
-    val onDropScreenContext: () -> Unit,
     val onDraftChange: (String) -> Unit,
 ) {
     var draft by mutableStateOf("")
     var reply by mutableStateOf("")
     var generating by mutableStateOf(false)
     var notices by mutableStateOf<List<String>>(emptyList())
+
+    /** Screen text was offered by the system and is available to use. */
     var hasScreenContext by mutableStateOf(false)
+
+    /**
+     * Whether to actually send it. Separate from availability so the choice
+     * can be changed back — the old drop-it-forever action could not be.
+     */
+    var useScreenContext by mutableStateOf(true)
     var needsPermission by mutableStateOf(false)
     var canOpenApp by mutableStateOf(false)
 }

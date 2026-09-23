@@ -11,12 +11,17 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.BatteryFull
+import androidx.compose.material.icons.filled.Newspaper
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.WbSunny
 import androidx.compose.material.icons.filled.ThumbDown
 import androidx.compose.material.icons.filled.ThumbUp
 import androidx.compose.material3.Card
@@ -92,10 +97,19 @@ fun FeedPanel(app: TomsenseApp, state: FeedPanelState) {
         Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.surface,
     ) {
+        // All three insets, and imePadding specifically BECAUSE this window is
+        // ours. The assistant overlay must not inset for the keyboard — the
+        // framework moves that window itself — but this one is a plain window
+        // added by hand with SOFT_INPUT_STATE_UNSPECIFIED, so nothing moves it
+        // and the ask box would be typed into from behind the keyboard.
+        // navigationBarsPadding for the matching reason: full-screen means the
+        // gesture bar sits on top of the last news card.
         Column(
             Modifier
                 .fillMaxSize()
-                .statusBarsPadding(),
+                .statusBarsPadding()
+                .navigationBarsPadding()
+                .imePadding(),
         ) {
             LazyColumn(
                 Modifier.fillMaxSize(),
@@ -278,16 +292,35 @@ private fun InsightsCard(state: FeedPanelState) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             if (state.insights.summary.isNotBlank()) {
-                Text(state.insights.summary, style = MaterialTheme.typography.bodyMedium)
+                Text(state.insights.summary, style = MaterialTheme.typography.bodyLarge)
             }
-            state.insights.lines.forEach {
-                Text(
-                    it,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+
+            // Icons and bodyMedium, not a stack of bodySmall strings. These
+            // are meant to be READ AT A GLANCE from a home screen, and three
+            // identical grey lines are read linearly — the icon is what makes
+            // "battery" findable without parsing the sentence.
+            state.insights.device?.let { InsightRow(Icons.Filled.BatteryFull, it) }
+            state.insights.weather?.let { InsightRow(Icons.Filled.WbSunny, it) }
+            state.insights.feed?.let { InsightRow(Icons.Filled.Newspaper, it) }
         }
+    }
+}
+
+/** One glanceable fact: icon, then the fact, at a size meant to be read. */
+@Composable
+private fun InsightRow(icon: androidx.compose.ui.graphics.vector.ImageVector, text: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Icon(
+            icon,
+            contentDescription = null,
+            modifier = Modifier.size(16.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            text,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.padding(start = 8.dp),
+        )
     }
 }
 
@@ -313,11 +346,15 @@ private fun SectionLabel(text: String, onRefresh: (() -> Unit)? = null, busy: Bo
             if (busy) {
                 CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
             } else {
-                IconButton(onClick = action, modifier = Modifier.size(28.dp)) {
+                // No size override: Material gives an IconButton a 48dp
+                // container for a reason, and setting .size(28.dp) on it
+                // shrinks the TOUCH TARGET, not just the visuals. The icon
+                // stays small; the tappable area does not.
+                IconButton(onClick = action) {
                     Icon(
                         Icons.Filled.Refresh,
                         contentDescription = "Refresh news",
-                        modifier = Modifier.size(16.dp),
+                        modifier = Modifier.size(18.dp),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
@@ -380,18 +417,22 @@ internal fun NewsCard(
                     // Vector icons, never emoji: emoji render in the system
                     // colour font and ignore tinting, so they look pasted on
                     // against Material You.
-                    IconButton(onClick = onMore, modifier = Modifier.size(32.dp)) {
+                    // Full-size containers: these were 32dp, well under the
+                    // 48dp minimum, and "less like this" DELETES the story —
+                    // a destructive action should be the hardest thing here to
+                    // hit by accident, not the easiest.
+                    IconButton(onClick = onMore) {
                         Icon(
                             Icons.Filled.ThumbUp,
                             contentDescription = "More like this",
-                            modifier = Modifier.size(16.dp),
+                            modifier = Modifier.size(18.dp),
                         )
                     }
-                    IconButton(onClick = onLess, modifier = Modifier.size(32.dp)) {
+                    IconButton(onClick = onLess) {
                         Icon(
                             Icons.Filled.ThumbDown,
                             contentDescription = "Less like this",
-                            modifier = Modifier.size(16.dp),
+                            modifier = Modifier.size(18.dp),
                         )
                     }
                 }
