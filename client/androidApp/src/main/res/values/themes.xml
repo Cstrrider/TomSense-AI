@@ -1,5 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- Paired with values-night/themes.xml, which overrides this to the dark
+         parent. The platform has no Theme.Material.DayNight, so the night
+         qualifier is how the WINDOW background follows the system setting.
+         Without that override the window stayed white while Compose picked a
+         dark scheme, and every pixel Compose did not paint — the status-bar
+         strip especially — rendered light behind dark cards. -->
     <style name="Theme.Tomsense" parent="android:Theme.Material.Light.NoActionBar" />
 
     <!-- The intent endpoint (AskActivity) must not flash a window; it exists

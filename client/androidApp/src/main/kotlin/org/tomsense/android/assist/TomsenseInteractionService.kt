@@ -20,6 +20,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import org.tomsense.android.Launch
 import org.tomsense.android.TomsenseApp
+import org.tomsense.android.ui.TomsenseTheme
 import org.tomsense.android.TurnRunner
 import org.tomsense.sync.WireMessage
 import org.tomsense.tools.matchLocalIntent
@@ -104,7 +105,9 @@ class TomsenseSession(context: Context) : VoiceInteractionSession(context) {
 
     override fun onCreateContentView(): View {
         val view = ComposeView(context).apply {
-            setContent { MaterialTheme { AssistOverlay(state) } }
+            // opaque = false: this floats a card over whatever app the user
+            // invoked the assistant from — filling the window would hide it.
+            setContent { TomsenseTheme(opaque = false) { AssistOverlay(state) } }
         }
         // Must happen before the view is attached, or Compose throws looking
         // for owners that are not there yet.

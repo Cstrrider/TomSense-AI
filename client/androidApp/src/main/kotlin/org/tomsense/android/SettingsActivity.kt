@@ -55,6 +55,7 @@ import org.tomsense.sync.CreateProvider
 import org.tomsense.sync.ModelOption
 import org.tomsense.sync.PrefsPatch as UpdatePrefs
 import org.tomsense.sync.ToolModels
+import org.tomsense.android.ui.TomsenseTheme
 import org.tomsense.sync.UsageToday
 import org.tomsense.sync.UserPrefs
 import org.tomsense.sync.Preset
@@ -77,7 +78,7 @@ class SettingsActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            MaterialTheme {
+            TomsenseTheme {
                 var providers by remember { mutableStateOf<List<ProviderView>>(emptyList()) }
                 var models by remember { mutableStateOf<List<ModelOption>>(emptyList()) }
                 var presets by remember { mutableStateOf<List<Preset>>(emptyList()) }

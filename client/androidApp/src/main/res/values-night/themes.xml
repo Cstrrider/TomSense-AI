@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The dark half of Theme.Tomsense. The platform provides no
+         Theme.Material.DayNight, so the -night qualifier is what makes the
+         window background follow the system setting and stop showing white
+         behind a dark Compose colour scheme.
+
+         Theme.Tomsense.Transparent is deliberately NOT repeated here: it is
+         transparent in both modes, and a night copy would be a second place
+         to keep in sync for no behavioural difference. -->
+    <style name="Theme.Tomsense" parent="android:Theme.Material.NoActionBar" />
+</resources>

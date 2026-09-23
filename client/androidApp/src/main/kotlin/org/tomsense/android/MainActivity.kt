@@ -44,6 +44,7 @@ import org.tomsense.sync.SyncStatus
 import org.tomsense.sync.WireMessage
 import org.tomsense.android.tools.PermissionGate
 import org.tomsense.tools.schemas
+import org.tomsense.android.ui.TomsenseTheme
 import org.tomsense.ui.ChatScreen
 import org.tomsense.ui.ConversationDrawer
 
@@ -157,7 +158,7 @@ class MainActivity : ComponentActivity() {
         ) { uri -> uri?.let(::attach) }
 
         setContent {
-            MaterialTheme {
+            TomsenseTheme {
                 var ready by remember { mutableStateOf(false) }
                 // Re-read on every composition after a resume: the token
                 // arrives via a different activity, so this screen has no
