@@ -40,6 +40,58 @@ const ALLOWED_CONTAINERS = new Set([
   "adguard",
 ]);
 
+/** LAN-internal, resolved on the shared Docker network. Never public. */
+const SEARXNG_URL = process.env["SEARXNG_URL"] ?? "http://tomsense-searxng:8080";
+const SEARX_MAX_RESULTS = Number(process.env["SEARXNG_MAX_RESULTS"] ?? "5");
+
+/** A whole page of prose is useful; a whole page of markup is not. */
+const MAX_PAGE_CHARS = 12_000;
+
+interface SearxResult {
+  title?: string;
+  url?: string;
+  content?: string;
+}
+
+/**
+ * Reject anything that resolves inward.
+ *
+ * Hostname-based, so it is a guard rather than a guarantee — a public name
+ * pointing at a private address still gets through. It stops the obvious
+ * shapes (literals, localhost, .local, .internal) and the remaining exposure
+ * is read-only GETs from a container that already only speaks to searxng.
+ * Closing it properly means resolving first and checking the address, which
+ * needs a DNS round trip per fetch.
+ */
+function isPrivateHost(host: string): boolean {
+  const h = host.toLowerCase().replace(/^\[|\]$/g, "");
+  if (h === "localhost" || h.endsWith(".local") || h.endsWith(".internal")) return true;
+  if (h === "::1" || h.startsWith("fc") || h.startsWith("fd")) return true;
+  if (/^127\./.test(h) || /^10\./.test(h) || /^192\.168\./.test(h)) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(h)) return true;
+  if (/^169\.254\./.test(h)) return true;
+  // Bare single-label names are Docker service names on this network.
+  if (!h.includes(".")) return true;
+  return false;
+}
+
+/** Strip markup down to the prose a model can actually use. */
+function readable(html: string): string {
+  return html
+    .replace(/<script\b[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style\b[\s\S]*?<\/style>/gi, " ")
+    .replace(/<noscript\b[\s\S]*?<\/noscript>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 interface ToolDef {
   name: string;
   description: string;
@@ -122,6 +174,81 @@ const TOOLS: ToolDef[] = [
         timeout: 10_000,
       });
       return stdout.trim();
+    },
+  },
+
+  // ─── LAN services ────────────────────────────────────────────────────────
+  //
+  // searxng has no public address and should never have one. It is reachable
+  // from here only because this container shares its Docker network, which is
+  // the entire reason the agent exists: the edge asks, the agent answers, and
+  // nothing at home is exposed. qdrant, jupyter and piper drop in the same
+  // way when they are wanted.
+
+  {
+    name: "web_search",
+    description:
+      "Search the web for one fact, date, price or score. Returns titles, URLs and snippets.",
+    inputSchema: {
+      type: "object",
+      properties: { query: { type: "string", description: "3-8 word query." } },
+      required: ["query"],
+    },
+    handler: async (args) => {
+      const query = requireString(args, "query");
+      const url = new URL(`${SEARXNG_URL}/search`);
+      url.searchParams.set("q", query);
+      url.searchParams.set("format", "json");
+
+      const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+      if (!res.ok) throw new Error(`searxng returned ${res.status}`);
+
+      const data = (await res.json()) as { results?: SearxResult[] };
+      // Trimmed to the three fields a model can act on. Handing back searxng's
+      // full records would spend most of the context on engine metadata and
+      // scoring internals that mean nothing to it.
+      return (data.results ?? []).slice(0, SEARX_MAX_RESULTS).map((r) => ({
+        title: r.title,
+        url: r.url,
+        snippet: r.content,
+      }));
+    },
+  },
+
+  {
+    name: "fetch_page",
+    description:
+      "Fetch and read a web page in full. Use after web_search when the snippets are too brief.",
+    inputSchema: {
+      type: "object",
+      properties: { url: { type: "string", description: "Full URL, http or https." } },
+      required: ["url"],
+    },
+    handler: async (args) => {
+      const target = new URL(requireString(args, "url"));
+
+      // http(s) only, and never a private address. Without this, "fetch a
+      // page" is a request-forgery primitive aimed at the home network by an
+      // internet-facing Worker — file://, http://192.168.x, or anything else
+      // sharing this Docker network. The agent is the component holding LAN
+      // access, so the restriction has to live here rather than at the edge.
+      if (target.protocol !== "http:" && target.protocol !== "https:") {
+        throw new Error("only http and https URLs can be fetched");
+      }
+      if (isPrivateHost(target.hostname)) {
+        throw new Error("refusing to fetch a private or loopback address");
+      }
+
+      const res = await fetch(target, {
+        signal: AbortSignal.timeout(20_000),
+        headers: { "User-Agent": "TomSense/1.0 (home agent)" },
+      });
+      if (!res.ok) throw new Error(`fetch returned ${res.status}`);
+
+      return {
+        url: target.toString(),
+        text: readable(await res.text()).slice(0, MAX_PAGE_CHARS),
+      };
     },
   },
 ];

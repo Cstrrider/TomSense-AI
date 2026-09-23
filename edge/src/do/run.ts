@@ -73,6 +73,15 @@ interface RunRecord {
   messages: ChatMessage[];
   tools: unknown[];
   /**
+   * Which of those tools live at home.
+   *
+   * The model is shown one flat list; only the round splitter needs to know
+   * that these go down the HomeLink socket instead of being parked for the
+   * phone. Names rather than schemas, because that is all the split needs and
+   * the schemas are already in `tools`.
+   */
+  homeTools: string[];
+  /**
    * Replay state, deliberately compacted rather than an event log. Storing
    * every delta would blow the value limit on a long answer and replay
    * hundreds of one-token frames to a reconnecting client for no benefit.
@@ -157,6 +166,7 @@ export class DetachedRun implements DurableObject {
       fallbackModel: string | null;
       messages: ChatMessage[];
       tools?: unknown[];
+      homeTools?: string[];
       sourceImageKeys?: string[];
       notices?: string[];
       reasoningEffort?: "high" | null;
@@ -171,6 +181,7 @@ export class DetachedRun implements DurableObject {
       status: "running",
       messages: body.messages,
       tools: body.tools ?? [],
+      homeTools: body.homeTools ?? [],
       content: "",
       reasoning: "",
       rounds: [],
@@ -396,8 +407,19 @@ export class DetachedRun implements DurableObject {
           // Split the round: the edge answers its own tools immediately, the
           // phone answers the rest. Parking for a tool the device cannot run
           // would hang the run until it was swept away.
+          // Three lanes, not two. The edge answers its own tools, the HOME
+          // AGENT answers LAN ones over its socket, and only what is left
+          // belongs to the phone. Home tools must not be parked as device
+          // calls: the phone has no idea what lan_disk_free is and the run
+          // would hang until it was swept away.
+          const home = new Set(rec.homeTools);
           const serverCalls = round.toolCalls.filter((t) => isServerTool(t.name));
-          const deviceCalls = round.toolCalls.filter((t) => !isServerTool(t.name));
+          const homeCalls = round.toolCalls.filter(
+            (t) => !isServerTool(t.name) && home.has(t.name),
+          );
+          const deviceCalls = round.toolCalls.filter(
+            (t) => !isServerTool(t.name) && !home.has(t.name),
+          );
 
           for (const call of serverCalls) {
             const prefs = await getPrefs(this.env, rec.userId);
@@ -436,6 +458,20 @@ export class DetachedRun implements DurableObject {
             } as ChatMessage);
           }
 
+          for (const call of homeCalls) {
+            const result = await this.callHome(call);
+            if (result.error) {
+              rec.notices.push(result.error);
+              this.emit({ type: "notice", text: result.error });
+            }
+            rec.messages.push({
+              role: "tool",
+              tool_call_id: call.id,
+              name: call.name,
+              content: result.content,
+            } as ChatMessage);
+          }
+
           if (deviceCalls.length) {
             rec.pendingToolCalls = deviceCalls;
             rec.status = "awaiting_tools";
@@ -444,8 +480,9 @@ export class DetachedRun implements DurableObject {
             return; // parked — /tool_result resumes us
           }
 
-          // Only server tools ran, so nothing is waiting on the phone: keep
-          // going and let the model use what it just got back.
+          // Only edge-side tools ran — the edge's own or the home agent's —
+          // so nothing is waiting on the phone: keep going and let the model
+          // use what it just got back.
           await this.persist(true);
           continue;
         }
@@ -525,6 +562,37 @@ export class DetachedRun implements DurableObject {
   }
 
   // ─── client callbacks ─────────────────────────────────────────────────────
+
+  /**
+   * Run one tool on the home agent.
+   *
+   * Never throws. The agent being offline is a NORMAL condition — that is the
+   * whole premise of splitting the planes — so it comes back as a tool result
+   * the model can read and work around, not as a failed run. The user sees it
+   * too, via a notice, because "I couldn't check that" is a better answer than
+   * a vague apology with no reason attached.
+   */
+  private async callHome(call: ToolCall): Promise<{ content: string; error?: string }> {
+    try {
+      const id = this.env.HOMELINK.idFromName("default");
+      const res = await this.env.HOMELINK.get(id).fetch(
+        new Request("https://do/call", {
+          method: "POST",
+          body: JSON.stringify({ name: call.name, arguments: call.arguments }),
+        }),
+      );
+      const body = (await res.json()) as { result?: unknown; error?: string };
+
+      if (!res.ok || body.error) {
+        const why = body.error ?? `home agent returned ${res.status}`;
+        return { content: JSON.stringify({ error: why }), error: `${call.name}: ${why}` };
+      }
+      return { content: JSON.stringify(body.result ?? null) };
+    } catch (e) {
+      const why = (e as Error).message;
+      return { content: JSON.stringify({ error: why }), error: `${call.name}: ${why}` };
+    }
+  }
 
   /**
    * POST /tool_result — hand back what the client's tools produced and resume.

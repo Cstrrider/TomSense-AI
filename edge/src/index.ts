@@ -277,6 +277,11 @@ async function chat(req: Request, env: Env, who: Principal): Promise<Response> {
 
   const fallbackModel = routed.fallbackModel;
 
+  // Asked once per turn rather than cached: the agent can come and go, and a
+  // stale list would either hide a tool that is available or offer one that is
+  // not. It is a Durable Object read, not a network hop home.
+  const home = await homeToolSurface(env);
+
   const runId = crypto.randomUUID();
   await env.DB.prepare(
     `INSERT INTO runs (id, user_id, conv_id, status, model, started_at)
@@ -296,10 +301,14 @@ async function chat(req: Request, env: Env, who: Principal): Promise<Response> {
         model: routed.model,
         fallbackModel,
         messages,
-        // The device advertises what it can do; the edge adds what IT can do.
-        // Merging here rather than in the client means a new server tool does
-        // not need an app update to exist.
-        tools: [...(body.tools ?? []), ...serverToolSchemas()],
+        // Three sources merged here: the device advertises what it can do, the
+        // edge adds what IT can do, and the home agent adds whatever it is
+        // currently exposing on the LAN. Merging at this point rather than in
+        // the client means a new server or home tool needs no app update to
+        // exist — and when the agent is offline its tools are simply not
+        // offered, so the model never calls something unreachable.
+        tools: [...(body.tools ?? []), ...serverToolSchemas(), ...home.schemas],
+        homeTools: home.names,
         // The DO receives messages with attachments already expanded into
         // data URLs, so the keys are gone by then — and edit_image needs a
         // key, not a data URL.
@@ -503,6 +512,44 @@ async function listRuns(url: URL, env: Env, who: Principal): Promise<Response> {
 
   const { results } = await stmt.all();
   return json({ runs: results });
+}
+
+/**
+ * What the home agent is currently offering, as model-ready schemas.
+ *
+ * Returns empty when the agent is offline or unreachable, which is the
+ * designed degradation rather than an error: LAN tools disappear and chat,
+ * voice, history and memory carry on. Never throws, because a home agent
+ * having a bad day must not be able to fail a chat turn.
+ */
+async function homeToolSurface(
+  env: Env,
+): Promise<{ schemas: unknown[]; names: string[] }> {
+  try {
+    const res = await homeTools(env);
+    const body = (await res.json()) as {
+      online?: boolean;
+      tools?: { name: string; description: string; inputSchema: unknown }[];
+    };
+    if (!body.online || !body.tools?.length) return { schemas: [], names: [] };
+
+    return {
+      // The agent speaks MCP-shaped tool defs; the models here take the
+      // OpenAI function shape. Translating at the boundary keeps the agent
+      // free of any knowledge of which model is being served.
+      schemas: body.tools.map((t) => ({
+        type: "function",
+        function: {
+          name: t.name,
+          description: t.description,
+          parameters: t.inputSchema,
+        },
+      })),
+      names: body.tools.map((t) => t.name),
+    };
+  } catch {
+    return { schemas: [], names: [] };
+  }
 }
 
 async function homeTools(env: Env): Promise<Response> {

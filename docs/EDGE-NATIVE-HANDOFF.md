@@ -112,9 +112,29 @@ That is true *right now* specifically because:
 - `KEY_ENC_SECRET` wraps provider API keys at rest in D1, and the `providers`
   table is **empty**. Once real BYO keys are stored, losing this secret makes
   them permanently undecryptable — at that point it must be backed up properly.
-- `HOME_AGENT_TOKEN` is only consumed by the home agent, which is not deployed
-  yet. Re-roll with `wrangler secret put` and set the same value in the agent's
-  environment.
+- `HOME_AGENT_TOKEN` is consumed by the home agent, which **is now deployed**,
+  so re-rolling means re-rolling both sides together: `wrangler secret put` and
+  the same value in the agent's environment, or the agent reconnect-loops on
+  401.
+
+## Home agent (deployed)
+
+`tomsense-homeagent`, on the `tomsense` Docker network, dialling
+`wss://tomsense-edge.tdisarro.workers.dev/homelink/agent`. Six tools: the four
+LAN ones plus `web_search` and `fetch_page`, which reach `tomsense-searxng`
+over that shared network — it has no public address and does not need one.
+
+Started with `docker run`, **without the Docker socket**. `lan_container_status`
+and `lan_container_restart` therefore fail; everything else works. Mount the
+socket to enable them, and note that the `:ro` suggestion in
+`docker-compose.homeagent.yml` does not do what it looks like: a read-only bind
+of a unix socket does not make the Docker API read-only, so it grants the same
+root-equivalent access as `rw`. Mount it or do not.
+
+The edge merges whatever the agent advertises into every run's tool list at
+`/chat`, and `run.ts` routes those calls down the socket rather than parking
+them for the phone. Agent offline means its tools are simply not offered that
+turn.
 
 ---
 
