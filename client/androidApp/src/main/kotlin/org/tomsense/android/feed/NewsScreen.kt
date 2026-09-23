@@ -76,6 +76,7 @@ fun NewsScreen(app: TomsenseApp, state: FeedPanelState, modifier: Modifier = Mod
                             onOpen = { state.openArticle(item) },
                             onMore = { state.rate(item, "more") },
                             onLess = { state.rate(item, "less") },
+                            onRead = { state.rate(item, "read") },
                         )
                     }
 

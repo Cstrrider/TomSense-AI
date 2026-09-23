@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.BatteryFull
+import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Newspaper
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.WbSunny
@@ -164,6 +165,7 @@ fun FeedPanel(app: TomsenseApp, state: FeedPanelState) {
                         onOpen = { state.openArticle(item) },
                         onMore = { state.rate(item, "more") },
                         onLess = { state.rate(item, "less") },
+                        onRead = { state.rate(item, "read") },
                     )
                 }
             }
@@ -386,6 +388,7 @@ internal fun NewsCard(
     onOpen: () -> Unit,
     onMore: () -> Unit,
     onLess: () -> Unit,
+    onRead: () -> Unit,
 ) {
     Card(Modifier.fillMaxWidth().clickable(onClick = onOpen)) {
         Column {
@@ -417,6 +420,17 @@ internal fun NewsCard(
                     // Vector icons, never emoji: emoji render in the system
                     // colour font and ignore tinting, so they look pasted on
                     // against Material You.
+                    // Clearing without judging. Sits before the thumbs because
+                    // it is the one with no opinion attached — "I'm done with
+                    // this" is a far more common thing to mean than "show me
+                    // less of this", and it should not require picking a side.
+                    IconButton(onClick = onRead) {
+                        Icon(
+                            Icons.Filled.DoneAll,
+                            contentDescription = "Mark as read",
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
                     // Full-size containers: these were 32dp, well under the
                     // 48dp minimum, and "less like this" DELETES the story —
                     // a destructive action should be the hardest thing here to
@@ -715,21 +729,34 @@ class FeedPanelState(
             CoroutineScope(Dispatchers.IO).launch {
                 val config = NewsClient.config(application)
                 if (config.isComplete) {
-                    runCatching { NewsClient(application.httpClient).feedback(config, item.id, "click") }
+                    // "opened", not "click". The Worker's kinds are more,
+                    // less, opened, skipped and read — "click" was rejected
+                    // every time, so tapping through taught the ranker nothing
+                    // for the entire life of this panel.
+                    runCatching { NewsClient(application.httpClient).feedback(config, item.id, "opened") }
+                        .onFailure { android.util.Log.w("TomSenseFeed", "open feedback failed", it) }
                 }
             }
         }
     }
 
     fun rate(item: NewsClient.Item, action: String) {
-        // Removed from view immediately on "less": leaving it there while the
-        // request flies makes the button look broken.
-        if (action == "less") news = news.filterNot { it.id == item.id }
+        // Removed from view immediately on anything that clears the article:
+        // leaving it on screen while the request flies makes the button look
+        // broken. "read" clears it exactly like "less" does — the difference
+        // between them is the opinion attached, not the disappearance.
+        if (action == "less" || action == "read") {
+            news = news.filterNot { it.id == item.id }
+        }
         app?.let { application ->
             CoroutineScope(Dispatchers.IO).launch {
                 val config = NewsClient.config(application)
                 if (config.isComplete) {
+                    // Logged, not swallowed. A rejected rating used to leave no
+                    // trace at all, which is how a field-name mismatch went
+                    // unnoticed while every button looked like it worked.
                     runCatching { NewsClient(application.httpClient).feedback(config, item.id, action) }
+                        .onFailure { android.util.Log.w("TomSenseFeed", "rating '$action' failed", it) }
                 }
             }
         }

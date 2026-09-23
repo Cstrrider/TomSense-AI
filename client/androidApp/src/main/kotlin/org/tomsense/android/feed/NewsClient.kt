@@ -55,8 +55,17 @@ class NewsClient(private val http: HttpClient) {
         val items: List<Item> = emptyList(),
     )
 
+    /**
+     * `kind`, not `action`.
+     *
+     * The Worker requires {id, kind} and 400s on anything else. This field was
+     * named `action`, so every thumbs up and down from this app was silently
+     * rejected — the card vanished locally, which looked exactly like success,
+     * while the taste vector never moved and the article was never dismissed.
+     * It returned on the next refresh and read as a flaky button.
+     */
     @Serializable
-    private data class Feedback(val id: String, val action: String)
+    private data class Feedback(val id: String, val kind: String)
 
     /**
      * The status check is not ceremony.
@@ -83,11 +92,16 @@ class NewsClient(private val http: HttpClient) {
      * — otherwise the next refresh serves it straight back and the button
      * looks broken. The Worker handles that; this only has to send it.
      */
-    suspend fun feedback(config: Config, id: String, action: String) {
-        http.post("${config.baseUrl}/feedback") {
+    suspend fun feedback(config: Config, id: String, kind: String) {
+        val res = http.post("${config.baseUrl}/feedback") {
             header("Authorization", "Bearer ${config.apiKey}")
             contentType(ContentType.Application.Json)
-            setBody(Feedback(id, action))
+            setBody(Feedback(id, kind))
+        }
+        // Checked, not fired and forgotten. This call silently 400'd for its
+        // whole life because nothing ever looked at the response.
+        if (!res.status.isSuccess()) {
+            throw IOException("feedback '$kind' rejected: HTTP ${res.status.value}")
         }
     }
 
