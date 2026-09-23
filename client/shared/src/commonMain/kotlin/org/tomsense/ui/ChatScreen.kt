@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -33,6 +34,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Lightbulb
@@ -54,6 +56,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -442,10 +446,45 @@ private fun MessageBubble(
                 }
 
                 if (message.content.isNotBlank()) {
-                    Text(message.content, style = MaterialTheme.typography.bodyMedium)
+                    // Markdown, not plain text. A model's reply is full of
+                    // headings, lists and fenced code, and rendering it raw
+                    // put literal ``` and ** on screen while making code
+                    // indistinguishable from prose.
+                    //
+                    // The user's own messages stay plain: they typed them, and
+                    // reinterpreting someone's asterisks as emphasis is wrong.
+                    if (isUser) {
+                        Text(message.content, style = MaterialTheme.typography.bodyMedium)
+                    } else {
+                        MarkdownText(message.content)
+                    }
                 }
 
-                UsageFooter(message.model, message.usage)
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    UsageFooter(message.model, message.usage)
+                    Spacer(Modifier.weight(1f))
+                    // Copy the SOURCE, not the rendered text — someone copying
+                    // a reply usually wants to paste it somewhere that
+                    // understands markdown, and the formatting is information.
+                    if (message.content.isNotBlank()) {
+                        val clipboard = LocalClipboardManager.current
+                        IconButton(
+                            onClick = { clipboard.setText(AnnotatedString(message.content)) },
+                            modifier = Modifier.size(32.dp),
+                        ) {
+                            Icon(
+                                Icons.Filled.ContentCopy,
+                                contentDescription = "Copy message",
+                                modifier = Modifier.size(14.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
             }
         }
     }

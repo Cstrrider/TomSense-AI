@@ -100,6 +100,15 @@ fun NewsScreen(app: TomsenseApp, state: FeedPanelState, modifier: Modifier = Mod
             }
         }
 
+        state.undoable?.let { (item, _) ->
+            UndoBar(
+                label = item.title.take(28).trim() + "… removed",
+                onUndo = { state.undoRate() },
+                onExpire = { state.clearUndo() },
+                modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
+            )
+        }
+
         // Floating rather than in a bar: this screen has no chrome of its own,
         // and a whole app bar for one control would cost more height than the
         // control is worth.

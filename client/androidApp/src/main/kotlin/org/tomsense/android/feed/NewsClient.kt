@@ -67,6 +67,9 @@ class NewsClient(private val http: HttpClient) {
     @Serializable
     private data class Feedback(val id: String, val kind: String)
 
+    @Serializable
+    private data class UndoRequest(val id: String)
+
     /**
      * The status check is not ceremony.
      *
@@ -92,6 +95,26 @@ class NewsClient(private val http: HttpClient) {
      * — otherwise the next refresh serves it straight back and the button
      * looks broken. The Worker handles that; this only has to send it.
      */
+    /**
+     * Take back the last rating on an article.
+     *
+     * A real undo, not a compensating opposite vote. Voting "more" to cancel a
+     * "less" leaves two events in the append-only log and a taste vector only
+     * NEAR where it started — and the log is what a rebuild re-derives from,
+     * so the mistake would return the next time weights are retuned. The
+     * Worker drops the event, un-dismisses the article and re-derives.
+     */
+    suspend fun undo(config: Config, id: String) {
+        val res = http.post("${config.baseUrl}/feedback/undo") {
+            header("Authorization", "Bearer ${config.apiKey}")
+            contentType(ContentType.Application.Json)
+            setBody(UndoRequest(id))
+        }
+        if (!res.status.isSuccess()) {
+            throw IOException("undo rejected: HTTP ${res.status.value}")
+        }
+    }
+
     suspend fun feedback(config: Config, id: String, kind: String) {
         val res = http.post("${config.baseUrl}/feedback") {
             header("Authorization", "Bearer ${config.apiKey}")

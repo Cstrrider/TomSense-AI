@@ -120,6 +120,17 @@ tasks.register<JavaExec>("checkLocalIntents") {
     mainClass.set("org.tomsense.tools.CheckLocalIntentsKt")
 }
 
+/** Exercise the Markdown parser. `./gradlew -q :shared:checkMarkdown` */
+tasks.register<JavaExec>("checkMarkdown") {
+    group = "verification"
+    description = "Check Markdown block parsing, fence precedence and inline spans"
+    val desktopMain = kotlin.targets.getByName("desktop").compilations.getByName("main")
+    dependsOn(desktopMain.compileTaskProvider)
+    classpath = files(desktopMain.output.allOutputs) +
+        configurations.getByName("desktopRuntimeClasspath")
+    mainClass.set("org.tomsense.ui.CheckMarkdownKt")
+}
+
 /** Exercise the sentence chunker. `./gradlew -q :shared:checkChunker` */
 tasks.register<JavaExec>("checkChunker") {
     group = "verification"

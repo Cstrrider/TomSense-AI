@@ -3,12 +3,16 @@ package org.tomsense.android.feed
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.imePadding
@@ -105,7 +109,7 @@ fun FeedPanel(app: TomsenseApp, state: FeedPanelState) {
         // and the ask box would be typed into from behind the keyboard.
         // navigationBarsPadding for the matching reason: full-screen means the
         // gesture bar sits on top of the last news card.
-        Column(
+        Box(
             Modifier
                 .fillMaxSize()
                 .statusBarsPadding()
@@ -169,6 +173,15 @@ fun FeedPanel(app: TomsenseApp, state: FeedPanelState) {
                     )
                 }
             }
+
+            state.undoable?.let { (item, _) ->
+                UndoBar(
+                    label = item.title.take(28).trim() + "… removed",
+                    onUndo = { state.undoRate() },
+                    onExpire = { state.clearUndo() },
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp),
+                )
+            }
         }
     }
 }
@@ -207,7 +220,17 @@ private fun AskCard(state: FeedPanelState) {
             }
 
             if (state.reply.isNotBlank()) {
-                Text(state.reply, style = MaterialTheme.typography.bodyMedium)
+                // Bounded and scrollable, like the assistant overlay. Left
+                // unbounded a long answer grew the card until the calendar,
+                // insights and every news story were pushed off the panel.
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 260.dp)
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    Text(state.reply, style = MaterialTheme.typography.bodyMedium)
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     TextButton(onClick = { state.openAsked() }) { Text("Open in app") }
                     TextButton(onClick = { state.clearReply() }) { Text("Clear") }
@@ -304,6 +327,54 @@ private fun InsightsCard(state: FeedPanelState) {
             state.insights.device?.let { InsightRow(Icons.Filled.BatteryFull, it) }
             state.insights.weather?.let { InsightRow(Icons.Filled.WbSunny, it) }
             state.insights.feed?.let { InsightRow(Icons.Filled.Newspaper, it) }
+        }
+    }
+}
+
+/**
+ * "Removed — Undo", floating over the list.
+ *
+ * A snackbar in spirit, hand-rolled because the feed panel is an overlay with
+ * no Scaffold to host a real SnackbarHost, and having the two surfaces differ
+ * would be worse than either choice.
+ *
+ * It times out rather than waiting to be dismissed: an undo bar that stays
+ * forever becomes furniture, and the offer is only meaningful while the action
+ * is still the last thing you did.
+ */
+@Composable
+internal fun UndoBar(
+    label: String,
+    onUndo: () -> Unit,
+    onExpire: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    LaunchedEffect(label) {
+        kotlinx.coroutines.delay(6_000)
+        onExpire()
+    }
+    Surface(
+        modifier = modifier,
+        tonalElevation = 6.dp,
+        shadowElevation = 6.dp,
+        shape = MaterialTheme.shapes.small,
+        color = MaterialTheme.colorScheme.inverseSurface,
+    ) {
+        Row(
+            Modifier.padding(start = 16.dp, end = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                label,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.inverseOnSurface,
+            )
+            TextButton(onClick = onUndo) {
+                Text(
+                    "Undo",
+                    color = MaterialTheme.colorScheme.inversePrimary,
+                )
+            }
         }
     }
 }
@@ -740,12 +811,45 @@ class FeedPanelState(
         }
     }
 
+    /**
+     * The last removal, offered back.
+     *
+     * Holds the INDEX as well as the item so undo restores it where it was
+     * rather than at the top — a story reappearing somewhere it never sat
+     * reads as a new story, not as the one you just took back.
+     */
+    var undoable by mutableStateOf<Pair<NewsClient.Item, Int>?>(null)
+        private set
+
+    fun clearUndo() {
+        undoable = null
+    }
+
+    /** Put the article back, and take the rating off the record. */
+    fun undoRate() {
+        val (item, index) = undoable ?: return
+        undoable = null
+        news = news.toMutableList().also {
+            it.add(index.coerceAtMost(it.size), item)
+        }
+        app?.let { application ->
+            CoroutineScope(Dispatchers.IO).launch {
+                val config = NewsClient.config(application)
+                if (config.isComplete) {
+                    runCatching { NewsClient(application.httpClient).undo(config, item.id) }
+                        .onFailure { android.util.Log.w("TomSenseFeed", "undo failed", it) }
+                }
+            }
+        }
+    }
+
     fun rate(item: NewsClient.Item, action: String) {
         // Removed from view immediately on anything that clears the article:
         // leaving it on screen while the request flies makes the button look
         // broken. "read" clears it exactly like "less" does — the difference
         // between them is the opinion attached, not the disappearance.
         if (action == "less" || action == "read") {
+            undoable = item to news.indexOfFirst { it.id == item.id }.coerceAtLeast(0)
             news = news.filterNot { it.id == item.id }
         }
         app?.let { application ->
