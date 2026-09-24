@@ -15,6 +15,9 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -49,12 +52,12 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
@@ -167,26 +170,46 @@ fun ChatScreen(
     val listState = rememberLazyListState()
 
     /**
-     * Whether the tail is on screen.
+     * Whether the view follows the stream. Decided by the USER'S scrolling,
+     * never by the content.
      *
-     * This is what stops the auto-scroll below from being a nuisance: it used
-     * to jump to the bottom on EVERY token, so scrolling up to re-read
-     * something during a reply dragged you straight back down again, once per
-     * token. Following only while already at the tail is what people expect.
+     * The previous rule — "follow while the last message is visible" — was
+     * always true inside a long reply, because you are reading the last
+     * message. And it scrolled to the TOP of that message, so once a reply
+     * outgrew the screen every token yanked the view back to its first line
+     * and you could not scroll it at all while it streamed.
+     *
+     * Content growth can't be the signal either: every token leaves the list
+     * momentarily not-at-bottom, which would switch following off by itself.
+     * So: touching the list stops following; letting go resumes it only if
+     * you left it at the very bottom.
      */
-    val atTail by remember {
-        derivedStateOf {
-            val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()
-                ?: return@derivedStateOf true
-            last.index >= listState.layoutInfo.totalItemsCount - 2
+    var following by remember { mutableStateOf(true) }
+    LaunchedEffect(listState) {
+        listState.interactionSource.interactions.collect {
+            if (it is DragInteraction.Start) following = false
         }
+    }
+    LaunchedEffect(listState) {
+        // Fires after flings too, so a fling that lands at the bottom
+        // re-engages following just like a drag that does.
+        snapshotFlow { listState.isScrollInProgress }.collect { scrolling ->
+            if (!scrolling) following = !listState.canScrollForward
+        }
+    }
+
+    // Sending (or opening a chat) always goes to the bottom, even if you had
+    // scrolled up: the thing you just did is down there.
+    LaunchedEffect(messages.size) {
+        if (messages.takeLast(2).any { it.role == "user" }) following = true
     }
 
     // Follow the tail as tokens stream in. Keyed on the last message's length
     // as well as the count, or the view freezes mid-answer while a single
-    // message grows.
+    // message grows. Not animated: an animation per token is still running
+    // when the next token lands, and the two fight.
     LaunchedEffect(messages.size, messages.lastOrNull()?.content?.length) {
-        if (messages.isNotEmpty() && atTail) listState.animateScrollToItem(messages.lastIndex)
+        if (messages.isNotEmpty() && following) listState.scrollToEnd(messages.lastIndex)
     }
 
     Scaffold(
@@ -348,10 +371,13 @@ fun ChatScreen(
 
                 // Only while the tail is off screen — it is both the way back
                 // and the signal that the view has stopped following.
-                if (!atTail) {
+                if (!following) {
                     val scope = rememberCoroutineScope()
                     FilledTonalIconButton(
-                        onClick = { scope.launch { listState.animateScrollToItem(messages.lastIndex) } },
+                        onClick = {
+                            following = true
+                            scope.launch { listState.scrollToEnd(messages.lastIndex) }
+                        },
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
                             .padding(bottom = 12.dp)
@@ -902,4 +928,17 @@ internal fun formatUsd(usd: Double): String {
     if (usd < 0.0001) return "<\$0.0001"
     val cents = (usd * 10000).toInt()
     return "\$" + (cents / 10000) + "." + (cents % 10000).toString().padStart(4, '0')
+}
+
+/**
+ * Scroll so the BOTTOM of item [lastIndex] sits at the bottom of the viewport.
+ *
+ * scrollToItem alone aligns an item's top, which for a reply taller than the
+ * screen means showing its first line. Bring the item into the layout first,
+ * then scroll forward as far as the list allows — scrollBy is clamped to the
+ * content, so the large delta just means "all the way".
+ */
+private suspend fun LazyListState.scrollToEnd(lastIndex: Int) {
+    if (layoutInfo.visibleItemsInfo.none { it.index == lastIndex }) scrollToItem(lastIndex)
+    scrollBy(100_000f)
 }

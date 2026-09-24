@@ -231,8 +231,16 @@ async function difficultyRoute(
 
   if (!verdict || !verdict.toUpperCase().includes("HARD")) return null;
 
-  // Escalate to the heaviest CF model the user actually has configured,
-  // rather than a hardcoded id that may not be in their list at all.
+  // The Research slot is the user's own answer to "which model for hard
+  // questions" — it wins. Without one, fall back to stable's rule (a heavy
+  // CF model), but ONLY if the default isn't heavy already: escalating a
+  // glm-5.3-flash default to the first "70b" in the list sent a hard question
+  // to llama-3.3-70b, a sideways-to-worse move dressed up as an upgrade.
+  const research = slots.research?.trim();
+  if (research) return research;
+  const current = await getDefaultModel(env, who);
+  if (current && NEURON_HEAVY.some((h) => current.includes(h))) return null;
+
   const options = await listModels(env, who);
   const heavy = options.find(
     (o) => o.value.startsWith(`${CF_BUILTIN_ID}::`) && NEURON_HEAVY.some((h) => o.value.includes(h)),

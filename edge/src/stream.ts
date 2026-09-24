@@ -26,6 +26,8 @@ import { flattenForTextModel, chatCompletionsUrl } from "./providers";
 const STALL_MS = 25_000;
 /** Emit a heartbeat if nothing has been sent to the client for this long. */
 const HEARTBEAT_MS = 5_000;
+/** Output budget for non-reasoning CF models when the caller sets none. */
+const DEFAULT_MAX_TOKENS = 4096;
 
 export interface RoundOptions {
   provider: Provider;
@@ -370,7 +372,18 @@ async function* streamWorkersAi(opts: RoundOptions): AsyncGenerator<StreamEvent>
     const input: Record<string, unknown> = { messages: msgs, stream: true };
     if (tools?.length) input["tools"] = tools;
     if (temperature !== undefined) input["temperature"] = temperature;
-    if (maxTokens !== undefined) input["max_tokens"] = maxTokens;
+    if (maxTokens !== undefined) {
+      input["max_tokens"] = maxTokens;
+    } else if (!caps.reasoning) {
+      // Workers AI's own default is 256 tokens for these models, which cut
+      // a llama-3.3-70b answer off mid-sentence ("…aerospace companies
+      // should"). Reasoning models are left alone: their defaults are
+      // already large, and a cap here would starve the thinking. Bounded by
+      // the context window when CF tells us one (input estimated ~3.5 ch/tok).
+      const approxIn = Math.ceil(JSON.stringify(msgs).length / 3.5);
+      const room = caps.context ? caps.context - approxIn - 256 : DEFAULT_MAX_TOKENS;
+      input["max_tokens"] = Math.max(256, Math.min(DEFAULT_MAX_TOKENS, room));
+    }
     // Same rule as the fetch path: gpt-oss needs an explicit effort or it
     // spends the whole budget reasoning invisibly.
     if (modelId.includes("gpt-oss")) {

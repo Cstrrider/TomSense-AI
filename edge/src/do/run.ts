@@ -29,6 +29,9 @@ import { getPrefs } from "./../prefs";
 import { costUsd } from "./../usage";
 import { warmCfCapabilities } from "./../capabilities";
 
+/** Liveness while edge-side tools run; matches the model stream's cadence. */
+const HEARTBEAT_MS = 5_000;
+
 /**
  * Ceiling on model→tool→model cycles in a single run.
  *
@@ -404,10 +407,27 @@ export class DetachedRun implements DurableObject {
             : {}),
         } as ChatMessage);
 
+        // Lanes are decided BEFORE `done` goes out, because `done` tells the
+        // phone which calls are ITS to run. It used to list every call, so
+        // the phone also "ran" deep_research/web_search, got "unknown tool",
+        // and posted results to a run that was never waiting for them.
+        const home = new Set(rec.homeTools);
+        const mcp = new Map((rec.mcpTools ?? []).map((m) => [m.name, m]));
+        const serverCalls = round.toolCalls.filter((t) => isServerTool(t.name));
+        const homeCalls = round.toolCalls.filter(
+          (t) => !isServerTool(t.name) && home.has(t.name),
+        );
+        const mcpCalls = round.toolCalls.filter(
+          (t) => !isServerTool(t.name) && !home.has(t.name) && mcp.has(t.name),
+        );
+        const deviceCalls = round.toolCalls.filter(
+          (t) => !isServerTool(t.name) && !home.has(t.name) && !mcp.has(t.name),
+        );
+
         this.emit({
           type: "done",
           content: round.content,
-          toolCalls: round.toolCalls,
+          toolCalls: deviceCalls,
           usage: round.usage,
           stalled: round.stalled,
           model: round.model ?? rec.model,
@@ -428,19 +448,13 @@ export class DetachedRun implements DurableObject {
           // would hang until it was swept away.
           // A fourth lane since: tools from the user's remote MCP servers,
           // executed here against the server that advertised them.
-          const home = new Set(rec.homeTools);
-          const mcp = new Map((rec.mcpTools ?? []).map((m) => [m.name, m]));
-          const serverCalls = round.toolCalls.filter((t) => isServerTool(t.name));
-          const homeCalls = round.toolCalls.filter(
-            (t) => !isServerTool(t.name) && home.has(t.name),
-          );
-          const mcpCalls = round.toolCalls.filter(
-            (t) => !isServerTool(t.name) && !home.has(t.name) && mcp.has(t.name),
-          );
-          const deviceCalls = round.toolCalls.filter(
-            (t) => !isServerTool(t.name) && !home.has(t.name) && !mcp.has(t.name),
-          );
-
+          // Keep the connection visibly alive while the edge works. Heartbeats
+          // used to come only from the model stream, so a deep_research that
+          // took 38s sent NOTHING — and OkHttp's 10s read timeout on the phone
+          // cut the stream and showed "connection lost" for a run that went
+          // on to finish fine.
+          const beat = setInterval(() => this.emit({ type: "heartbeat" }), HEARTBEAT_MS);
+          try {
           for (const call of serverCalls) {
             const prefs = await getPrefs(this.env, rec.userId);
             const result = await runServerTool(this.env, rec.userId, call, {
@@ -513,6 +527,10 @@ export class DetachedRun implements DurableObject {
               name: call.name,
               content: result.content,
             } as ChatMessage);
+          }
+
+          } finally {
+            clearInterval(beat);
           }
 
           if (deviceCalls.length) {
