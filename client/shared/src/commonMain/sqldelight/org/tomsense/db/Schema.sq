@@ -94,6 +94,11 @@ UPDATE conversation SET deleted = 1, lamport = ?, dirty = 1 WHERE id = ?;
 tombstoneMessagesFor:
 UPDATE message SET deleted = 1, lamport = ?, dirty = 1 WHERE conv_id = ?;
 
+-- Rewind: remove a message and everything after it. Tombstones rather than
+-- DELETE so the removal syncs; created_at orders a conversation everywhere.
+tombstoneMessagesFrom:
+UPDATE message SET deleted = 1, lamport = ?, dirty = 1 WHERE conv_id = ? AND created_at >= ? AND deleted = 0;
+
 -- ─── search ─────────────────────────────────────────────────────────────────
 --
 -- Only the TITLE search lives here. Everything touching `message_fts` is in

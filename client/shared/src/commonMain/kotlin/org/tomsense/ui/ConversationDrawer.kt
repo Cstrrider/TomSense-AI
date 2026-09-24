@@ -65,8 +65,14 @@ fun ConversationDrawer(
     onPin: (String, Boolean) -> Unit,
     onDelete: (String) -> Unit,
     modifier: Modifier = Modifier,
+    /** (id, name) of the user's projects. Empty hides the filter row. */
+    projects: List<Pair<String, String>> = emptyList(),
 ) {
     var renaming by remember { mutableStateOf<Conversation?>(null) }
+    // null = all chats. Filtering here rather than in the query keeps the
+    // pinned-first order the query already guarantees.
+    var projectFilter by remember { mutableStateOf<String?>(null) }
+    val shown = if (projectFilter == null) conversations else conversations.filter { it.project_id == projectFilter }
     var deleting by remember { mutableStateOf<Conversation?>(null) }
 
     Column(modifier.fillMaxSize().padding(horizontal = 12.dp)) {
@@ -93,6 +99,29 @@ fun ConversationDrawer(
             singleLine = true,
         )
 
+        if (projects.isNotEmpty() && results == null) {
+            androidx.compose.foundation.lazy.LazyRow(
+                Modifier.fillMaxWidth().padding(top = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                item {
+                    androidx.compose.material3.FilterChip(
+                        selected = projectFilter == null,
+                        onClick = { projectFilter = null },
+                        label = { Text("All") },
+                    )
+                }
+                items(projects.size) { i ->
+                    val (id, name) = projects[i]
+                    androidx.compose.material3.FilterChip(
+                        selected = projectFilter == id,
+                        onClick = { projectFilter = if (projectFilter == id) null else id },
+                        label = { Text(name) },
+                    )
+                }
+            }
+        }
+
         if (results != null) {
             SearchResultList(
                 results = results,
@@ -102,7 +131,7 @@ fun ConversationDrawer(
             )
         } else {
             ConversationList(
-                conversations = conversations,
+                conversations = shown,
                 selectedId = selectedId,
                 onSelect = onSelect,
                 onRenameRequest = { renaming = it },

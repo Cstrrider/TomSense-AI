@@ -119,6 +119,13 @@ class TurnRunner(
         extraContext: List<WireMessage> = emptyList(),
     ): List<WireMessage> =
         listOf(WireMessage("system", org.tomsense.data.deviceSystemPrompt())) +
+            // Per-chat instructions. The column and its setter existed long
+            // before anything sent it, so "chat instructions" did nothing.
+            listOfNotNull(
+                app.db.schemaQueries.conversationById(convId).executeAsOneOrNull()
+                    ?.system_prompt?.takeIf { it.isNotBlank() }
+                    ?.let { WireMessage("system", "Instructions for this conversation (follow them):\n$it") },
+            ) +
             extraContext +
             app.db.schemaQueries.messagesFor(convId).executeAsList()
                 .filter { it.id != exclude && (it.content.isNotBlank() || it.attachments != null) }

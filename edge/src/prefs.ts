@@ -35,11 +35,42 @@ export interface UserPrefs {
   tts_voice: string;
   /** Difficulty routing. Defaults ON, matching stable. */
   auto_route: boolean;
+  /** Active persona id, or "" for none. */
+  persona_id: string;
+  /** Prompts offered on an empty chat. Empty means DEFAULT_STARTERS. */
+  starters: string[];
+  /**
+   * Whether the edge may pull durable facts out of conversations on its own.
+   * On by default like stable; off keeps only memories written explicitly
+   * (by the user, or by the model through the remember tool).
+   */
+  auto_memory: boolean;
 }
 
 // Empty tts_voice on purpose: speech defaults to the DEVICE engine, which
 // costs nothing and works offline. aura-2 is opt-in.
-const DEFAULTS: UserPrefs = { tool_models: {}, auto_route: true, tts_voice: "" };
+const DEFAULTS: UserPrefs = {
+  tool_models: {},
+  auto_route: true,
+  tts_voice: "",
+  persona_id: "",
+  starters: [],
+  auto_memory: true,
+};
+
+/**
+ * Shown on an empty chat until the user writes their own. Generic on purpose:
+ * they show what the app can DO (device tools, search, images), not guesses
+ * about any particular person.
+ */
+export const DEFAULT_STARTERS = [
+  "What's on my calendar today?",
+  "Search the web for today's top story",
+  "Set a timer for 10 minutes",
+  "Draw a watercolour of a lighthouse at dusk",
+  "Explain a concept like I'm new to it",
+  "Help me plan my week",
+];
 
 export async function getPrefs(env: Env, userId: string): Promise<UserPrefs> {
   const row = await env.DB.prepare(`SELECT prefs FROM users WHERE id = ?`)
@@ -59,6 +90,11 @@ export async function getPrefs(env: Env, userId: string): Promise<UserPrefs> {
     tool_models: parsed.tool_models ?? {},
     auto_route: parsed.auto_route ?? DEFAULTS.auto_route,
     tts_voice: parsed.tts_voice ?? DEFAULTS.tts_voice,
+    persona_id: parsed.persona_id ?? DEFAULTS.persona_id,
+    starters: Array.isArray(parsed.starters)
+      ? parsed.starters.filter((x): x is string => typeof x === "string")
+      : [],
+    auto_memory: parsed.auto_memory ?? DEFAULTS.auto_memory,
   };
 }
 
@@ -73,7 +109,14 @@ export async function getPrefs(env: Env, userId: string): Promise<UserPrefs> {
 export async function setPrefs(
   env: Env,
   who: Principal,
-  patch: { tool_models?: ToolModels; auto_route?: boolean; tts_voice?: string },
+  patch: {
+    tool_models?: ToolModels;
+    auto_route?: boolean;
+    tts_voice?: string;
+    persona_id?: string;
+    starters?: string[];
+    auto_memory?: boolean;
+  },
 ): Promise<UserPrefs> {
   const current = await getPrefs(env, who.userId);
 
@@ -89,6 +132,11 @@ export async function setPrefs(
     tool_models,
     auto_route: patch.auto_route ?? current.auto_route,
     tts_voice: patch.tts_voice ?? current.tts_voice,
+    persona_id: patch.persona_id ?? current.persona_id,
+    starters: Array.isArray(patch.starters)
+      ? patch.starters.map((x) => String(x).trim()).filter(Boolean).slice(0, 12)
+      : current.starters,
+    auto_memory: patch.auto_memory ?? current.auto_memory,
   };
 
   await env.DB.prepare(`UPDATE users SET prefs = ? WHERE id = ?`)

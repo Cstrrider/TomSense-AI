@@ -17,9 +17,11 @@ migrations_dir = "migrations"
 # COMMENTED OUT until M7. Nothing references the binding yet, and the current
 # deploy token returns 403 on the Vectorize API, so attaching it would only
 # make `wrangler deploy` fail. Re-enable together with the memory work.
-# [[vectorize]]
-# binding = "VECTORS"
-# index_name = "tomsense-memory"
+# Documents + long-term memory (rag.ts). bge-base-en-v1.5 = 768 dims, cosine;
+# metadata indexes on userId and kind — every query filters on userId.
+[[vectorize]]
+binding = "VECTORS"
+index_name = "tomsense-rag"
 
 # ─── R2: /shared replacement + code-mode workspace rehydration (§8) ─────────
 [[r2_buckets]]

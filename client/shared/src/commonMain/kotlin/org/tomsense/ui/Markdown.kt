@@ -196,7 +196,12 @@ fun inlineMarkdown(text: String): AnnotatedString = buildAnnotatedStringCompat {
     }
 }
 
-private val CODE_SPAN = SpanStyle(fontFamily = FontFamily.Monospace)
+// Tinted as well as monospaced: a font change alone is hard to spot in a
+// short span. Translucent grey reads on light and dark bubbles alike.
+private val CODE_SPAN = SpanStyle(
+    fontFamily = FontFamily.Monospace,
+    background = androidx.compose.ui.graphics.Color(0x33808080),
+)
 
 /** Tiny shim so the pass above reads as "emit this run with this style". */
 private fun buildAnnotatedStringCompat(

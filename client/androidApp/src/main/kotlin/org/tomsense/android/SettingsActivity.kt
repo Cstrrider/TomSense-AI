@@ -1,5 +1,17 @@
 package org.tomsense.android
 
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.filled.Face
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Lightbulb
+import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.Hub
+import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.FavoriteBorder
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -79,6 +91,20 @@ class SettingsActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             TomsenseTheme {
+                // Settings is a menu of pages now — one long list stopped
+                // scaling once memory, personas, schedules and the rest
+                // joined models and routing. Saveable, so rotation keeps you
+                // on the page you were on.
+                var page by androidx.compose.runtime.saveable.rememberSaveable {
+                    mutableStateOf(
+                        intent.getStringExtra(EXTRA_PAGE)
+                            // Health Connect opens us to explain health access.
+                            ?: if (intent.action == "androidx.health.ACTION_SHOW_PERMISSIONS_RATIONALE" ||
+                                intent.action == "android.intent.action.VIEW_PERMISSION_USAGE"
+                            ) "health" else "home",
+                    )
+                }
+                androidx.activity.compose.BackHandler(enabled = page != "home") { page = "home" }
                 var providers by remember { mutableStateOf<List<ProviderView>>(emptyList()) }
                 var models by remember { mutableStateOf<List<ModelOption>>(emptyList()) }
                 var presets by remember { mutableStateOf<List<Preset>>(emptyList()) }
@@ -109,10 +135,39 @@ class SettingsActivity : ComponentActivity() {
 
                 Scaffold(
                     modifier = Modifier.statusBarsPadding().imePadding(),
-                    topBar = { TopAppBar(title = { Text("Providers & models") }) },
+                    topBar = {
+                        TopAppBar(
+                            title = { Text(PAGE_TITLES[page] ?: "Settings") },
+                            navigationIcon = {
+                                androidx.compose.material3.IconButton(onClick = {
+                                    if (page == "home") finish() else page = "home"
+                                }) {
+                                    androidx.compose.material3.Icon(
+                                        androidx.compose.material.icons.Icons.AutoMirrored.Filled.ArrowBack,
+                                        contentDescription = "Back",
+                                    )
+                                }
+                            },
+                        )
+                    },
                 ) { pad ->
-                    LazyColumn(
-                        modifier = Modifier.fillMaxSize().padding(pad),
+                  androidx.compose.foundation.layout.Box(Modifier.fillMaxSize().padding(pad)) {
+                  when (page) {
+                    "home" -> SettingsHome { page = it }
+                    "appearance" -> AppearancePage()
+                    "memory" -> MemoryPage(app)
+                    "personas" -> PersonasPage(app)
+                    "projects" -> ProjectsPage(app)
+                    "starters" -> StartersPage(app)
+                    "documents" -> DocumentsPage(app)
+                    "schedules" -> SchedulesPage(app) { conv ->
+                        startActivity(Launch.intent(this@SettingsActivity, conversationId = conv))
+                    }
+                    "connections" -> ConnectionsPage(app)
+                    "keys" -> KeysPage(app)
+                    "health" -> HealthPage(app)
+                    else -> LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
                         contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
@@ -360,6 +415,8 @@ class SettingsActivity : ComponentActivity() {
                             }
                         }
                     }
+                  }
+                  }
                 }
 
                 if (adding) {
@@ -1123,5 +1180,43 @@ private fun NewsSourceCard() {
                 Text("Saved", style = MaterialTheme.typography.labelSmall)
             }
         }
+    }
+}
+
+internal const val EXTRA_PAGE = "org.tomsense.settings.PAGE"
+
+private val PAGE_TITLES = mapOf(
+    "home" to "Settings",
+    "models" to "AI & models",
+    "appearance" to "Appearance",
+    "memory" to "Memory",
+    "personas" to "Personas",
+    "projects" to "Projects",
+    "starters" to "Starters",
+    "documents" to "Documents",
+    "schedules" to "Schedules",
+    "connections" to "Connected tools",
+    "keys" to "API keys",
+    "health" to "Health",
+)
+
+@androidx.compose.runtime.Composable
+private fun SettingsHome(open: (String) -> Unit) {
+    val I = androidx.compose.material.icons.Icons.Filled
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
+    ) {
+        item { SettingsEntry(I.Palette, "Appearance", "Theme, colours and style") { open("appearance") } }
+        item { SettingsEntry(I.Tune, "AI & models", "Providers, routing, voice, home feed") { open("models") } }
+        item { SettingsEntry(I.Psychology, "Memory", "What the assistant knows about you") { open("memory") } }
+        item { SettingsEntry(I.Face, "Personas", "How the assistant talks") { open("personas") } }
+        item { SettingsEntry(I.Folder, "Projects", "Group chats with shared instructions") { open("projects") } }
+        item { SettingsEntry(I.Lightbulb, "Starters", "Suggestions on a new chat") { open("starters") } }
+        item { SettingsEntry(I.Description, "Documents", "Files the assistant can search") { open("documents") } }
+        item { SettingsEntry(I.Schedule, "Schedules", "Prompts that run on their own") { open("schedules") } }
+        item { SettingsEntry(I.Hub, "Connected tools", "MCP servers, and TomSense in other apps") { open("connections") } }
+        item { SettingsEntry(I.Key, "API keys", "Keys for image lookup and song ID") { open("keys") } }
+        item { SettingsEntry(I.FavoriteBorder, "Health", "Let the assistant read Health Connect") { open("health") } }
     }
 }

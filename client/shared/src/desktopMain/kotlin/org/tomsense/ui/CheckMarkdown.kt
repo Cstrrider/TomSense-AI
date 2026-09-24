@@ -78,6 +78,38 @@ private val CASES = listOf(
     ) { b -> (b[0] as MdBlock.Paragraph).text.text.startsWith("2 * 3 = 6") },
 )
 
+/** Highlighter checks: the kinds a reader relies on, and that copy stays exact. */
+private fun kindsAt(code: String, lang: String?) = highlight(code, lang).associate { code.substring(it.start, it.end) to it.kind }
+
+private val HIGHLIGHT_CASES: List<Pair<String, () -> Boolean>> = listOf(
+    "kotlin: keyword, string, call, comment" to {
+        val k = kindsAt("val x = greet(\"hi\") // say it", "kotlin")
+        k["val"] == TokenKind.Keyword && k["\"hi\""] == TokenKind.String &&
+            k["greet"] == TokenKind.Function && k["// say it"] == TokenKind.Comment
+    },
+    "python: # is a comment, // is not" to {
+        val k = kindsAt("x = 7 // 2  # floor div", "python")
+        k["# floor div"] == TokenKind.Comment && k.keys.none { it.startsWith("//") } && k["7"] == TokenKind.Number
+    },
+    "c: #include is not a comment when labelled" to {
+        kindsAt("#include <stdio.h>", "c").values.none { it == TokenKind.Comment }
+    },
+    "shell apostrophe does not swallow the rest" to {
+        val code = "echo don't\nls -la"
+        highlight(code, "bash").none { it.kind == TokenKind.String && code.substring(it.start, it.end).contains("ls") }
+    },
+    "unterminated block comment ends at EOF, no crash" to {
+        highlight("a /* never closed", "js").last().kind == TokenKind.Comment
+    },
+    "spans stay inside the source" to {
+        val code = "fn main() { println!(\"{}\", 42); }"
+        highlight(code, "rust").all { it.start >= 0 && it.end <= code.length && it.start < it.end }
+    },
+    "json values get no keyword colour" to {
+        kindsAt("{\"a\": true, \"b\": null}", "json").values.none { it == TokenKind.Keyword }
+    },
+)
+
 fun main() {
     var failed = 0
     for (case in CASES) {
@@ -89,7 +121,13 @@ fun main() {
             blocks?.forEach { println("        $it") }
         }
     }
+    for ((name, check) in HIGHLIGHT_CASES) {
+        val ok = runCatching { check() }.getOrDefault(false)
+        println("  ${if (ok) "PASS" else "FAIL"}  highlight: $name")
+        if (!ok) failed++
+    }
+    val total = CASES.size + HIGHLIGHT_CASES.size
     println()
-    println("== ${CASES.size - failed} passed, $failed failed ==")
+    println("== ${total - failed} passed, $failed failed ==")
     if (failed > 0) kotlin.system.exitProcess(1)
 }

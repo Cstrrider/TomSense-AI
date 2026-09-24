@@ -98,6 +98,15 @@ class MainActivity : ComponentActivity() {
     /** Think mode. Sticky across turns until switched off. */
     private var think by mutableStateOf(false)
 
+    /** Suggestions for an empty chat, from Settings → Starters. */
+    private var starters by mutableStateOf<List<String>>(emptyList())
+
+    /** Suggested next messages for the latest reply; cleared when anything moves on. */
+    private var followups by mutableStateOf<List<String>>(emptyList())
+
+    /** (id, name) of the user's projects, for "Move to project". */
+    private var projects by mutableStateOf<List<Pair<String, String>>>(emptyList())
+
     /** R2 keys uploaded and staged for the next send. */
     private var pending by mutableStateOf<List<String>>(emptyList())
 
@@ -249,6 +258,9 @@ class MainActivity : ComponentActivity() {
                     val feedState = remember {
                         org.tomsense.android.feed.FeedPanelState(
                             onOpenApp = { startActivity(it) },
+                            onOpenFirst = { intents ->
+                                intents.any { runCatching { startActivity(it) }.isSuccess }
+                            },
                             onDismiss = { tab = HomeTab.Chat },
                         )
                     }
@@ -271,6 +283,7 @@ class MainActivity : ComponentActivity() {
                         drawerContent = {
                             ModalDrawerSheet {
                                 ConversationDrawer(
+                                    projects = projects,
                                     conversations = conversations,
                                     selectedId = convId,
                                     query = query,
@@ -357,6 +370,33 @@ class MainActivity : ComponentActivity() {
                                             ),
                                         )
                                     },
+                                    starters = starters,
+                                    followups = followups,
+                                    chatInstructions = conversations.firstOrNull { it.id == convId }
+                                        ?.let { it.system_prompt.orEmpty() },
+                                    onSetChatInstructions = { text ->
+                                        convId?.let { id -> lifecycleScope.launch { app.repo.setSystemPrompt(id, text.ifBlank { null }) } }
+                                    },
+                                    projects = projects,
+                                    currentProjectId = conversations.firstOrNull { it.id == convId }?.project_id,
+                                    onMoveToProject = { pid ->
+                                        convId?.let { id -> lifecycleScope.launch { app.repo.setProject(id, pid) } }
+                                    },
+                                    onRewindTo = { m ->
+                                        followups = emptyList()
+                                        convId?.let { id -> lifecycleScope.launch { app.repo.rewindTo(id, m.id) } }
+                                    },
+                                    loadArtifact = { id -> runCatching { app.features.artifact(id) }.getOrNull() },
+                                    onShareText = { text ->
+                                        startActivity(
+                                            android.content.Intent.createChooser(
+                                                android.content.Intent(android.content.Intent.ACTION_SEND)
+                                                    .setType("text/plain")
+                                                    .putExtra(android.content.Intent.EXTRA_TEXT, text),
+                                                null,
+                                            ),
+                                        )
+                                    },
                                     )
                                 }
                             }
@@ -439,6 +479,7 @@ class MainActivity : ComponentActivity() {
      * syncs later. The generation is a separate concern that may fail.
      */
     private fun send(text: String) {
+        followups = emptyList()
         val id = convId ?: return
 
         // Tier 0. Only when the turn is plain text — an attachment or screen
@@ -499,10 +540,15 @@ class MainActivity : ComponentActivity() {
                 extraContext = screenContextMessages(),
                 onText = if (speakThis) voice::speakStreaming else null,
             )
-            if (speakThis) {
-                val full = app.db.schemaQueries.messageById(assistantId)
-                    .executeAsOneOrNull()?.content.orEmpty()
-                voice.endReply(full)
+            val full = app.db.schemaQueries.messageById(assistantId)
+                .executeAsOneOrNull()?.content.orEmpty()
+            if (speakThis) voice.endReply(full)
+            // After the reply, never during: suggestions are a cheap task-model
+            // call, and only worth showing for a real answer to this question.
+            if (full.isNotBlank() && !full.startsWith("⚠") && convId == id) {
+                val question = text
+                runCatching { app.features.followups(question, full) }.getOrNull()
+                    ?.takeIf { convId == id }?.let { followups = it }
             }
             // Spent: a later turn is about the conversation, not still about a
             // screen the user has since left.
@@ -728,7 +774,30 @@ class MainActivity : ComponentActivity() {
                 return@launch
             }
             pending = pending + result.key
+
+            // A document attached to a message ALSO goes into the user's
+            // searchable documents: a model cannot read a PDF from a file
+            // name, but it can search_docs once it is indexed. Images and
+            // audio are left alone — vision and identify_song read those.
+            val m = prepared.mime
+            if (!m.startsWith("image/") && !m.startsWith("audio/") && !m.startsWith("video/")) {
+                runCatching { app.features.uploadDocument(prepared.bytes, m, prepared.name) }
+                    .onSuccess { toast("Added to your documents so TomSense can read it.") }
+            }
         }
+    }
+
+    /**
+     * Refreshed on every return to the app, so starters, projects and the
+     * notification poller reflect what was just changed in Settings.
+     */
+    override fun onResume() {
+        super.onResume()
+        lifecycleScope.launch {
+            runCatching { starters = app.features.starters().starters }
+            runCatching { projects = app.features.projects().map { it.id to it.name } }
+        }
+        NotificationPoller.schedule(this)
     }
 
     private fun toast(msg: String) {

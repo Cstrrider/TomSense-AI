@@ -39,17 +39,20 @@ import androidx.core.view.WindowInsetsControllerCompat
  */
 @Composable
 fun TomsenseTheme(
-    dark: Boolean = isSystemInDarkTheme(),
+    dark: Boolean = when (ThemeSettings.mode) {
+        ThemeSettings.Mode.System -> isSystemInDarkTheme()
+        ThemeSettings.Mode.Light -> false
+        ThemeSettings.Mode.Dark -> true
+    },
     opaque: Boolean = true,
     content: @Composable () -> Unit,
 ) {
     val context = LocalContext.current
-    val colors = when {
-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
-            if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-
-        dark -> darkColorScheme()
-        else -> lightColorScheme()
+    // Read here so a change in Settings recomposes every window at once.
+    val palette = ThemeSettings.palette
+    val style = ThemeSettings.style
+    val colors = androidx.compose.runtime.remember(dark, palette, style) {
+        ThemeSettings.scheme(context, dark)
     }
 
     // Edge-to-edge is mandatory on targetSdk 35, so the status bar draws over

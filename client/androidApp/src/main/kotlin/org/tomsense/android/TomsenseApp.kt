@@ -54,6 +54,12 @@ class TomsenseApp : Application() {
     override fun onCreate() {
         super.onCreate()
 
+        // Before any window draws, so the first frame is already in the
+        // chosen theme rather than flashing the default. A few-hundred-byte
+        // DataStore file; guarded because appearance must never be able to
+        // stop the app from starting.
+        runCatching { kotlinx.coroutines.runBlocking { org.tomsense.android.ui.ThemeSettings.load(this@TomsenseApp) } }
+
         val driver = AndroidSqliteDriver(TomsenseDb.Schema, this, "tomsense.db")
         db = TomsenseDb(driver)
 
@@ -80,6 +86,7 @@ class TomsenseApp : Application() {
         httpClient = http
         edge = EdgeApi(http, url, token)
         providers = ProvidersApi(http, url, token)
+        features = org.tomsense.sync.FeaturesApi(http, url, token)
         chat = ChatClient(http, url, token)
         sync = SyncEngine(db, edge, scope, driver)
 
@@ -103,6 +110,7 @@ class TomsenseApp : Application() {
         private set
 
     lateinit var httpClient: HttpClient
+    lateinit var features: org.tomsense.sync.FeaturesApi
         private set
 
     /**

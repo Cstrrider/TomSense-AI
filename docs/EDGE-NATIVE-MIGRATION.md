@@ -205,9 +205,9 @@ early rather than discovered late.
 | ~~**B**~~ | ~~Device tools (20) · permission flow~~ — **DONE 2026-09-21** (19/20), see §12 | Proves the native thesis; highest value per line |
 | **C** | Voice: wire `VoiceSession` end to end, measure on-device latency | Highest risk; must be validated before building on it |
 | ~~**D**~~ | ~~Chat management: search (FTS5) · pin/project · branch · export · share~~ — **DONE 2026-09-21**, see §13 | Makes it a daily driver |
-| **E** | Memory + uploads + RAG *(needs Vectorize)* · artifacts | Depth; externally blocked |
-| **F** | Web tools (Brave/Tavily) · images · MCP client + server | Breadth |
-| **G** | Schedules · push notifications · secrets · personas · starters | Long tail |
+| ~~**E**~~ | ~~Memory + uploads + RAG · artifacts~~ — **DONE 2026-09-24**, see §21 | Depth |
+| ~~**F**~~ | ~~Web tools · images · MCP client + server~~ — **DONE 2026-09-24**, see §21 | Breadth |
+| ~~**G**~~ | ~~Schedules · notifications · secrets · personas · starters~~ — **DONE 2026-09-24**, see §21 | Long tail |
 | **H** | Code mode on Containers | XL, deliberately last |
 
 Assistant role and wake word (spec M5) slot alongside **B/C** — they're part of
@@ -859,6 +859,39 @@ away, and a reconnect belongs to the chat screen.
 **Not verified on a device.** The Compose-in-a-session-window path in
 particular has only been compiled, and it is the one that fails loudly if it
 fails at all.
+
+## 21. Phases E, F and G as built (2026-09-24)
+
+Everything except voice (C) and code mode (H) is now ported. Edge side is
+`edge/src/{features,memory,rag,context,mcp,mcp_server,schedules,secrets,tools_extra}.ts`
+plus migration `0007_features.sql`; the app side is `SettingsPages.kt`, the chat
+screen additions, `NotificationPoller.kt` and `tools/HealthTools.kt`.
+
+| Area | What shipped | Notes |
+|---|---|---|
+| Memory (3 layers) | Profile, memories (pin / delete / add), `remember` + `forget` tools, per-turn retrieval, automatic extraction | Pinned always in context; others chosen by vector similarity + recency. Written through the sync writer so they reach every device |
+| Documents / RAG | Upload (Settings or attach in chat) → Workers AI `toMarkdown` → chunks → Vectorize + D1 FTS5 → `search_docs` | Hybrid: embeddings for meaning, BM25 for exact tokens. Vectorize token permission is now granted; index `tomsense-rag`, 768d, metadata indexes on `userId` + `kind` |
+| Context builder | Persona, project instructions, profile, memories, document count, this chat's artifacts — injected after the device's system message | `context.ts` |
+| Artifacts | `create_artifact` / `update_artifact` (whole or find/replace), shown as a card → full-screen viewer with copy/share | Carried as `artifact:<id>` attachment keys, reusing the attachment event |
+| Web | `deep_research` (planned queries → search → read top pages → sourced bundle); `get_weather` | Built on the HOME agent's `web_search`/`fetch_page`, not Brave/Tavily as §4b proposed — offered only while the agent has `web_search` |
+| Images / audio | `reverse_image_lookup` (Google Vision), `identify_song` (AudD) | Keys are per-user secrets (Settings → API keys) |
+| MCP | Client (Streamable HTTP; tools namespaced `mcp_<server>__<tool>`, a fourth lane in the run DO) and server (`/mcp`: search_docs, memories, search_chats, get_chat) | A server is proved reachable before it is saved. A Worker cannot call its own domain (522), so self-connection is not a valid test |
+| Schedules | Daily / weekly, wall-clock in the user's IANA zone (DST-correct), run by the 15-min cron through the real `/chat` handler headlessly | Results written into the schedule's chat via the sync writer + a notification row |
+| Notifications | Polled by WorkManager every 15 min | Deliberately NOT FCM: that needs a Firebase project + google-services.json per deployment |
+| Secrets, personas, projects, starters, follow-ups | All ported; per-chat instructions now actually sent (the column existed but nothing read it) | |
+| Checkpoints | "Edit from here" = rewind: tombstones the message and everything after | §9's risk resolved by never restoring a snapshot — tombstones merge in any order |
+| get_health | Health Connect (steps, calories, exercise, sleep, HR, resting HR, weight), per-day summaries | `connect-client:1.1.0-alpha11` — 1.1.0 final needs AGP 8.9.1; compileSdk raised to 36 for it |
+
+### Found while testing
+
+- **Memory extraction invented a fact** ("Prefers metric units." from a Paris
+  weather question). Cause: the prompt's example fact, copied back by the small
+  model. Fixed twice over — no concrete example in the prompt, and an extracted
+  fact must share a real word with what the user said and not be a
+  near-duplicate (vector ≥ 0.9) of an existing memory.
+- **Home SearXNG returns nothing**: every default engine is rate-limited or
+  CAPTCHA'd (brave, duckduckgo, startpage, karmasearch). This breaks
+  `web_search` on stable too. Not changed here — it is host config.
 
 ---
 

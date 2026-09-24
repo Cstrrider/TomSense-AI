@@ -12,7 +12,7 @@ plugins {
 
 android {
     namespace = "org.tomsense.android"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "org.tomsense.android"
@@ -75,4 +75,13 @@ dependencies {
     implementation(compose.foundation)
     implementation(compose.material3)
     implementation(compose.materialIconsExtended)
+    // Google's Material colour algorithm (HCT + the Tonal Spot / Vibrant /
+    // Expressive… scheme styles Android uses for wallpaper palettes), for the
+    // preset theme colours. 1.7.1 specifically: it is the last release built
+    // with Kotlin 2.0, which this project's compiler can read.
+    implementation("com.materialkolor:material-color-utilities:1.7.1")
+    // Health Connect, for the get_health device tool.
+    implementation("androidx.health.connect:connect-client:1.1.0-alpha11")
+    // Background polling for notifications (scheduled prompts, finished runs).
+    implementation("androidx.work:work-runtime-ktx:2.10.0")
 }

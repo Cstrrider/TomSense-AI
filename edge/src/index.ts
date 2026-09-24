@@ -29,6 +29,11 @@ import {
   PROVIDER_PRESETS,
 } from "./providers_api";
 import { routeChat } from "./routing";
+import { buildContext } from "./context";
+import { mcpToolSurface } from "./mcp";
+import { handleFeatures } from "./features";
+import { handleMcpServer } from "./mcp_server";
+import { runDueSchedules } from "./schedules";
 import { runTaskModel } from "./task_model";
 import { getPrefs, setPrefs, setAnalyticsKey, hasAnalyticsKey } from "./prefs";
 import { usageToday } from "./usage";
@@ -166,6 +171,7 @@ export default {
           const b = (await req.json()) as {
             tool_models?: Record<string, string>;
             auto_route?: boolean;
+            auto_memory?: boolean;
             cfAnalyticsKey?: string;
             cfAccountId?: string;
           };
@@ -214,16 +220,19 @@ export default {
       if (path === "/title" && req.method === "POST") return await title(req, env, who);
       if (path === "/home/tools") return await homeTools(env);
       if (path === "/home/call" && req.method === "POST") return await homeCall(req, env);
+      if (path === "/mcp") return await handleMcpServer(req, env, who);
+      const feature = await handleFeatures(req, env, who, ctx);
+      if (feature) return feature;
       return json({ error: "not found" }, 404);
     } catch (e) {
       return json({ error: (e as Error).message }, 500);
     }
   },
 
-  async scheduled(_event: ScheduledController, _env: Env, _ctx: ExecutionContext): Promise<void> {
-    // Cron: scheduled prompts + memory decay (spec §9). Not yet implemented —
-    // M7. Left as an explicit stub so the trigger binding is wired and the gap
-    // is visible rather than silently missing.
+  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    // Every 15 minutes: run any scheduled prompts that have come due. They go
+    // through the same chat handler as a typed message — see schedules.ts.
+    ctx.waitUntil(runDueSchedules(env, chat));
   },
 } satisfies ExportedHandler<Env>;
 
@@ -258,7 +267,22 @@ async function chat(req: Request, env: Env, who: Principal): Promise<Response> {
 
   // Attachments become image parts BEFORE routing, so the vision override
   // sees a real image and can claim the turn.
-  const messages = await expandAttachments(env, body.messages);
+  const expanded = await expandAttachments(env, body.messages);
+
+  // What only the edge knows — persona, project instructions, profile,
+  // memories, documents, artifacts — goes right after the device's own
+  // system message, so both sit ahead of the conversation.
+  const lastUser = [...body.messages].reverse().find((m) => m.role === "user");
+  const lastUserText = typeof lastUser?.content === "string" ? lastUser.content : "";
+  const context = await buildContext(env, who.userId, body.conversationId, lastUserText).catch(() => "");
+  const firstNonSystem = expanded.findIndex((m) => m.role !== "system");
+  const messages = context
+    ? [
+        ...expanded.slice(0, Math.max(firstNonSystem, 0)),
+        { role: "system", content: context } as ChatMessage,
+        ...expanded.slice(Math.max(firstNonSystem, 0)),
+      ]
+    : expanded;
 
   // The full routing stack: explicit pick, think mode, vision override,
   // difficulty escalation, saved default, then the budget cap over the top.
@@ -283,6 +307,12 @@ async function chat(req: Request, env: Env, who: Principal): Promise<Response> {
   // stale list would either hide a tool that is available or offer one that is
   // not. It is a Durable Object read, not a network hop home.
   const home = await homeToolSurface(env);
+  const mcp = await mcpToolSurface(env, who.userId).catch(() => ({ schemas: [], refs: [] }));
+  // deep_research is built from the home agent's web tools; offering it while
+  // they are offline would only produce an apology.
+  const serverSchemas = serverToolSchemas().filter(
+    (t) => home.names.includes("web_search") || (t as { function?: { name?: string } }).function?.name !== "deep_research",
+  );
 
   const runId = crypto.randomUUID();
   await env.DB.prepare(
@@ -309,8 +339,11 @@ async function chat(req: Request, env: Env, who: Principal): Promise<Response> {
         // the client means a new server or home tool needs no app update to
         // exist — and when the agent is offline its tools are simply not
         // offered, so the model never calls something unreachable.
-        tools: [...(body.tools ?? []), ...serverToolSchemas(), ...home.schemas],
+        tools: [...(body.tools ?? []), ...serverSchemas, ...home.schemas, ...mcp.schemas],
         homeTools: home.names,
+        mcpTools: mcp.refs,
+        attachmentKeys: lastUser?.attachments ?? [],
+        lastUserText,
         // The DO receives messages with attachments already expanded into
         // data URLs, so the keys are gone by then — and edit_image needs a
         // key, not a data URL.
@@ -361,7 +394,13 @@ async function expandAttachments(
         parts.push({ type: "image_url", image_url: { url } });
       } else {
         const name = key.split("/").pop() ?? key;
-        parts.push({ type: "text", text: "[attached file: " + name + "]" });
+        // The app also adds attached documents to the user's searchable
+        // documents, so point the model at search_docs rather than leaving
+        // it with a bare file name it cannot open.
+        parts.push({
+          type: "text",
+          text: "[attached file: " + name + " — its contents are in the user's documents; use search_docs to read it]",
+        });
       }
     }
 

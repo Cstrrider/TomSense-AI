@@ -45,6 +45,7 @@ class AndroidToolset(context: Context) : Toolset {
         addAll(intentTools(app))
         addAll(systemTools(app))
         addAll(contentTools(app))
+        addAll(healthTools(app))
     }
 
     private val byName = tools.associateBy { it.name }

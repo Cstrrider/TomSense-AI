@@ -223,6 +223,25 @@ class ChatRepository(
      * and spending a thousand ticks on a thousand-message chat would inflate
      * the device's clock far ahead of its peers for no benefit.
      */
+    /**
+     * Rewind a conversation to just before [msgId]: that message and every
+     * later one are tombstoned.
+     *
+     * This is stable's "checkpoint restore", redesigned for sync (migration
+     * doc §9). Restoring a SNAPSHOT would rewrite history, which last-writer-
+     * wins handles badly when two devices restore different points. Removal
+     * only ever adds tombstones, which merge the same way in any order — so
+     * rewinding on two devices at once converges instead of losing data.
+     * Branch first if the later turns are worth keeping.
+     */
+    suspend fun rewindTo(convId: String, msgId: String) = withContext(Dispatchers.Default) {
+        db.transaction {
+            val msg = q.messageById(msgId).executeAsOneOrNull() ?: return@transaction
+            q.tombstoneMessagesFrom(nextLamport(), convId, msg.created_at)
+            q.upsertConversationTimestamp(nowMillis(), convId)
+        }
+    }
+
     suspend fun deleteConversation(convId: String) = withContext(Dispatchers.Default) {
         db.transaction {
             val lamport = nextLamport()

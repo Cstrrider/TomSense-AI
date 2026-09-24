@@ -17,6 +17,7 @@
 import type { Env, ToolCall } from "./types";
 import { putGenerated } from "./files";
 import { runImageModel, resizeForEdit, needsMultipart } from "./images";
+import { EXTRA_TOOLS } from "./tools_extra";
 
 export interface ServerToolResult {
   /** Text handed back to the model as the tool result. */
@@ -44,6 +45,16 @@ export interface ServerToolResult {
 export interface ToolContext {
   imageModel?: string;
   recentImageKeys?: string[];
+  /** The conversation this run belongs to — artifacts are filed under it. */
+  convId?: string;
+  /** Every key the client attached this turn, images or not (audio for identify_song). */
+  attachmentKeys?: string[];
+  /**
+   * Call a HOME tool from inside a server tool. deep_research is built from
+   * web_search + fetch_page, which live on the home agent; absent when the
+   * agent is offline.
+   */
+  callHome?: (name: string, args: Record<string, unknown>) => Promise<{ content: string; error?: string }>;
 }
 
 interface ServerTool {
@@ -203,6 +214,7 @@ const editImage: ServerTool = {
 const REGISTRY: Record<string, ServerTool> = {
   generate_image: generateImage,
   edit_image: editImage,
+  ...(EXTRA_TOOLS as Record<string, ServerTool>),
 };
 
 export function isServerTool(name: string): boolean {

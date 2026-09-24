@@ -31,6 +31,11 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Code
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Close
@@ -124,8 +129,31 @@ fun ChatScreen(
     speaking: Boolean = false,
     /** Live transcript while listening, shown in place of the draft. */
     partialTranscript: String = "",
+    /** Suggestions on an empty chat; tapping one sends it. */
+    starters: List<String> = emptyList(),
+    /** Suggested next messages under the latest reply. */
+    followups: List<String> = emptyList(),
+    /** This chat's own instructions; null hides the menu entry. */
+    chatInstructions: String? = null,
+    onSetChatInstructions: (String) -> Unit = {},
+    /** (id, name) of every project, for "Move to project". Empty hides it. */
+    projects: List<Pair<String, String>> = emptyList(),
+    currentProjectId: String? = null,
+    onMoveToProject: (String?) -> Unit = {},
+    /**
+     * Rewind to just before a message of yours: it and everything after are
+     * removed and its text returns to the composer for editing. Deleting is
+     * what keeps this safe with sync — see ChatRepository.rewindTo.
+     */
+    onRewindTo: ((Message) -> Unit)? = null,
+    /** Load an artifact for its card and viewer. Null hides artifact cards. */
+    loadArtifact: (suspend (String) -> org.tomsense.sync.Artifact?)? = null,
+    onShareText: ((String) -> Unit)? = null,
 ) {
     var draft by remember { mutableStateOf("") }
+    var showInstructions by remember { mutableStateOf(false) }
+    var showProjects by remember { mutableStateOf(false) }
+    var openArtifact by remember { mutableStateOf<String?>(null) }
 
     // Dropped into the composer UNSENT, on purpose: something arriving from a
     // share sheet should be reviewable before it is asked, not fired off.
@@ -219,6 +247,18 @@ fun ChatScreen(
                                         onClick = { menuOpen = false; action() },
                                     )
                                 }
+                                if (chatInstructions != null) {
+                                    DropdownMenuItem(
+                                        text = { Text(if (chatInstructions.isBlank()) "Chat instructions…" else "Edit chat instructions") },
+                                        onClick = { menuOpen = false; showInstructions = true },
+                                    )
+                                }
+                                if (projects.isNotEmpty()) {
+                                    DropdownMenuItem(
+                                        text = { Text("Move to project…") },
+                                        onClick = { menuOpen = false; showProjects = true },
+                                    )
+                                }
                             }
                         }
                     }
@@ -234,11 +274,23 @@ fun ChatScreen(
         Column(Modifier.fillMaxSize().padding(padding)) {
             if (messages.isEmpty()) {
                 Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    Text(
-                        "Ask anything.\nWorks offline for simple things.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        textAlign = TextAlign.Center,
-                    )
+                    Column(
+                        Modifier.padding(horizontal = 24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Text(
+                            "What can I help with?",
+                            style = MaterialTheme.typography.headlineSmall,
+                            textAlign = TextAlign.Center,
+                        )
+                        // Tapping sends immediately: a starter is a complete
+                        // question, and making you press send again after
+                        // choosing it is one step too many.
+                        starters.take(6).forEach { s ->
+                            SuggestionPill(s) { onSend(s) }
+                        }
+                    }
                 }
             } else {
                 // Boxed so the jump-to-latest control can float over the list.
@@ -251,7 +303,29 @@ fun ChatScreen(
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    items(messages, key = { it.id }) { MessageBubble(it, loadAttachment) }
+                    items(messages, key = { it.id }) {
+                        MessageBubble(
+                            it,
+                            loadAttachment,
+                            loadArtifact = loadArtifact,
+                            onOpenArtifact = { id -> openArtifact = id },
+                            onRewind = onRewindTo?.takeIf { _ -> !isGenerating }?.let { rw ->
+                                { m: Message ->
+                                    draft = m.content
+                                    rw(m)
+                                }
+                            },
+                        )
+                    }
+
+                    // Suggested next messages, only under a settled reply.
+                    if (!isGenerating && followups.isNotEmpty() && messages.lastOrNull()?.role == "assistant") {
+                        item {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                followups.forEach { f -> SuggestionPill(f) { onSend(f) } }
+                            }
+                        }
+                    }
 
                     // Offered only on the settled tail of the conversation:
                     // regenerating anything earlier would orphan every turn
@@ -376,20 +450,210 @@ fun ChatScreen(
             }
         }
     }
+    if (showInstructions) {
+        var text by remember { mutableStateOf(chatInstructions.orEmpty()) }
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showInstructions = false },
+            title = { Text("Chat instructions") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "Applies to this chat only, on top of your persona and project.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    OutlinedTextField(
+                        value = text,
+                        onValueChange = { text = it },
+                        minLines = 4,
+                        placeholder = { Text("e.g. Answer in Spanish. Keep replies under 100 words.") },
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showInstructions = false; onSetChatInstructions(text.trim()) }) { Text("Save") }
+            },
+            dismissButton = { TextButton(onClick = { showInstructions = false }) { Text("Cancel") } },
+        )
+    }
+
+    if (showProjects) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showProjects = false },
+            title = { Text("Move to project") },
+            text = {
+                Column {
+                    (listOf<Pair<String?, String>>(null to "No project") + projects).forEach { (id, name) ->
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clickable { showProjects = false; onMoveToProject(id) }
+                                .padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            androidx.compose.material3.RadioButton(
+                                selected = id == currentProjectId,
+                                onClick = { showProjects = false; onMoveToProject(id) },
+                            )
+                            Text(name, style = MaterialTheme.typography.bodyLarge)
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showProjects = false }) { Text("Close") } },
+        )
+    }
+
+    openArtifact?.let { id ->
+        ArtifactViewer(id, loadArtifact, onShareText, onClose = { openArtifact = null })
+    }
 }
+
+/** A tappable suggestion — starters on an empty chat, follow-ups under a reply. */
+@Composable
+private fun SuggestionPill(text: String, onClick: () -> Unit) {
+    androidx.compose.material3.Surface(
+        onClick = onClick,
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(50),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    ) {
+        Text(
+            text,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+        )
+    }
+}
+
+/**
+ * An artifact the model made, as a card in the reply. The content is NOT
+ * inlined — that is the point of an artifact — so the card is how you get to
+ * it: tap to open the full document with copy and share.
+ */
+@Composable
+private fun ArtifactCard(id: String, load: (suspend (String) -> org.tomsense.sync.Artifact?)?, onOpen: () -> Unit) {
+    var art by remember(id) { mutableStateOf<org.tomsense.sync.Artifact?>(null) }
+    LaunchedEffect(id) { art = runCatching { load?.invoke(id) }.getOrNull() }
+    androidx.compose.material3.Surface(
+        onClick = onOpen,
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+    ) {
+        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                if (art?.kind == "code" || art?.kind == "html") Icons.Filled.Code else Icons.Filled.Description,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+            )
+            Column(Modifier.padding(start = 12.dp).weight(1f)) {
+                Text(art?.title ?: "Artifact", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    listOfNotNull(art?.language ?: art?.kind, art?.let { "v${it.version}" }).joinToString(" · ").ifBlank { "Loading…" },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Text("Open", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+        }
+    }
+}
+
+/** Full-screen artifact view. Code renders through the code-block panel. */
+@Composable
+private fun ArtifactViewer(
+    id: String,
+    load: (suspend (String) -> org.tomsense.sync.Artifact?)?,
+    onShareText: ((String) -> Unit)?,
+    onClose: () -> Unit,
+) {
+    var art by remember(id) { mutableStateOf<org.tomsense.sync.Artifact?>(null) }
+    var failed by remember(id) { mutableStateOf(false) }
+    LaunchedEffect(id) {
+        art = runCatching { load?.invoke(id) }.getOrNull()
+        failed = art == null
+    }
+    val clipboard = LocalClipboardManager.current
+    androidx.compose.ui.window.Dialog(
+        onDismissRequest = onClose,
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        androidx.compose.material3.Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
+            Column(Modifier.fillMaxSize()) {
+                Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = onClose) { Icon(Icons.Filled.Close, "Close") }
+                    Text(
+                        art?.title ?: "Artifact",
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    )
+                    art?.let { a ->
+                        IconButton(onClick = { clipboard.setText(AnnotatedString(a.content)) }) {
+                            Icon(Icons.Filled.ContentCopy, "Copy")
+                        }
+                        onShareText?.let { share ->
+                            IconButton(onClick = { share(a.content) }) { Icon(Icons.Filled.Share, "Share") }
+                        }
+                    }
+                }
+                val a = art
+                when {
+                    a != null -> {
+                        val source = when (a.kind) {
+                            "code", "html" -> "```" + (a.language ?: if (a.kind == "html") "html" else "") + "\n" + a.content + "\n```"
+                            "text" -> "```text\n" + a.content + "\n```"
+                            else -> a.content
+                        }
+                        Column(
+                            Modifier.fillMaxSize().verticalScroll(androidx.compose.foundation.rememberScrollState()).padding(16.dp),
+                        ) { MarkdownText(source) }
+                    }
+                    failed -> Text("Couldn't load this artifact.", Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error)
+                    else -> Text("Loading…", Modifier.padding(16.dp))
+                }
+            }
+        }
+    }
+}
+
 
 @Composable
 private fun MessageBubble(
     message: Message,
     loadAttachment: (suspend (String) -> ByteArray?)? = null,
+    loadArtifact: (suspend (String) -> org.tomsense.sync.Artifact?)? = null,
+    onOpenArtifact: (String) -> Unit = {},
+    onRewind: ((Message) -> Unit)? = null,
 ) {
     val isUser = message.role == "user"
+    var confirmRewind by remember { mutableStateOf(false) }
+    if (confirmRewind) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { confirmRewind = false },
+            title = { Text("Edit from here?") },
+            text = { Text("This message and everything after it are removed, and it goes back into the message box so you can change it and send again.") },
+            confirmButton = { TextButton(onClick = { confirmRewind = false; onRewind?.invoke(message) }) { Text("Edit from here") } },
+            dismissButton = { TextButton(onClick = { confirmRewind = false }) { Text("Cancel") } },
+        )
+    }
     Row(
-        Modifier.fillMaxWidth(),
+        // Your messages sit to the right with a gutter on the left, like any
+        // chat app — so whose turn it is reads from position, not by
+        // comparing two shades of card.
+        Modifier.fillMaxWidth().padding(start = if (isUser) 56.dp else 0.dp),
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
     ) {
         Card(
             modifier = Modifier.widthIn(max = 520.dp),
+            // The flattened corner points at the speaker's side.
+            shape = if (isUser) {
+                androidx.compose.foundation.shape.RoundedCornerShape(20.dp, 4.dp, 20.dp, 20.dp)
+            } else {
+                CardDefaults.shape
+            },
             colors = CardDefaults.cardColors(
                 containerColor = if (isUser) {
                     MaterialTheme.colorScheme.primaryContainer
@@ -410,8 +674,15 @@ private fun MessageBubble(
 
                 // Above the text: for a generated image the picture IS the
                 // answer, and for an attached one it is the question.
-                attachmentKeys(message.attachments).forEach { key ->
-                    AttachmentImage(key, loadAttachment)
+                attachmentKeys(message.attachments).distinct().forEach { key ->
+                    if (key.startsWith("artifact:")) {
+                        if (loadArtifact != null) {
+                            val id = key.removePrefix("artifact:")
+                            ArtifactCard(id, loadArtifact) { onOpenArtifact(id) }
+                        }
+                    } else {
+                        AttachmentImage(key, loadAttachment)
+                    }
                 }
 
                 if (message.content.isNotBlank()) {
@@ -429,13 +700,28 @@ private fun MessageBubble(
                     }
                 }
 
+                // fillMaxWidth only for replies: on a user message it
+                // stretched every bubble to full width, however short, which
+                // is what kept them from sitting to the right.
                 Row(
-                    Modifier.fillMaxWidth(),
+                    if (isUser) Modifier.align(Alignment.End) else Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.End,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    UsageFooter(message.model, message.usage)
-                    Spacer(Modifier.weight(1f))
+                    if (!isUser) {
+                        UsageFooter(message.model, message.usage)
+                        Spacer(Modifier.weight(1f))
+                    }
+                    if (isUser && onRewind != null) {
+                        IconButton(onClick = { confirmRewind = true }, modifier = Modifier.size(32.dp)) {
+                            Icon(
+                                Icons.Filled.Edit,
+                                contentDescription = "Edit from here",
+                                modifier = Modifier.size(14.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
                     // Copy the SOURCE, not the rendered text — someone copying
                     // a reply usually wants to paste it somewhere that
                     // understands markdown, and the formatting is information.

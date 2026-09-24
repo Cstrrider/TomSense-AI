@@ -23,6 +23,8 @@ import type { Env, StreamEvent, ToolCall, ChatMessage, Usage } from "./../types"
 import { parseModelStr, resolveProvider, chatCompletionsUrl } from "./../providers";
 import { streamWithFallback } from "./../stream";
 import { isServerTool, runServerTool } from "./../server_tools";
+import { callMcpTool, type McpToolRef } from "../mcp";
+import { extractMemories } from "../memory";
 import { getPrefs } from "./../prefs";
 import { costUsd } from "./../usage";
 import { warmCfCapabilities } from "./../capabilities";
@@ -81,6 +83,12 @@ interface RunRecord {
    * the schemas are already in `tools`.
    */
   homeTools: string[];
+  /** Tools from the user's remote MCP servers, and where each call goes. */
+  mcpTools: McpToolRef[];
+  /** Every key the client attached this turn — audio included, for identify_song. */
+  attachmentKeys: string[];
+  /** The newest user message, for memory extraction when the run finishes. */
+  lastUserText: string;
   /**
    * Replay state, deliberately compacted rather than an event log. Storing
    * every delta would blow the value limit on a long answer and replay
@@ -167,6 +175,9 @@ export class DetachedRun implements DurableObject {
       messages: ChatMessage[];
       tools?: unknown[];
       homeTools?: string[];
+      mcpTools?: McpToolRef[];
+      attachmentKeys?: string[];
+      lastUserText?: string;
       sourceImageKeys?: string[];
       notices?: string[];
       reasoningEffort?: "high" | null;
@@ -182,6 +193,9 @@ export class DetachedRun implements DurableObject {
       messages: body.messages,
       tools: body.tools ?? [],
       homeTools: body.homeTools ?? [],
+      mcpTools: body.mcpTools ?? [],
+      attachmentKeys: body.attachmentKeys ?? [],
+      lastUserText: body.lastUserText ?? "",
       content: "",
       reasoning: "",
       rounds: [],
@@ -412,13 +426,19 @@ export class DetachedRun implements DurableObject {
           // belongs to the phone. Home tools must not be parked as device
           // calls: the phone has no idea what lan_disk_free is and the run
           // would hang until it was swept away.
+          // A fourth lane since: tools from the user's remote MCP servers,
+          // executed here against the server that advertised them.
           const home = new Set(rec.homeTools);
+          const mcp = new Map((rec.mcpTools ?? []).map((m) => [m.name, m]));
           const serverCalls = round.toolCalls.filter((t) => isServerTool(t.name));
           const homeCalls = round.toolCalls.filter(
             (t) => !isServerTool(t.name) && home.has(t.name),
           );
+          const mcpCalls = round.toolCalls.filter(
+            (t) => !isServerTool(t.name) && !home.has(t.name) && mcp.has(t.name),
+          );
           const deviceCalls = round.toolCalls.filter(
-            (t) => !isServerTool(t.name) && !home.has(t.name),
+            (t) => !isServerTool(t.name) && !home.has(t.name) && !mcp.has(t.name),
           );
 
           for (const call of serverCalls) {
@@ -429,6 +449,11 @@ export class DetachedRun implements DurableObject {
               // anything generated since. edit_image takes the last, which is
               // what "make it red" refers to.
               recentImageKeys: [...rec.sourceImageKeys, ...rec.attachments],
+              convId: rec.convId,
+              attachmentKeys: rec.attachmentKeys ?? [],
+              callHome: home.has("web_search")
+                ? (name, args) => this.callHome({ id: "inner", name, arguments: args })
+                : undefined,
             });
 
             // Surfaced to the user, not just to the model: a tool that failed
@@ -450,6 +475,24 @@ export class DetachedRun implements DurableObject {
               });
             }
 
+            rec.messages.push({
+              role: "tool",
+              tool_call_id: call.id,
+              name: call.name,
+              content: result.content,
+            } as ChatMessage);
+          }
+
+          for (const call of mcpCalls) {
+            const args =
+              call.arguments && typeof call.arguments === "object"
+                ? (call.arguments as Record<string, unknown>)
+                : {};
+            const result = await callMcpTool(this.env, rec.userId, mcp.get(call.name)!, args);
+            if (result.error) {
+              rec.notices.push(result.error);
+              this.emit({ type: "notice", text: result.error });
+            }
             rec.messages.push({
               role: "tool",
               tool_call_id: call.id,
@@ -497,6 +540,12 @@ export class DetachedRun implements DurableObject {
     await this.persist(true);
     await this.syncStatus(rec);
     this.closeAll(rec.status, rec.error);
+
+    // After the client has its answer, never before: extraction is a model
+    // call, and the user should not wait on bookkeeping.
+    if (rec.status === "done" && rec.lastUserText) {
+      this.ctx.waitUntil(extractMemories(this.env, rec.userId, rec.lastUserText).catch(() => {}));
+    }
   }
 
   /** One model call. Returns null if the run was cancelled while streaming. */

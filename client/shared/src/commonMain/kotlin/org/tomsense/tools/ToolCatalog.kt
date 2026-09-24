@@ -243,12 +243,29 @@ object ToolCatalog {
         ),
     )
 
+    val GET_HEALTH = ToolSpec(
+        name = "get_health",
+        description =
+        "Read the user's health data from Health Connect: steps, active calories, exercise, sleep, " +
+            "heart rate, resting heart rate and weight. Summaries per day. Use for questions like " +
+            "\"how did I sleep\", \"how many steps this week\" or \"what was my heart rate on my run\".",
+        parameters = objectSchema(
+            props = mapOf(
+                "days" to numberProp("How many days back, including today (1-30). Default 1."),
+                "metric" to stringProp(
+                    "Limit to one metric; omit for a summary of all.",
+                    enum = listOf("steps", "calories", "exercise", "sleep", "heart_rate", "resting_heart_rate", "weight"),
+                ),
+            ),
+        ),
+    )
+
     /** Every spec, in the order they are advertised to the model. */
     val ALL: List<ToolSpec> = listOf(
         GET_LOCATION, GET_CALENDAR, CREATE_CALENDAR_EVENT, SET_REMINDER,
         START_TIMER, SET_ALARM, GET_CONTACTS, MAKE_CALL, SEND_SMS,
         LAUNCH_APP, OPEN_URL, OPEN_MAPS, SHARE_TEXT, OPEN_SETTINGS,
-        SET_VOLUME, SET_BRIGHTNESS, MEDIA_CONTROL, GET_DEVICE_STATUS, PLAY_MUSIC,
+        SET_VOLUME, SET_BRIGHTNESS, MEDIA_CONTROL, GET_DEVICE_STATUS, PLAY_MUSIC, GET_HEALTH,
     )
 }
 
