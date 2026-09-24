@@ -80,6 +80,11 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Air
+import androidx.compose.material.icons.filled.Alarm
+import androidx.compose.material.icons.filled.SportsScore
+import androidx.compose.material.icons.filled.WbTwilight
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.outlined.ThumbDown
 import androidx.compose.material.icons.outlined.ThumbUp
@@ -153,7 +158,11 @@ fun FeedPanel(app: TomsenseApp, state: FeedPanelState) {
                 // puts search at the top.
                 item { AskSection(state) }
 
-                item { Glance(state) }
+                item { DateHeadline() }
+
+                if (!state.insights.isEmpty) {
+                    item { InsightsCard(state) }
+                }
 
                 if (state.calendar.isNotEmpty()) {
                     item { CalendarCard(state) }
@@ -223,6 +232,17 @@ private fun PanelHeader(state: FeedPanelState) {
         Modifier.fillMaxWidth().padding(top = 4.dp, start = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // The name opens the app — the same thing tapping "Google" does in
+        // the Google app's feed. Its own clickable row, so the settings
+        // button beside it keeps its separate target.
+        Row(
+            Modifier
+                .weight(1f)
+                .clip(CircleShape)
+                .clickable(onClickLabel = "Open TomSense") { state.openMain() }
+                .padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
         Icon(
             Icons.Filled.AutoAwesome,
             contentDescription = null,
@@ -232,8 +252,9 @@ private fun PanelHeader(state: FeedPanelState) {
         Text(
             "TomSense",
             style = MaterialTheme.typography.headlineSmall,
-            modifier = Modifier.padding(start = 10.dp).weight(1f),
+            modifier = Modifier.padding(start = 10.dp),
         )
+        }
         // Where the Google app keeps your account avatar: the way into
         // everything that is not the feed.
         FilledTonalIconButton(onClick = { state.openSettings() }) {
@@ -363,11 +384,18 @@ private fun CalendarCard(state: FeedPanelState) {
                 "Today",
                 style = MaterialTheme.typography.titleSmall,
                 color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.clickable(onClickLabel = "Open calendar") { state.openCalendar() },
             )
             state.calendar.forEach { entry ->
                 // The coloured rule is the Pixel calendar's event marker: it
                 // makes each entry a separate thing at a glance.
-                Row(Modifier.height(IntrinsicSize.Min)) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(IntrinsicSize.Min)
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { state.openCalendar(entry) },
+                ) {
                     Box(
                         Modifier
                             .fillMaxHeight()
@@ -407,31 +435,56 @@ private fun CalendarCard(state: FeedPanelState) {
  * costs a model call, so it is generated at most twice an hour and the card
  * renders perfectly well without it.
  */
+/** Today's date as the page headline — the Pixel feed's At a Glance line. */
 @Composable
-private fun Glance(state: FeedPanelState) {
-    // Straight onto the background, no card — the Pixel's At a Glance is
-    // type on the wallpaper, and it is the one block here that should read as
-    // a headline rather than as one more item in a list.
-    Column(
-        Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+private fun DateHeadline() {
+    Text(
+        // The locale's own order and words ("Wednesday, September 23" /
+        // "mercredi 23 septembre"), not an English pattern.
+        java.time.LocalDate.now().format(
+            java.time.format.DateTimeFormatter.ofPattern(
+                android.text.format.DateFormat.getBestDateTimePattern(java.util.Locale.getDefault(), "EEEEMMMMd"),
+            ),
+        ),
+        style = MaterialTheme.typography.headlineMedium,
+        modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
+    )
+}
+
+/**
+ * The things worth knowing that are not news and not the calendar, as one
+ * card. Every row is a way INTO the app that owns the fact — weather opens
+ * the weather app, the alarm opens the clock — so the panel is a launcher
+ * for them as well as a summary.
+ *
+ * The written summary is the only part that costs a model call, so it is
+ * generated at most twice an hour and the card renders fine without it.
+ */
+@Composable
+private fun InsightsCard(state: FeedPanelState) {
+    val i = state.insights
+    Surface(
+        Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(24.dp),
+        color = MaterialTheme.colorScheme.surfaceContainer,
     ) {
-        Text(
-            java.time.LocalDate.now().format(java.time.format.DateTimeFormatter.ofPattern("EEEE, MMMM d")),
-            style = MaterialTheme.typography.headlineMedium,
-        )
-        state.insights.weather?.let { InsightRow(Icons.Filled.WbSunny, it, prominent = true) }
-        if (state.insights.summary.isNotBlank()) {
-            Text(
-                state.insights.summary,
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+        Column(Modifier.padding(vertical = 8.dp)) {
+            if (i.summary.isNotBlank()) {
+                Text(
+                    i.summary,
+                    style = MaterialTheme.typography.bodyLarge,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+            }
+            i.weather?.let { InsightRow(Icons.Filled.WbSunny, it, prominent = true) { state.openWeather() } }
+            i.outlook?.let { InsightRow(Icons.Filled.WbTwilight, it) { state.openWeather() } }
+            i.air?.let { InsightRow(Icons.Filled.Air, it) { state.openWeather() } }
+            i.alarm?.let { InsightRow(Icons.Filled.Alarm, it) { state.openAlarms() } }
+            i.games.forEach { g -> InsightRow(Icons.Filled.SportsScore, g.text) { state.openGame(g.url) } }
+            i.device?.let { InsightRow(Icons.Filled.BatteryFull, it) { state.openBattery() } }
+            // Feed balance has no app to open — it describes the list below.
+            i.feed?.let { InsightRow(Icons.Filled.Newspaper, it, onClick = null) }
         }
-        // Icons, not a stack of identical grey lines: the icon is what
-        // makes "battery" findable without parsing the sentence.
-        state.insights.device?.let { InsightRow(Icons.Filled.BatteryFull, it) }
-        state.insights.feed?.let { InsightRow(Icons.Filled.Newspaper, it) }
     }
 }
 
@@ -489,19 +542,36 @@ private fun InsightRow(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     text: String,
     prominent: Boolean = false,
+    onClick: (() -> Unit)?,
 ) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         Icon(
             icon,
             contentDescription = null,
-            modifier = Modifier.size(if (prominent) 22.dp else 16.dp),
+            modifier = Modifier.size(if (prominent) 24.dp else 20.dp),
             tint = if (prominent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Text(
             text,
-            style = if (prominent) MaterialTheme.typography.titleMedium else MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.padding(start = 8.dp),
+            style = if (prominent) MaterialTheme.typography.titleMedium else MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.padding(start = 14.dp).weight(1f),
         )
+        // A chevron says "this goes somewhere" — without it a row that
+        // launches an app looks exactly like one that does nothing.
+        if (onClick != null) {
+            Icon(
+                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = null,
+                modifier = Modifier.size(20.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 
@@ -643,6 +713,8 @@ private fun ago(epochSeconds: Long): String? {
 /** Panel state and the actions it can take. Held by the service, not Compose. */
 class FeedPanelState(
     private val onOpenApp: (Intent) -> Unit,
+    /** Try each intent in order and stop at the first that starts. */
+    private val onOpenFirst: (List<Intent>) -> Unit,
     private val onDismiss: () -> Unit,
 ) {
     var visible by mutableStateOf(false)
@@ -715,10 +787,23 @@ class FeedPanelState(
         // Device state costs nothing and weather is one keyless request, so
         // both run before the feed; each degrades to a missing line rather
         // than failing the card.
+        val weather = withContext(Dispatchers.Default) { readWeather(application) }
         insights = insights.copy(
             device = withContext(Dispatchers.Default) { readDevice(application) },
-            weather = withContext(Dispatchers.Default) { readWeather(application) },
+            weather = weather?.now,
+            outlook = weather?.outlook,
+            air = weather?.air,
+            alarm = readAlarm(application),
         )
+        // Games depend on the user's news interests, so they wait for the
+        // news config; a user without a feed simply gets no game lines.
+        NewsClient.config(application).takeIf { it.isComplete }?.let { cfg ->
+            val games = withContext(Dispatchers.Default) {
+                val interests = runCatching { NewsClient(application.httpClient).interests(cfg) }.getOrDefault(emptyList())
+                readGames(application, interests)
+            }
+            insights = insights.copy(games = games)
+        }
 
         // The worker's own snapshot lasts ten minutes; refetching faster than
         // that returns the same order and only costs an impression.
@@ -822,6 +907,10 @@ class FeedPanelState(
             calendar.take(3).forEach { add("Calendar: ${it.title} at ${it.start}") }
             insights.device?.let { add("Device: $it") }
             insights.weather?.let { add("Weather: $it") }
+            insights.outlook?.let { add("Forecast: $it") }
+            insights.air?.let { add("Air: $it") }
+            insights.alarm?.let { add("Next alarm: $it") }
+            insights.games.forEach { add("${it.team}: ${it.text}") }
             insights.feed?.let { add("News: $it") }
             news.take(3).forEach { add("Headline: ${it.title}") }
         }
@@ -970,6 +1059,68 @@ class FeedPanelState(
     fun openChat(id: String) {
         app?.let { onOpenApp(Launch.intent(it, conversationId = id)) }
     }
+
+    /** The title: straight into the full app. */
+    fun openMain() {
+        app?.let { onOpenApp(Launch.intent(it)) }
+    }
+
+    /**
+     * Whatever weather app this phone has. There is no standard "show the
+     * weather" intent, so: Pixel Weather, then the Google app's weather page,
+     * then a web search — the last one always works.
+     */
+    fun openWeather() = onOpenFirst(
+        listOf(
+            Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                .setPackage("com.google.android.apps.weather"),
+            Intent(Intent.ACTION_VIEW, android.net.Uri.parse("dynact://velour/weather/ProxyActivity"))
+                .setClassName(
+                    "com.google.android.googlequicksearchbox",
+                    "com.google.android.apps.gsa.velour.DynamicActivityTrampoline",
+                ),
+            Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://www.google.com/search?q=weather")),
+        ),
+    )
+
+    /**
+     * The calendar app, at the event's time when there is one. The
+     * content://…/time/<ms> URI is the calendar provider's documented way to
+     * open "this moment" and every calendar app handles it.
+     */
+    fun openCalendar(entry: CalendarEntry? = null) {
+        val at = entry?.start?.let { startMillis(it) } ?: System.currentTimeMillis()
+        onOpenFirst(
+            listOf(
+                Intent(Intent.ACTION_VIEW, android.net.Uri.parse("content://com.android.calendar/time/$at")),
+                Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_APP_CALENDAR),
+            ),
+        )
+    }
+
+    fun openAlarms() = onOpenFirst(listOf(Intent(android.provider.AlarmClock.ACTION_SHOW_ALARMS)))
+
+    fun openBattery() = onOpenFirst(
+        listOf(
+            Intent(Intent.ACTION_POWER_USAGE_SUMMARY),
+            Intent(android.provider.Settings.ACTION_SETTINGS),
+        ),
+    )
+
+    /** ESPN's game page — the ESPN app claims the link if it is installed. */
+    fun openGame(url: String?) {
+        url?.let { onOpenFirst(listOf(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(it)))) }
+    }
+
+    private fun startMillis(iso: String): Long? =
+        runCatching { java.time.OffsetDateTime.parse(iso).toInstant().toEpochMilli() }.getOrNull()
+            ?: runCatching {
+                java.time.LocalDateTime.parse(iso).atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
+            }.getOrNull()
+            ?: runCatching {
+                java.time.LocalDate.parse(iso.take(10)).atStartOfDay(java.time.ZoneId.systemDefault())
+                    .toInstant().toEpochMilli()
+            }.getOrNull()
 
     fun openSettings() {
         app?.let {

@@ -88,6 +88,32 @@ class NewsClient(private val http: HttpClient) {
         return response.body()
     }
 
+    /** One declared interest ("Philadelphia Eagles NFL football"). */
+    @Serializable
+    data class Interest(
+        val name: String = "",
+        @SerialName("query_text") val queryText: String = "",
+        val enabled: Int = 1,
+    )
+
+    @Serializable
+    private data class Interests(val interests: List<Interest> = emptyList())
+
+    /**
+     * The topics this user told the news feed they follow. Read by the panel
+     * to decide which teams' games to show — so what appears is driven by
+     * the user's own settings, never by a team baked into the app.
+     */
+    suspend fun interests(config: Config): List<Interest> {
+        val response = http.get("${config.baseUrl}/interests") {
+            header("Authorization", "Bearer ${config.apiKey}")
+        }
+        if (!response.status.isSuccess()) {
+            throw IOException("news-worker returned HTTP ${response.status.value}")
+        }
+        return response.body<Interests>().interests.filter { it.enabled != 0 }
+    }
+
     /**
      * Thumbs up or down.
      *

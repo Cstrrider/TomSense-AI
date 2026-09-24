@@ -80,6 +80,7 @@ class FeedOverlayService : Service() {
 
     private val state = FeedPanelState(
         onOpenApp = { openApp(it) },
+        onOpenFirst = { openFirst(it) },
         onDismiss = { closePanel() },
     )
 
@@ -374,6 +375,19 @@ class FeedOverlayService : Service() {
         host = null
         visible = false
         progress = 0f
+    }
+
+    /**
+     * First intent that starts wins. startActivity rather than resolving
+     * first: resolving needs package visibility (<queries>) for every app we
+     * might hand off to, while starting only needs the app to exist.
+     */
+    private fun openFirst(intents: List<Intent>) {
+        val started = intents.any { intent ->
+            runCatching { startActivity(Intent(intent).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }.isSuccess
+        }
+        if (!started) Log.w(TAG, "nothing could open ${intents.firstOrNull()}")
+        closePanel()
     }
 
     private fun openApp(intent: Intent) {

@@ -35,10 +35,17 @@ data class CalendarEntry(
 data class Insights(
     val device: String? = null,
     val weather: String? = null,
+    /** Rain chance, UV and sunset — the parts of a forecast that change plans. */
+    val outlook: String? = null,
+    /** US AQI with its category. Worth a line in LA; hidden when unavailable. */
+    val air: String? = null,
+    val alarm: String? = null,
+    /** Games for teams named in the user's news interests — see Sports.kt. */
+    val games: List<Game> = emptyList(),
     val feed: String? = null,
     val summary: String = "",
 ) {
-    val lines: List<String> get() = listOfNotNull(device, weather, feed)
+    val lines: List<String> get() = listOfNotNull(device, weather, outlook, air, alarm, feed) + games.map { it.text }
     val isEmpty: Boolean get() = lines.isEmpty() && summary.isBlank()
 }
 
@@ -75,6 +82,50 @@ suspend fun readCalendar(app: TomsenseApp, limit: Int = 4): List<CalendarEntry> 
         .take(limit)
 }.getOrDefault(emptyList())
 
+/** A game line, and where tapping it goes (ESPN's page, or its app if installed). */
+data class Game(
+    val text: String,
+    val url: String?,
+    val team: String = "",
+    val live: Boolean = false,
+    val startsAt: Long = 0,
+)
+
+/**
+ * A clock time the way THIS phone shows them: 24-hour when the system is set
+ * to it, 12-hour with the locale's AM/PM otherwise. A fixed "h:mm a" is right
+ * for the US and wrong for most of the world.
+ */
+fun shortTime(context: android.content.Context, time: java.time.LocalTime): String {
+    val pattern = if (android.text.format.DateFormat.is24HourFormat(context)) "HH:mm" else "h:mm a"
+    return time.format(java.time.format.DateTimeFormatter.ofPattern(pattern, java.util.Locale.getDefault()))
+}
+
+/**
+ * Fahrenheit only where people use it. Keyed on the locale's region — the
+ * same thing that decides the phone's own weather units.
+ */
+private fun usesFahrenheit(): Boolean =
+    java.util.Locale.getDefault().country in setOf("US", "LR", "MM", "BS", "BZ", "KY", "PW", "FM", "MH")
+
+/** Weather and everything else that comes from the same location fix. */
+data class WeatherGlance(val now: String, val outlook: String?, val air: String?)
+
+/**
+ * The next alarm the clock app has set, if it is within a day.
+ *
+ * From AlarmManager.getNextAlarmClock — every clock app registers its alarms
+ * there so the lock screen can show them, so this needs no permission and
+ * works whichever clock app is in use.
+ */
+fun readAlarm(context: android.content.Context): String? = runCatching {
+    val am = context.getSystemService(android.app.AlarmManager::class.java)
+    val at = am.nextAlarmClock?.triggerTime ?: return null
+    if (at - System.currentTimeMillis() > 24 * 3_600_000L) return null
+    val time = java.time.Instant.ofEpochMilli(at).atZone(java.time.ZoneId.systemDefault())
+    "Alarm " + shortTime(context, time.toLocalTime())
+}.getOrNull()
+
 /** Battery, network and nothing else — the things a glance actually answers. */
 suspend fun readDevice(app: TomsenseApp): String? = runCatching {
     val raw = app.tools.call("get_device_status", buildJsonObject { })
@@ -98,7 +149,7 @@ suspend fun readDevice(app: TomsenseApp): String? = runCatching {
  * create. Location comes from the device tool that already exists, so a denied
  * location permission degrades to no weather line rather than an error.
  */
-suspend fun readWeather(app: TomsenseApp): String? = runCatching {
+suspend fun readWeather(app: TomsenseApp): WeatherGlance? = runCatching {
     val fix = app.tools.call("get_location", buildJsonObject { })
     if (fix.contains("\"error\"", ignoreCase = true)) return null
 
@@ -110,8 +161,8 @@ suspend fun readWeather(app: TomsenseApp): String? = runCatching {
         parameter("latitude", lat)
         parameter("longitude", lon)
         parameter("current", "temperature_2m,weather_code")
-        parameter("daily", "temperature_2m_max,temperature_2m_min")
-        parameter("temperature_unit", "fahrenheit")
+        parameter("daily", "temperature_2m_max,temperature_2m_min,precipitation_probability_max,uv_index_max,sunset")
+        if (usesFahrenheit()) parameter("temperature_unit", "fahrenheit")
         parameter("timezone", "auto")
         parameter("forecast_days", 1)
     }
@@ -123,12 +174,49 @@ suspend fun readWeather(app: TomsenseApp): String? = runCatching {
     val high = forecast.daily?.max?.firstOrNull()?.roundToInt()
     val low = forecast.daily?.min?.firstOrNull()?.roundToInt()
 
-    buildString {
+    val line = buildString {
         append("$now°")
         if (sky.isNotBlank()) append(", $sky")
         if (high != null && low != null) append(" · $low–$high°")
         location["place"]?.jsonPrimitive?.contentOrNull()?.let { append(" · $it") }
     }
+
+    // Only the parts that would change a plan: rain worth mentioning, UV high
+    // enough to matter, and when it gets dark.
+    val rain = forecast.daily?.rain?.firstOrNull()
+    val uv = forecast.daily?.uv?.firstOrNull()?.roundToInt()
+    val sunset = forecast.daily?.sunset?.firstOrNull()?.let {
+        runCatching {
+            shortTime(app, java.time.LocalDateTime.parse(it).toLocalTime())
+        }.getOrNull()
+    }
+    val outlook = buildList {
+        if (rain != null && rain >= 20) add("$rain% rain")
+        if (uv != null && uv >= 6) add("UV $uv")
+        sunset?.let { add("sunset $it") }
+    }.takeIf { it.isNotEmpty() }?.joinToString(" · ")?.replaceFirstChar { it.uppercase() }
+
+    WeatherGlance(line, outlook, readAir(app, lat, lon))
+}.getOrNull()
+
+/** US AQI from Open-Meteo's air-quality API — keyless, same location fix. */
+private suspend fun readAir(app: TomsenseApp, lat: Double, lon: Double): String? = runCatching {
+    val response = app.httpClient.get("https://air-quality-api.open-meteo.com/v1/air-quality") {
+        parameter("latitude", lat)
+        parameter("longitude", lon)
+        parameter("current", "us_aqi")
+    }
+    if (!response.status.isSuccess()) return null
+    val aqi = Json.parseToJsonElement(response.body<String>()).jsonObject["current"]?.jsonObject
+        ?.get("us_aqi")?.jsonPrimitive?.contentOrNull()?.toDoubleOrNull()?.roundToInt() ?: return null
+    val label = when {
+        aqi <= 50 -> "good"
+        aqi <= 100 -> "moderate"
+        aqi <= 150 -> "unhealthy for sensitive groups"
+        aqi <= 200 -> "unhealthy"
+        else -> "very unhealthy"
+    }
+    "Air quality $aqi, $label"
 }.getOrNull()
 
 /**
@@ -180,6 +268,9 @@ private data class OpenMeteo(
     data class Daily(
         @SerialName("temperature_2m_max") val max: List<Double> = emptyList(),
         @SerialName("temperature_2m_min") val min: List<Double> = emptyList(),
+        @SerialName("precipitation_probability_max") val rain: List<Int?> = emptyList(),
+        @SerialName("uv_index_max") val uv: List<Double?> = emptyList(),
+        val sunset: List<String> = emptyList(),
     )
 }
 
