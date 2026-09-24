@@ -120,17 +120,17 @@ private fun Page(error: String?, content: androidx.compose.foundation.lazy.LazyL
 }
 
 @Composable
-private fun Hint(text: String) {
+internal fun Hint(text: String) {
     Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 }
 
 @Composable
-private fun Label(text: String) {
+internal fun Label(text: String) {
     Text(text, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 8.dp))
 }
 
 @Composable
-private fun CardBox(content: @Composable () -> Unit) {
+internal fun CardBox(content: @Composable () -> Unit) {
     Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) { content() }
     }
@@ -929,5 +929,122 @@ internal fun HealthPage(app: TomsenseApp) {
                 }
             }
         }
+    }
+}
+
+
+// ─── Home screen feed ───────────────────────────────────────────────────────
+
+/**
+ * The panel left of the home screen: how to turn it on, where its news comes
+ * from, and what it should look for. Interests live on the news worker and
+ * drive two things — which stories rank, and which teams' games the panel
+ * shows — so they are edited here rather than only on the worker's own page.
+ */
+@Composable
+internal fun FeedSettingsPage(app: TomsenseApp) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var error by remember { mutableStateOf<String?>(null) }
+    var configured by remember { mutableStateOf(false) }
+    var interests by remember { mutableStateOf<List<org.tomsense.android.feed.NewsClient.Interest>>(emptyList()) }
+    var editing by remember { mutableStateOf<org.tomsense.android.feed.NewsClient.Interest?>(null) }
+    var creating by remember { mutableStateOf(false) }
+    val client = remember { org.tomsense.android.feed.NewsClient(app.httpClient) }
+
+    suspend fun load() {
+        val cfg = org.tomsense.android.feed.NewsClient.config(context)
+        configured = cfg.isComplete
+        if (!cfg.isComplete) return
+        runCatching { interests = client.allInterests(cfg) }.onFailure { error = it.message }
+    }
+    LaunchedEffect(Unit) { load() }
+    fun withConfig(block: suspend (org.tomsense.android.feed.NewsClient.Config) -> Unit) =
+        scope.act({ error = it }, { block(org.tomsense.android.feed.NewsClient.config(context)) }, { load() })
+
+    Page(error) {
+        item { Label("Turn it on") }
+        item {
+            CardBox {
+                Hint("The feed appears when you swipe right on the home screen, in Lawnchair:")
+                listOf(
+                    "Lawnchair debug menu → turn on \"Ignore feed whitelist\"",
+                    "Home screen → Feed provider → TomSense",
+                ).forEachIndexed { i, step ->
+                    Row {
+                        Text("${i + 1}.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(end = 8.dp))
+                        Text(step, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+            }
+        }
+
+        item { Label("News source") }
+        item { Hint("The news worker that ranks stories for you. Its URL and API key stay on this phone.") }
+        item { CardBox { NewsSourceCard(onSaved = { scope.launch { load() } }) } }
+
+        item { Label("Interests") }
+        item {
+            Hint(
+                "Topics you follow, described in your own words. They rank your stories — and any sports teams " +
+                    "named here get their next game or live score on the panel.",
+            )
+        }
+        if (!configured) {
+            item { Hint("Set up the news source above to manage interests.") }
+        } else {
+            if (interests.isEmpty()) item { Hint("No interests yet.") }
+            items(interests, key = { it.id }) { i ->
+                CardBox {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(i.name, style = MaterialTheme.typography.titleSmall)
+                            Text(i.queryText, style = MaterialTheme.typography.bodySmall, maxLines = 2,
+                                overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Switch(checked = i.enabled != 0, onCheckedChange = { on ->
+                            withConfig { cfg -> client.saveInterest(cfg, i.id, i.name, i.queryText, on, i.weight) }
+                        })
+                    }
+                    Row {
+                        TextButton(onClick = { editing = i }) { Text("Edit") }
+                        Spacer(Modifier.weight(1f))
+                        IconButton(onClick = { withConfig { cfg -> client.deleteInterest(cfg, i.id) } }) {
+                            Icon(Icons.Filled.Delete, "Delete interest")
+                        }
+                    }
+                }
+            }
+            item { OutlinedButton(onClick = { creating = true }) { Text("Add interest") } }
+        }
+    }
+
+    if (creating || editing != null) {
+        val cur = editing
+        var name by remember(cur) { mutableStateOf(cur?.name ?: "") }
+        var text by remember(cur) { mutableStateOf(cur?.queryText ?: "") }
+        AlertDialog(
+            onDismissRequest = { creating = false; editing = null },
+            title = { Text(if (cur == null) "Add interest" else "Edit interest") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(name, { name = it }, label = { Text("Name") }, singleLine = true,
+                        placeholder = { Text("e.g. Seattle Seahawks") })
+                    OutlinedTextField(text, { text = it }, label = { Text("Describe it") }, minLines = 3,
+                        placeholder = { Text("Seattle Seahawks NFL football, games, trades, injuries") })
+                    Hint("More words make better matches. For a team, include its full name and sport.")
+                }
+            },
+            confirmButton = {
+                TextButton(enabled = name.isNotBlank() && text.isNotBlank(), onClick = {
+                    creating = false; editing = null
+                    withConfig { cfg ->
+                        client.saveInterest(cfg, cur?.id, name.trim(), text.trim(), cur?.enabled != 0, cur?.weight ?: 1.0)
+                    }
+                }) { Text("Save") }
+            },
+            dismissButton = { TextButton(onClick = { creating = false; editing = null }) { Text("Cancel") } },
+        )
     }
 }

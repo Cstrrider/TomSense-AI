@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
+import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
@@ -91,9 +92,11 @@ class NewsClient(private val http: HttpClient) {
     /** One declared interest ("Philadelphia Eagles NFL football"). */
     @Serializable
     data class Interest(
+        val id: Long = 0,
         val name: String = "",
         @SerialName("query_text") val queryText: String = "",
         val enabled: Int = 1,
+        val weight: Double = 1.0,
     )
 
     @Serializable
@@ -112,6 +115,53 @@ class NewsClient(private val http: HttpClient) {
             throw IOException("news-worker returned HTTP ${response.status.value}")
         }
         return response.body<Interests>().interests.filter { it.enabled != 0 }
+    }
+
+    /** Every interest, disabled ones included — for the editor in Settings. */
+    suspend fun allInterests(config: Config): List<Interest> {
+        val response = http.get("${config.baseUrl}/interests") {
+            header("Authorization", "Bearer ${config.apiKey}")
+        }
+        if (!response.status.isSuccess()) throw IOException("news-worker returned HTTP ${response.status.value}")
+        return response.body<Interests>().interests
+    }
+
+    @Serializable
+    private data class InterestWrite(
+        val id: Long? = null,
+        val name: String,
+        val queryText: String,
+        val enabled: Boolean = true,
+        // Sent every time: the worker resets an omitted weight to 1.0, so a
+        // toggle would otherwise silently undo a tuned weight.
+        val weight: Double = 1.0,
+    )
+
+    /**
+     * Create (id null) or update an interest. The worker re-embeds the text on
+     * every write, so this is also how a description edit takes effect.
+     */
+    suspend fun saveInterest(
+        config: Config,
+        id: Long?,
+        name: String,
+        queryText: String,
+        enabled: Boolean = true,
+        weight: Double = 1.0,
+    ) {
+        val res = http.post("${config.baseUrl}/interests") {
+            header("Authorization", "Bearer ${config.apiKey}")
+            contentType(ContentType.Application.Json)
+            setBody(InterestWrite(id, name, queryText, enabled, weight))
+        }
+        if (!res.status.isSuccess()) throw IOException("interest rejected: HTTP ${res.status.value}")
+    }
+
+    suspend fun deleteInterest(config: Config, id: Long) {
+        val res = http.delete("${config.baseUrl}/interests?id=$id") {
+            header("Authorization", "Bearer ${config.apiKey}")
+        }
+        if (!res.status.isSuccess()) throw IOException("delete failed: HTTP ${res.status.value}")
     }
 
     /**

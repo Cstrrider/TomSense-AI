@@ -1,5 +1,7 @@
 package org.tomsense.android
 
+import androidx.compose.material.icons.filled.Newspaper
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Tune
@@ -166,28 +168,29 @@ class SettingsActivity : ComponentActivity() {
                     "connections" -> ConnectionsPage(app)
                     "keys" -> KeysPage(app)
                     "health" -> HealthPage(app)
+                    "feed" -> FeedSettingsPage(app)
                     else -> LazyColumn(
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        // Same rhythm as every other Settings page: 16dp gutters,
+                        // coloured section labels, grey hints, tonal cards.
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
                         error?.let {
-                            item { Text("Error: $it", color = MaterialTheme.colorScheme.error) }
+                            item { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
                         }
 
                         usage?.let { u ->
-                            item { SectionHeader("Today") }
+                            item { Label("Today") }
                             item { UsageCard(u) }
-                            item { HorizontalDivider(Modifier.padding(vertical = 8.dp)) }
                         }
 
-                        item { SectionHeader("Routing") }
+                        item { Label("Routing") }
 
                         item {
-                            Text(
+                            Hint(
                                 "Which model answers depends on the turn. These decide, in this " +
                                     "order — anything left unset falls through to the default.",
-                                style = MaterialTheme.typography.bodySmall,
                             )
                         }
 
@@ -197,6 +200,7 @@ class SettingsActivity : ComponentActivity() {
                         // visible when its provider is switched off, which is
                         // exactly when a stale default is confusing.
                         item {
+                          CardBox {
                             SlotRow(
                                 slot = Slot(
                                     "default",
@@ -215,12 +219,12 @@ class SettingsActivity : ComponentActivity() {
                                     }
                                 },
                             )
-                        }
 
                         // Order matters: it mirrors the precedence the edge
                         // actually applies, so reading down the list explains
                         // why a given turn picked a given model.
-                        items(SLOTS, key = { it.key }) { slot ->
+                        SLOTS.forEach { slot ->
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                             SlotRow(
                                 slot = slot,
                                 // The image slot picks from text-to-image
@@ -238,18 +242,20 @@ class SettingsActivity : ComponentActivity() {
                                 },
                             )
                         }
+                          }
+                        }
 
                         item {
+                          CardBox {
                             Row(
-                                Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Column(Modifier.weight(1f)) {
-                                    Text("Auto-route hard turns", style = MaterialTheme.typography.bodyMedium)
-                                    Text(
+                                    Text("Auto-route hard turns", style = MaterialTheme.typography.bodyLarge)
+                                    Hint(
                                         "A small model rates each message; harder ones escalate " +
                                             "to a heavier model. Short messages skip the check.",
-                                        style = MaterialTheme.typography.labelSmall,
                                     )
                                 }
                                 Switch(
@@ -265,9 +271,8 @@ class SettingsActivity : ComponentActivity() {
                                     },
                                 )
                             }
-                        }
 
-                        item {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                             BudgetModeCard(
                                 configured = prefs.hasAnalyticsKey,
                                 onSave = { key, account ->
@@ -283,33 +288,23 @@ class SettingsActivity : ComponentActivity() {
                                     }
                                 },
                             )
+                          }
                         }
 
-                        item { HorizontalDivider(Modifier.padding(vertical = 8.dp)) }
-                        item { SectionHeader("Home screen feed") }
-                        item {
-                            Text(
-                                "Shows left of the home screen in Lawnchair. Enable " +
-                                    "Debug menu \u2192 Ignore feed whitelist, then Home screen " +
-                                    "\u2192 Feed provider \u2192 TomSense.",
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                        }
-                        item { NewsSourceCard() }
+                        // The home screen feed moved to its own page.
 
-                        item { HorizontalDivider(Modifier.padding(vertical = 8.dp)) }
-                        item { SectionHeader("Voice") }
+                        item { Label("Voice") }
 
                         item {
-                            Text(
+                            Hint(
                                 "Speech in always uses the phone, which costs nothing and works " +
                                     "offline. Speech OUT can use a better voice at the price of a " +
                                     "round trip.",
-                                style = MaterialTheme.typography.bodySmall,
                             )
                         }
 
                         item {
+                          CardBox {
                             VoiceRow(
                                 current = prefs.ttsVoice,
                                 voices = ttsVoices,
@@ -321,10 +316,10 @@ class SettingsActivity : ComponentActivity() {
                                     }
                                 },
                             )
+                          }
                         }
 
-                        item { HorizontalDivider(Modifier.padding(vertical = 8.dp)) }
-                        item { SectionHeader("Providers & models") }
+                        item { Label("Providers & models") }
 
                         // Search matters more than it looks: OpenRouter alone
                         // advertises 300+ models. With the lists now nested in
@@ -351,10 +346,9 @@ class SettingsActivity : ComponentActivity() {
 
                         if (models.isEmpty()) {
                             item {
-                                Text(
+                                Hint(
                                     "No usable models. Add a provider with an API key, " +
                                         "or enable Cloudflare.",
-                                    style = MaterialTheme.typography.bodySmall,
                                 )
                             }
                         }
@@ -410,7 +404,7 @@ class SettingsActivity : ComponentActivity() {
                         }
 
                         item {
-                            Button(onClick = { adding = true }, modifier = Modifier.fillMaxWidth()) {
+                            OutlinedButton(onClick = { adding = true }) {
                                 Text("Add provider")
                             }
                         }
@@ -493,7 +487,7 @@ private fun ModelRow(
                 caps?.context?.let { add("${it / 1000}k") }
             }
             if (tags.isNotEmpty()) {
-                Text(tags.joinToString(" · "), style = MaterialTheme.typography.labelSmall)
+                Text(tags.joinToString(" · "), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
@@ -554,7 +548,11 @@ private fun ProviderCard(
         union.filter { it.contains(query.trim(), ignoreCase = true) }
     }
 
-    Card(Modifier.fillMaxWidth().alpha(if (faded) 0.4f else 1f)) {
+    androidx.compose.material3.Surface(
+        Modifier.fillMaxWidth().alpha(if (faded) 0.4f else 1f),
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surfaceContainer,
+    ) {
         Column(Modifier.fillMaxWidth().padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f).clickable { open = !open }) {
@@ -565,7 +563,7 @@ private fun ProviderCard(
                         provider.hasKey -> "key set · ${configured.size} models"
                         else -> "no key — add one to use this provider"
                     }
-                    Text(status, style = MaterialTheme.typography.labelSmall)
+                    Text(status, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 IconButton(onClick = { open = !open }) {
                     Icon(
@@ -602,7 +600,8 @@ private fun ProviderCard(
                     note?.let {
                         Text(
                             it,
-                            style = MaterialTheme.typography.labelSmall,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(start = 8.dp),
                         )
                     }
@@ -615,7 +614,8 @@ private fun ProviderCard(
                         } else {
                             "Nothing here matches \"$query\"."
                         },
-                        style = MaterialTheme.typography.labelSmall,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(vertical = 8.dp),
                     )
                 }
@@ -639,7 +639,8 @@ private fun ProviderCard(
                 if (shown.size > 60) {
                     Text(
                         "…${shown.size - 60} more — narrow the search above",
-                        style = MaterialTheme.typography.labelSmall,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
 
@@ -671,7 +672,8 @@ private fun ProviderCard(
                     Text(
                         "With nothing ticked, Cloudflare offers its whole catalogue. " +
                             "Switch the provider off instead if you want none of it.",
-                        style = MaterialTheme.typography.labelSmall,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
@@ -769,7 +771,8 @@ private fun AddProviderDialog(
                     discoverNote?.let {
                         Text(
                             it,
-                            style = MaterialTheme.typography.labelSmall,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(start = 8.dp),
                         )
                     }
@@ -802,7 +805,8 @@ private fun AddProviderDialog(
                     if (discovered.size > shown.size) {
                         Text(
                             "…${discovered.size - shown.size} more — narrow the filter",
-                            style = MaterialTheme.typography.labelSmall,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 } else {
@@ -905,8 +909,8 @@ private fun SlotRow(
     Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text(slot.label, style = MaterialTheme.typography.bodyMedium)
-                Text(slot.help, style = MaterialTheme.typography.labelSmall)
+                Text(slot.label, style = MaterialTheme.typography.bodyLarge)
+                Text(slot.help, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Box {
                 TextButton(onClick = { open = true }) {
@@ -959,14 +963,15 @@ private fun BudgetModeCard(configured: Boolean, onSave: (String, String) -> Unit
     Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text("Budget mode", style = MaterialTheme.typography.bodyMedium)
+                Text("Budget mode", style = MaterialTheme.typography.bodyLarge)
                 Text(
                     if (configured) {
                         "On — heavy Cloudflare models downshift past 80% of the daily free neurons."
                     } else {
                         "Off. Needs a Cloudflare API token with Account Analytics: Read."
                     },
-                    style = MaterialTheme.typography.labelSmall,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             TextButton(onClick = { expanded = !expanded }) {
@@ -1024,7 +1029,11 @@ private fun BudgetModeCard(configured: Boolean, onSave: (String, String) -> Unit
  */
 @Composable
 private fun UsageCard(u: UsageToday) {
-    Card(Modifier.fillMaxWidth()) {
+    androidx.compose.material3.Surface(
+        Modifier.fillMaxWidth(),
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surfaceContainer,
+    ) {
         Column(Modifier.fillMaxWidth().padding(12.dp)) {
             val pct = if (u.neuronLimit > 0) {
                 (u.neurons * 100 / u.neuronLimit).coerceAtMost(999)
@@ -1041,14 +1050,16 @@ private fun UsageCard(u: UsageToday) {
                 } else {
                     "Estimated from token cost — add an analytics token under Budget mode for the real figure."
                 },
-                style = MaterialTheme.typography.labelSmall,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
             Text(
                 "${u.tokensIn} in · ${u.tokensOut} out" +
                     (if (u.cacheRead > 0) " · ${u.cacheRead} cached" else "") +
                     " · ${u.requests} requests · ${formatUsdSettings(u.costUsd)}",
-                style = MaterialTheme.typography.labelSmall,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 6.dp),
             )
 
@@ -1056,7 +1067,8 @@ private fun UsageCard(u: UsageToday) {
                 Text(
                     "  ${m.modelId.substringAfterLast('/')} — ${m.tokensIn}/${m.tokensOut}" +
                         (m.costUsd?.let { " · ${formatUsdSettings(it)}" } ?: ""),
-                    style = MaterialTheme.typography.labelSmall,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
@@ -1084,14 +1096,15 @@ private fun VoiceRow(current: String, voices: List<String>, onPick: (String) -> 
 
     Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
-            Text("Spoken replies", style = MaterialTheme.typography.bodyMedium)
+            Text("Spoken replies", style = MaterialTheme.typography.bodyLarge)
             Text(
                 if (current.isBlank()) {
                     "Phone voice — offline, instant, free"
                 } else {
                     "aura-2 · $current"
                 },
-                style = MaterialTheme.typography.labelSmall,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
         Box {
@@ -1125,7 +1138,7 @@ private fun VoiceRow(current: String, voices: List<String>, onPick: (String) -> 
  * already caches locally.
  */
 @Composable
-private fun NewsSourceCard() {
+internal fun NewsSourceCard(onSaved: () -> Unit = {}) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = androidx.compose.runtime.rememberCoroutineScope()
 
@@ -1173,11 +1186,12 @@ private fun NewsSourceCard() {
                         apiKey = ""
                         configured = true
                         saved = true
+                        onSaved()
                     }
                 },
             ) { Text("Save") }
             if (saved) {
-                Text("Saved", style = MaterialTheme.typography.labelSmall)
+                Text("Saved", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
@@ -1198,6 +1212,7 @@ private val PAGE_TITLES = mapOf(
     "connections" to "Connected tools",
     "keys" to "API keys",
     "health" to "Health",
+    "feed" to "Home screen feed",
 )
 
 @androidx.compose.runtime.Composable
@@ -1208,7 +1223,8 @@ private fun SettingsHome(open: (String) -> Unit) {
         contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
     ) {
         item { SettingsEntry(I.Palette, "Appearance", "Theme, colours and style") { open("appearance") } }
-        item { SettingsEntry(I.Tune, "AI & models", "Providers, routing, voice, home feed") { open("models") } }
+        item { SettingsEntry(I.Tune, "AI & models", "Providers, routing and voice") { open("models") } }
+        item { SettingsEntry(I.Newspaper, "Home screen feed", "News source, interests and setup") { open("feed") } }
         item { SettingsEntry(I.Psychology, "Memory", "What the assistant knows about you") { open("memory") } }
         item { SettingsEntry(I.Face, "Personas", "How the assistant talks") { open("personas") } }
         item { SettingsEntry(I.Folder, "Projects", "Group chats with shared instructions") { open("projects") } }
