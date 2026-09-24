@@ -14,6 +14,7 @@ import { searchDocs } from "./rag";
 import { getSecret } from "./secrets";
 import { getPrefs } from "./prefs";
 import { runTaskModel } from "./task_model";
+import { edgeFetchPage, edgeWebSearch } from "./websearch";
 
 type Args = Record<string, unknown>;
 const str = (a: Args, k: string) => (typeof a[k] === "string" ? (a[k] as string).trim() : "");
@@ -144,6 +145,50 @@ export const getWeather = {
   },
 };
 
+// ─── web search ─────────────────────────────────────────────────────────────
+
+/** "edge" searches from the Worker (websearch.ts); "home" uses the home SearXNG. */
+function searchSource(env: Env): "edge" | "home" {
+  return (env as { WEB_SEARCH_SOURCE?: string }).WEB_SEARCH_SOURCE === "home" ? "home" : "edge";
+}
+
+async function searchOnce(
+  env: Env,
+  query: string,
+  ctx?: ToolContext,
+): Promise<{ results: { title: string; url: string; snippet: string }[]; error?: string }> {
+  if (searchSource(env) === "home") {
+    if (!ctx?.callHome) return { results: [], error: "home search is offline" };
+    const r = await ctx.callHome("web_search", { query });
+    if (r.error) return { results: [], error: r.error };
+    try {
+      return { results: JSON.parse(r.content) };
+    } catch {
+      return { results: [], error: "unreadable home search result" };
+    }
+  }
+  const r = await edgeWebSearch(query, { limit: 10 });
+  const failed = Object.entries(r.sources).filter(([, v]) => typeof v === "string").map(([k]) => k);
+  return { results: r.results, error: r.results.length ? undefined : failed.length ? `search sources failed: ${failed.join(", ")}` : undefined };
+}
+
+export const webSearch = {
+  schema: fn(
+    "web_search",
+    "Search the web for current information — facts, dates, prices, scores, news, how-tos. Returns titles, " +
+      "URLs and snippets. Use fetch_page to read a result in full.",
+    { query: { type: "string" } },
+    ["query"],
+  ),
+  async run(env: Env, _userId: string, args: Args, ctx?: ToolContext): Promise<ServerToolResult> {
+    const { results, error } = await searchOnce(env, str(args, "query"), ctx);
+    if (!results.length) {
+      return { content: "Web search returned no results.", error: error ? `web_search: ${error}` : undefined };
+    }
+    return { content: JSON.stringify(results) };
+  },
+};
+
 // ─── deep research ─────────────────────────────────────────────────────────
 
 export const deepResearch = {
@@ -157,9 +202,6 @@ export const deepResearch = {
   ),
   async run(env: Env, userId: string, args: Args, ctx?: ToolContext): Promise<ServerToolResult> {
     const question = str(args, "question");
-    if (!ctx?.callHome) {
-      return { content: "Web access is unavailable right now (the home agent is offline).", error: "deep_research: home agent offline" };
-    }
     const prefs = await getPrefs(env, userId);
     const planned = await runTaskModel(env, { userId, email: "", deviceId: "edge" }, {
       purpose: "summary",
@@ -175,14 +217,8 @@ export const deepResearch = {
 
     const seen = new Map<string, { title: string; snippet: string }>();
     for (const q of queries) {
-      const r = await ctx.callHome("web_search", { query: q });
-      if (r.error) continue;
-      try {
-        const results = JSON.parse(r.content) as { title: string; url: string; snippet: string }[];
-        for (const x of results.slice(0, 5)) if (!seen.has(x.url)) seen.set(x.url, { title: x.title, snippet: x.snippet });
-      } catch {
-        // skip unparsable result sets
-      }
+      const { results } = await searchOnce(env, q, ctx);
+      for (const x of results.slice(0, 5)) if (!seen.has(x.url)) seen.set(x.url, { title: x.title, snippet: x.snippet });
     }
     if (!seen.size) return { content: "Web search returned nothing for this question.", error: "deep_research: no search results" };
 
@@ -190,11 +226,22 @@ export const deepResearch = {
     const urls = [...seen.keys()].slice(0, 6);
     const pages = await Promise.all(
       urls.map(async (url) => {
-        const r = await ctx.callHome!("fetch_page", { url });
-        if (r.error) return null;
+        // Home fetch when the agent is up (it reads more sites cleanly);
+        // otherwise the edge reads the page itself.
+        if (ctx?.callHome) {
+          const r = await ctx.callHome("fetch_page", { url });
+          if (!r.error) {
+            try {
+              const p = JSON.parse(r.content) as { text?: string };
+              return { url, title: seen.get(url)!.title, text: (p.text ?? "").slice(0, 3_500) };
+            } catch {
+              // fall through to the edge fetch
+            }
+          }
+        }
         try {
-          const p = JSON.parse(r.content) as { text?: string };
-          return { url, title: seen.get(url)!.title, text: (p.text ?? "").slice(0, 3_500) };
+          const p = await edgeFetchPage(url);
+          return { url, title: seen.get(url)!.title, text: p.text.slice(0, 3_500) };
         } catch {
           return null;
         }
@@ -404,6 +451,7 @@ export const updateArtifact = {
 };
 
 export const EXTRA_TOOLS = {
+  web_search: webSearch,
   remember,
   forget,
   search_docs: searchDocsTool,

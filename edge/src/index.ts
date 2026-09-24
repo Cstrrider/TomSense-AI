@@ -34,6 +34,7 @@ import { mcpToolSurface } from "./mcp";
 import { handleFeatures } from "./features";
 import { handleMcpServer } from "./mcp_server";
 import { runDueSchedules } from "./schedules";
+import { edgeWebSearch } from "./websearch";
 import { runTaskModel } from "./task_model";
 import { getPrefs, setPrefs, setAnalyticsKey, hasAnalyticsKey } from "./prefs";
 import { usageToday } from "./usage";
@@ -220,7 +221,12 @@ export default {
       if (path === "/title" && req.method === "POST") return await title(req, env, who);
       if (path === "/home/tools") return await homeTools(env);
       if (path === "/home/call" && req.method === "POST") return await homeCall(req, env);
-      if (path === "/mcp") return await handleMcpServer(req, env, who);
+      // The edge web search on its own, for testing sources and for any
+      // client that wants results without a model turn.
+      if (path === "/search" && req.method === "GET") {
+        return json(await edgeWebSearch(url.searchParams.get("q") ?? "", { limit: 10 }));
+      }
+            if (path === "/mcp") return await handleMcpServer(req, env, who);
       const feature = await handleFeatures(req, env, who, ctx);
       if (feature) return feature;
       return json({ error: "not found" }, 404);
@@ -308,10 +314,12 @@ async function chat(req: Request, env: Env, who: Principal): Promise<Response> {
   // not. It is a Durable Object read, not a network hop home.
   const home = await homeToolSurface(env);
   const mcp = await mcpToolSurface(env, who.userId).catch(() => ({ schemas: [], refs: [] }));
-  // deep_research is built from the home agent's web tools; offering it while
-  // they are offline would only produce an apology.
-  const serverSchemas = serverToolSchemas().filter(
-    (t) => home.names.includes("web_search") || (t as { function?: { name?: string } }).function?.name !== "deep_research",
+  // web_search is now an EDGE tool (websearch.ts) that can still delegate to
+  // the home SearXNG (WEB_SEARCH_SOURCE=home). Drop the home agent's own
+  // schema of the same name so the model sees one web_search, not two.
+  const serverSchemas = serverToolSchemas();
+  const homeSchemas = home.schemas.filter(
+    (t) => (t as { function?: { name?: string } }).function?.name !== "web_search",
   );
 
   const runId = crypto.randomUUID();
@@ -339,7 +347,7 @@ async function chat(req: Request, env: Env, who: Principal): Promise<Response> {
         // the client means a new server or home tool needs no app update to
         // exist — and when the agent is offline its tools are simply not
         // offered, so the model never calls something unreachable.
-        tools: [...(body.tools ?? []), ...serverSchemas, ...home.schemas, ...mcp.schemas],
+        tools: [...(body.tools ?? []), ...serverSchemas, ...homeSchemas, ...mcp.schemas],
         homeTools: home.names,
         mcpTools: mcp.refs,
         attachmentKeys: lastUser?.attachments ?? [],

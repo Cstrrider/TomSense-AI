@@ -54,6 +54,11 @@ new_sqlite_classes = ["VoiceSession", "DetachedRun", "HomeLink"]
 crons = ["*/15 * * * *"]
 
 [vars]
+# Where web_search looks: "home" = the home SearXNG (default); "edge" = from
+# this Worker (websearch.ts). Tested 2026-09-24 and REVERTED: from Cloudflare,
+# Bing is the only general engine that answers, and it searches only the
+# first word of a query ("small language model…" → results for "small").
+WEB_SEARCH_SOURCE = "home"
 # Tier defaults (spec §4). Tier 0 is on-device and has no entry here.
 TIER1_MODEL = "cf::@cf/google/gemma-4-26b-a4b-it"
 # Utility tier: titles, follow-ups, the auto-route classifier. Deliberately a
