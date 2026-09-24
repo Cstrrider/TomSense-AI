@@ -316,7 +316,11 @@ class MainActivity : ComponentActivity() {
                                     onPin = { id, pinned ->
                                         scope.launch { app.repo.setPinned(id, pinned) }
                                     },
-                                    onDelete = ::deleteConversation,
+                                    onDelete = { deleteConversations(setOf(it)) },
+                                    onDeleteMany = ::deleteConversations,
+                                    backHandler = { enabled, onBack ->
+                                        androidx.activity.compose.BackHandler(enabled, onBack)
+                                    },
                                 )
                             }
                         },
@@ -632,16 +636,16 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Delete a conversation, and leave the user somewhere valid.
+     * Delete one or more conversations, and leave the user somewhere valid.
      *
      * Deleting the OPEN chat has to move them off it — otherwise the screen
      * keeps rendering a conversation that no longer exists and the next
      * message would be written into a tombstoned row.
      */
-    private fun deleteConversation(id: String) {
+    private fun deleteConversations(ids: Set<String>) {
         lifecycleScope.launch {
-            app.repo.deleteConversation(id)
-            if (convId == id) {
+            app.repo.deleteConversations(ids)
+            if (convId in ids) {
                 val remaining = app.db.schemaQueries.conversationList().executeAsList()
                 convId = remaining.firstOrNull()?.id ?: app.repo.createConversation()
             }

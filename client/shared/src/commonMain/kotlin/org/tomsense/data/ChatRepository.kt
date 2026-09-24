@@ -242,12 +242,24 @@ class ChatRepository(
         }
     }
 
-    suspend fun deleteConversation(convId: String) = withContext(Dispatchers.Default) {
+    suspend fun deleteConversation(convId: String) = deleteConversations(listOf(convId))
+
+    /**
+     * Tombstone several conversations at once (drawer multi-select).
+     *
+     * One transaction for the whole batch: a sync push landing halfway through
+     * a loop of single deletes would ship some of the selection and not the
+     * rest, and the drawer would briefly show a half-deleted list.
+     */
+    suspend fun deleteConversations(convIds: Collection<String>) = withContext(Dispatchers.Default) {
+        if (convIds.isEmpty()) return@withContext
         db.transaction {
             val lamport = nextLamport()
-            q.tombstoneMessagesFor(lamport, convId)
-            q.tombstoneConversation(lamport, convId)
-            fts.unindexConversation(convId)
+            for (convId in convIds) {
+                q.tombstoneMessagesFor(lamport, convId)
+                q.tombstoneConversation(lamport, convId)
+                fts.unindexConversation(convId)
+            }
         }
     }
 
