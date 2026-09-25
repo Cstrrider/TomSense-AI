@@ -241,6 +241,18 @@ class MainActivity : ComponentActivity() {
                     // keyboard overlaps content, and adjustResize alone no
                     // longer lifts the input row on Android 15.
                     val drawerState = rememberDrawerState(DrawerValue.Closed)
+
+                    // Usage for the drawer footer. Fetched as the drawer
+                    // STARTS opening (targetValue, not isOpen) so the number
+                    // is usually there by the time the drawer is. Kept on
+                    // failure: a stale figure beats the card vanishing when
+                    // offline, and signed-out users never get one to show.
+                    var drawerUsage by remember { mutableStateOf<org.tomsense.sync.UsageToday?>(null) }
+                    androidx.compose.runtime.LaunchedEffect(drawerState.targetValue) {
+                        if (drawerState.targetValue == DrawerValue.Open) {
+                            runCatching { app.providers.usage() }.getOrNull()?.let { drawerUsage = it }
+                        }
+                    }
                     val scope = rememberCoroutineScope()
                     var query by remember { mutableStateOf("") }
                     var results by remember { mutableStateOf<SearchResults?>(null) }
@@ -314,6 +326,16 @@ class MainActivity : ComponentActivity() {
                                     onSection = { i ->
                                         tab = HomeTab.entries[i]
                                         scope.launch { drawerState.close() }
+                                    },
+                                    footer = drawerUsage?.let { u ->
+                                        {
+                                            DrawerUsageCard(u, onClick = {
+                                                startActivity(
+                                                    android.content.Intent(this@MainActivity, SettingsActivity::class.java)
+                                                        .putExtra(EXTRA_PAGE, "models"),
+                                                )
+                                            })
+                                        }
                                     },
                                     onRename = { id, title ->
                                         scope.launch { app.repo.rename(id, title) }

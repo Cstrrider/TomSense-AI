@@ -104,6 +104,8 @@ fun ConversationDrawer(
     sections: List<String> = emptyList(),
     currentSection: Int = 0,
     onSection: (Int) -> Unit = {},
+    /** Pinned under the list — the host puts today's usage here. */
+    footer: (@Composable () -> Unit)? = null,
 ) {
     var renaming by remember { mutableStateOf<Conversation?>(null) }
     // null = all chats. Filtering here rather than in the query keeps the
@@ -212,6 +214,10 @@ fun ConversationDrawer(
                 },
                 modifier = Modifier.weight(1f),
             )
+        }
+
+        footer?.let {
+            Box(Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 12.dp)) { it() }
         }
     }
 
