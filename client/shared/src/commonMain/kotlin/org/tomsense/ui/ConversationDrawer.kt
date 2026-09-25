@@ -38,6 +38,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.NavigationDrawerItemDefaults
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -91,6 +95,15 @@ fun ConversationDrawer(
      * 1.7 has no BackHandler of its own, so the host passes one in.
      */
     backHandler: @Composable (enabled: Boolean, onBack: () -> Unit) -> Unit = { _, _ -> },
+    /**
+     * Top-level sections (e.g. Chat, News), shown as a switch where the
+     * "Chats" heading would be. Empty keeps the plain heading — the desktop
+     * app has only chats. They used to be a bottom navigation bar, which cost
+     * the chat ~80dp of height on every screen for a switch used rarely.
+     */
+    sections: List<String> = emptyList(),
+    currentSection: Int = 0,
+    onSection: (Int) -> Unit = {},
 ) {
     var renaming by remember { mutableStateOf<Conversation?>(null) }
     // null = all chats. Filtering here rather than in the query keeps the
@@ -126,11 +139,20 @@ fun ConversationDrawer(
                 Modifier.fillMaxWidth().padding(vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
-                    "Chats",
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.weight(1f),
-                )
+                if (sections.size > 1) {
+                    SectionSwitch(
+                        sections = sections,
+                        current = currentSection,
+                        onSection = onSection,
+                        modifier = Modifier.weight(1f),
+                    )
+                } else {
+                    Text(
+                        "Chats",
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
                 IconButton(onClick = onNew) {
                     Icon(Icons.Filled.Add, contentDescription = "New chat")
                 }
@@ -420,6 +442,25 @@ private fun ConversationRow(
                     )
                 }
             }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SectionSwitch(
+    sections: List<String>,
+    current: Int,
+    onSection: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    SingleChoiceSegmentedButtonRow(modifier) {
+        sections.forEachIndexed { i, label ->
+            SegmentedButton(
+                selected = i == current,
+                onClick = { onSection(i) },
+                shape = SegmentedButtonDefaults.itemShape(index = i, count = sections.size),
+            ) { Text(label) }
         }
     }
 }

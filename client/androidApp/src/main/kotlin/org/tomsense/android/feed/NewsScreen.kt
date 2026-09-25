@@ -12,9 +12,15 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -36,12 +42,51 @@ import org.tomsense.android.TomsenseApp
  * height and there is no ask box or recent-chat list competing for it.
  */
 @Composable
-fun NewsScreen(app: TomsenseApp, state: FeedPanelState, modifier: Modifier = Modifier) {
+@OptIn(ExperimentalMaterial3Api::class)
+fun NewsScreen(
+    app: TomsenseApp,
+    state: FeedPanelState,
+    modifier: Modifier = Modifier,
+    /** Opens the drawer, which is now the only way back to Chat. */
+    onOpenDrawer: () -> Unit = {},
+) {
     // Deliberately not keyed on anything that recomposes: the cooldown inside
     // load() already decides whether this costs a fetch.
     LaunchedEffect(Unit) { state.load(app) }
 
-    Box(modifier.fillMaxSize()) {
+    // Same auto-hiding bar as the chat screen. News needs chrome now that the
+    // bottom Chat/News tabs are gone: the drawer is the way back to Chat, and
+    // a surface with no visible way out only works for people who already
+    // know the edge-swipe.
+    val barScroll = TopAppBarDefaults.enterAlwaysScrollBehavior()
+
+    Scaffold(
+        modifier = modifier.nestedScroll(barScroll.nestedScrollConnection),
+        topBar = {
+            TopAppBar(
+                scrollBehavior = barScroll,
+                title = { Text("News") },
+                navigationIcon = {
+                    IconButton(onClick = onOpenDrawer) {
+                        Icon(Icons.Filled.Menu, contentDescription = "Menu")
+                    }
+                },
+                actions = {
+                    if (state.loading) {
+                        CircularProgressIndicator(
+                            Modifier.padding(horizontal = 14.dp).size(20.dp),
+                            strokeWidth = 2.dp,
+                        )
+                    } else {
+                        IconButton(onClick = { state.refresh() }) {
+                            Icon(Icons.Filled.Refresh, contentDescription = "Refresh news")
+                        }
+                    }
+                },
+            )
+        },
+    ) { padding ->
+    Box(Modifier.fillMaxSize().padding(padding)) {
         when {
             state.loading && state.news.isEmpty() -> {
                 CircularProgressIndicator(Modifier.align(Alignment.Center))
@@ -108,28 +153,6 @@ fun NewsScreen(app: TomsenseApp, state: FeedPanelState, modifier: Modifier = Mod
                 modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
             )
         }
-
-        // Floating rather than in a bar: this screen has no chrome of its own,
-        // and a whole app bar for one control would cost more height than the
-        // control is worth.
-        if (state.loading) {
-            CircularProgressIndicator(
-                Modifier.align(Alignment.TopEnd).padding(16.dp).size(20.dp),
-                strokeWidth = 2.dp,
-            )
-        } else {
-            FilledTonalIconButton(
-                onClick = { state.refresh() },
-                // 48dp, not 36 — a floating control with nothing adjacent to
-                // mis-hit still has to be reachable with a thumb.
-                modifier = Modifier.align(Alignment.TopEnd).padding(12.dp).size(48.dp),
-            ) {
-                Icon(
-                    Icons.Filled.Refresh,
-                    contentDescription = "Refresh news",
-                    modifier = Modifier.size(18.dp),
-                )
-            }
-        }
+    }
     }
 }

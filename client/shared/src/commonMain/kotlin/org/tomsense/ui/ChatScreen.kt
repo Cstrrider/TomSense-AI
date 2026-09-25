@@ -32,6 +32,8 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Share
@@ -212,10 +214,19 @@ fun ChatScreen(
         if (messages.isNotEmpty() && following) listState.scrollToEnd(messages.lastIndex)
     }
 
+    // The bar gets out of the way while you read: scrolling down slides it
+    // off, any upward scroll brings it straight back. enterAlways rather than
+    // exitUntilCollapsed so the menu is never more than a flick away.
+    // Only USER scrolls reach it — nestedScroll sees gestures, not the
+    // programmatic scrollBy that follows a streaming reply — so auto-follow
+    // never hides the bar on its own.
+    val barScroll = TopAppBarDefaults.enterAlwaysScrollBehavior()
+
     Scaffold(
-        modifier = modifier,
+        modifier = modifier.nestedScroll(barScroll.nestedScrollConnection),
         topBar = {
             TopAppBar(
+                scrollBehavior = barScroll,
                 title = {
                     Text(
                         title.ifBlank { "New chat" },

@@ -5,15 +5,11 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Chat
-import androidx.compose.material.icons.filled.Newspaper
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.collectAsState
@@ -292,6 +288,7 @@ class MainActivity : ComponentActivity() {
                                     onSelect = { id ->
                                         convId = id
                                         query = ""
+                                        tab = HomeTab.Chat
                                         scope.launch { drawerState.close() }
                                     },
                                     // Opening a hit only opens its chat for
@@ -301,14 +298,22 @@ class MainActivity : ComponentActivity() {
                                     onOpenMessage = { cid, _ ->
                                         convId = cid
                                         query = ""
+                                        tab = HomeTab.Chat
                                         scope.launch { drawerState.close() }
                                     },
                                     onNew = {
                                         scope.launch {
                                             convId = app.repo.createConversation()
                                             query = ""
+                                            tab = HomeTab.Chat
                                             drawerState.close()
                                         }
+                                    },
+                                    sections = listOf("Chat", "News"),
+                                    currentSection = tab.ordinal,
+                                    onSection = { i ->
+                                        tab = HomeTab.entries[i]
+                                        scope.launch { drawerState.close() }
                                     },
                                     onRename = { id, title ->
                                         scope.launch { app.repo.rename(id, title) }
@@ -333,7 +338,11 @@ class MainActivity : ComponentActivity() {
                             }
                             Box(Modifier.weight(1f)) {
                                 if (tab == HomeTab.News) {
-                                    org.tomsense.android.feed.NewsScreen(app, feedState)
+                                    org.tomsense.android.feed.NewsScreen(
+                                        app,
+                                        feedState,
+                                        onOpenDrawer = { scope.launch { drawerState.open() } },
+                                    )
                                 } else {
                                     ChatScreen(
                                     messages = messages,
@@ -405,30 +414,6 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
 
-                            NavigationBar {
-                                NavigationBarItem(
-                                    selected = tab == HomeTab.Chat,
-                                    onClick = { tab = HomeTab.Chat },
-                                    icon = {
-                                        Icon(
-                                            Icons.AutoMirrored.Filled.Chat,
-                                            contentDescription = null,
-                                        )
-                                    },
-                                    label = { Text("Chat") },
-                                )
-                                NavigationBarItem(
-                                    selected = tab == HomeTab.News,
-                                    onClick = { tab = HomeTab.News },
-                                    icon = {
-                                        Icon(
-                                            Icons.Filled.Newspaper,
-                                            contentDescription = null,
-                                        )
-                                    },
-                                    label = { Text("News") },
-                                )
-                            }
                         }
                     }
                 }
