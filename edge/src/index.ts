@@ -173,6 +173,7 @@ export default {
             tool_models?: Record<string, string>;
             auto_route?: boolean;
             auto_memory?: boolean;
+            budget_mode?: boolean;
             cfAnalyticsKey?: string;
             cfAccountId?: string;
           };

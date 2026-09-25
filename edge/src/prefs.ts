@@ -45,6 +45,14 @@ export interface UserPrefs {
    * (by the user, or by the model through the remember tool).
    */
   auto_memory: boolean;
+  /**
+   * Downshift heavy CF models past the daily neuron soft cap. Its own switch,
+   * separate from the analytics token: the token also measures usage for the
+   * Today card, and wanting a real neuron count is not the same as wanting
+   * your models swapped. It used to be implied by the token being set. Off
+   * by default; inert without a token, since usage cannot be read.
+   */
+  budget_mode: boolean;
 }
 
 // Empty tts_voice on purpose: speech defaults to the DEVICE engine, which
@@ -56,6 +64,7 @@ const DEFAULTS: UserPrefs = {
   persona_id: "",
   starters: [],
   auto_memory: true,
+  budget_mode: false,
 };
 
 /**
@@ -95,6 +104,7 @@ export async function getPrefs(env: Env, userId: string): Promise<UserPrefs> {
       ? parsed.starters.filter((x): x is string => typeof x === "string")
       : [],
     auto_memory: parsed.auto_memory ?? DEFAULTS.auto_memory,
+    budget_mode: parsed.budget_mode ?? DEFAULTS.budget_mode,
   };
 }
 
@@ -116,6 +126,7 @@ export async function setPrefs(
     persona_id?: string;
     starters?: string[];
     auto_memory?: boolean;
+    budget_mode?: boolean;
   },
 ): Promise<UserPrefs> {
   const current = await getPrefs(env, who.userId);
@@ -137,6 +148,7 @@ export async function setPrefs(
       ? patch.starters.map((x) => String(x).trim()).filter(Boolean).slice(0, 12)
       : current.starters,
     auto_memory: patch.auto_memory ?? current.auto_memory,
+    budget_mode: patch.budget_mode ?? current.budget_mode,
   };
 
   await env.DB.prepare(`UPDATE users SET prefs = ? WHERE id = ?`)

@@ -184,7 +184,9 @@ export async function routeChat(
     (notices.length && slots.vision_fallback?.trim()) || slots.chat_fallback?.trim() || null;
 
   // ── 6. Budget downshift ────────────────────────────────────────────────
-  const downshifted = await budgetDownshift(env, who, model, slotFallback);
+  const downshifted = prefs.budget_mode
+    ? await budgetDownshift(env, who, model, slotFallback)
+    : null;
   if (downshifted) {
     model = downshifted.model;
     notices.push(downshifted.notice);
@@ -251,8 +253,10 @@ async function difficultyRoute(
 /**
  * Swap a heavy Cloudflare model when today's neuron use crosses the soft cap.
  *
- * Dormant unless the user has supplied an analytics token — reading usage is
- * the only part of this that needs a credential. Non-Cloudflare providers are
+ * Only runs with budget mode switched on (prefs.budget_mode), and even then
+ * stays dormant without an analytics token — reading usage is the only part of
+ * this that needs a credential. The token alone no longer turns it on: it also
+ * powers the measured neuron count, which is wanted without the downshift. Non-Cloudflare providers are
  * never downshifted: their spend is the user's own arrangement with that
  * provider and not something this cap knows anything about.
  */

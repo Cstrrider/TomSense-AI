@@ -199,6 +199,8 @@ data class UserPrefs(
     @SerialName("auto_route") val autoRoute: Boolean = true,
     /** Whether an analytics key is SET. The key itself is never returned. */
     val hasAnalyticsKey: Boolean = false,
+    /** Downshift heavy CF models near the neuron cap. Needs the key to act. */
+    @SerialName("budget_mode") val budgetMode: Boolean = false,
     /** aura-2 speaker, or empty for the device's own speech engine. */
     @SerialName("tts_voice") val ttsVoice: String = "",
 )
@@ -233,6 +235,7 @@ data class UsageToday(
 data class PrefsPatch(
     @SerialName("tool_models") val toolModels: Map<String, String>? = null,
     @SerialName("auto_route") val autoRoute: Boolean? = null,
+    @SerialName("budget_mode") val budgetMode: Boolean? = null,
     val cfAnalyticsKey: String? = null,
     val cfAccountId: String? = null,
     @SerialName("tts_voice") val ttsVoice: String? = null,

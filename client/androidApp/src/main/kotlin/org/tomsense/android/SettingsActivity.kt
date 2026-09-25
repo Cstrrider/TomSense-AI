@@ -273,7 +273,42 @@ class SettingsActivity : ComponentActivity() {
                             }
 
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                            BudgetModeCard(
+                            // Separate from the token below: the token also
+                            // gives the Today card a MEASURED neuron count,
+                            // and wanting that is not wanting models swapped.
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("Budget mode", style = MaterialTheme.typography.bodyLarge)
+                                    Hint(
+                                        if (prefs.hasAnalyticsKey) {
+                                            "Past 80% of the free daily neurons, heavy Cloudflare " +
+                                                "models switch to your Chat fallback. Nothing is blocked."
+                                        } else {
+                                            "Needs the usage token below — without it today's " +
+                                                "usage can't be read."
+                                        },
+                                    )
+                                }
+                                Switch(
+                                    checked = prefs.budgetMode && prefs.hasAnalyticsKey,
+                                    enabled = prefs.hasAnalyticsKey,
+                                    onCheckedChange = { on ->
+                                        lifecycleScope.launch {
+                                            runCatching {
+                                                prefs = app.providers.setPrefs(
+                                                    UpdatePrefs(budgetMode = on),
+                                                )
+                                            }.onFailure { error = it.message }
+                                        }
+                                    },
+                                )
+                            }
+
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                            UsageTokenCard(
                                 configured = prefs.hasAnalyticsKey,
                                 onSave = { key, account ->
                                     lifecycleScope.launch {
@@ -947,7 +982,11 @@ private fun shortModelName(spec: String): String =
     spec.substringAfter("::").substringAfterLast('/')
 
 /**
- * Budget mode setup.
+ * The Cloudflare analytics token.
+ *
+ * It reads today's neuron usage, which the Today card shows as a measured
+ * figure and budget mode (its own switch) acts on. Setting it no longer turns
+ * budget mode on by itself.
  *
  * The token is write-only: the card reports whether one is stored and never
  * shows it, because the server does not return it. Running inference needs no
@@ -955,7 +994,7 @@ private fun shortModelName(spec: String): String =
  * than something the app requires up front.
  */
 @Composable
-private fun BudgetModeCard(configured: Boolean, onSave: (String, String) -> Unit) {
+private fun UsageTokenCard(configured: Boolean, onSave: (String, String) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
     var key by remember { mutableStateOf("") }
     var account by remember { mutableStateOf("") }
@@ -963,12 +1002,12 @@ private fun BudgetModeCard(configured: Boolean, onSave: (String, String) -> Unit
     Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text("Budget mode", style = MaterialTheme.typography.bodyLarge)
+                Text("Cloudflare usage token", style = MaterialTheme.typography.bodyLarge)
                 Text(
                     if (configured) {
-                        "On — heavy Cloudflare models downshift past 80% of the daily free neurons."
+                        "Set — today's neuron count is measured, not estimated."
                     } else {
-                        "Off. Needs a Cloudflare API token with Account Analytics: Read."
+                        "Not set. A token with Account Analytics: Read shows your real neuron count."
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1048,7 +1087,7 @@ private fun UsageCard(u: UsageToday) {
                 if (u.neuronsMeasured) {
                     "Measured from Cloudflare analytics."
                 } else {
-                    "Estimated from token cost — add an analytics token under Budget mode for the real figure."
+                    "Estimated from token cost — add a Cloudflare usage token under Routing for the real figure."
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
