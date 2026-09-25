@@ -867,7 +867,14 @@ class FeedPanelState(
         // that returns the same order and only costs an impression. lastLoad
         // is zero after a cold start, so a disk-painted feed still refreshes.
         val now = System.currentTimeMillis()
-        if (!force && news.isNotEmpty() && now - lastLoad < 5 * 60_000) return
+        if (!force && news.isNotEmpty() && now - lastLoad < 5 * 60_000) {
+            // The feed is fresh, but its thumbnails may not be: closing the
+            // panel cancels this whole load, so a quick glance left the rest
+            // of the images unfetched — and returning here used to skip them
+            // until the next full refresh. Only the missing ones are fetched.
+            if (config.isComplete) loadThumbs(application, client, config, news)
+            return
+        }
         lastLoad = now
 
         loading = true
@@ -909,6 +916,14 @@ class FeedPanelState(
         loadThumbs(application, client, config, result.items)
     }
 
+    /**
+     * Merge on the main thread. Two loaders can run at once (disk paint and
+     * live fetch), and a read-modify-write of `thumbs` from two IO threads
+     * drops whichever batch lands second.
+     */
+    private suspend fun addThumbs(batch: List<Pair<String, ImageBitmap>>) =
+        withContext(Dispatchers.Main.immediate) { thumbs = thumbs + batch }
+
     private suspend fun loadThumbs(
         application: TomsenseApp,
         client: NewsClient,
@@ -926,7 +941,7 @@ class FeedPanelState(
                 ?.let { decodeImageBytes(it) }
                 ?.let { item.id to it }
         }
-        if (onDisk.isNotEmpty()) thumbs = thumbs + onDisk
+        if (onDisk.isNotEmpty()) addThumbs(onDisk)
         if (diskOnly) return@withContext
         val missing = wanted.filter { item -> onDisk.none { it.first == item.id } }
 
@@ -950,7 +965,7 @@ class FeedPanelState(
             }.awaitAll()
 
             val landed = fetched.mapNotNull { (id, bmp) -> bmp?.let { id to it } }
-            if (landed.isNotEmpty()) thumbs = thumbs + landed
+            if (landed.isNotEmpty()) addThumbs(landed)
         }
     }
 
