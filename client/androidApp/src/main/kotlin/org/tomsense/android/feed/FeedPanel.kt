@@ -58,6 +58,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.tomsense.android.Launch
@@ -773,7 +775,7 @@ class FeedPanelState(
      * refresh should set it — an automatic reload inside the window would just
      * spend an impression to receive the same snapshot back.
      */
-    suspend fun load(application: TomsenseApp, force: Boolean = false) {
+    suspend fun load(application: TomsenseApp, force: Boolean = false) = coroutineScope {
         app = application
 
         // Local first, always: recent chats and the glance line come from
@@ -784,57 +786,98 @@ class FeedPanelState(
                 .take(3)
                 .map { it.id to it.title }
         }
-        calendar = withContext(Dispatchers.Default) { readCalendar(application) }
 
-        // Device state costs nothing and weather is one keyless request, so
-        // both run before the feed; each degrades to a missing line rather
-        // than failing the card.
-        val weather = withContext(Dispatchers.Default) { readWeather(application) }
-        insights = insights.copy(
-            device = withContext(Dispatchers.Default) { readDevice(application) },
-            weather = weather?.now,
-            outlook = weather?.outlook,
-            air = weather?.air,
-            alarm = readAlarm(application),
-        )
-        // Measured neurons only. The edge reads analytics with the user's own
-        // token and caches it for two minutes, so opening the panel often is
-        // cheap. No token, signed out, or a failed read → no line at all.
-        insights = insights.copy(
-            neurons = runCatching { application.providers.usage() }.getOrNull()
-                ?.takeIf { it.neuronsMeasured }
-                ?.let { u ->
-                    val pct = if (u.neuronLimit > 0) u.neurons * 100 / u.neuronLimit else 0
-                    "%,d neurons today · %d%% of the free %,d".format(u.neurons, pct, u.neuronLimit)
-                },
-        )
+        val config = NewsClient.config(application)
+        val client = NewsClient(application.httpClient)
 
-        // Games depend on the user's news interests, so they wait for the
-        // news config; a user without a feed simply gets no game lines.
-        NewsClient.config(application).takeIf { it.isComplete }?.let { cfg ->
-            val games = withContext(Dispatchers.Default) {
-                val interests = runCatching { NewsClient(application.httpClient).interests(cfg) }.getOrDefault(emptyList())
-                readGames(application, interests)
+        // The last feed from disk, so a cold process paints stories at once
+        // instead of a blank card until the network answers.
+        if (news.isEmpty()) {
+            withContext(Dispatchers.IO) { FeedCache.loadFeed(application) }?.let { cached ->
+                news = cached.items
+                insights = insights.copy(feed = feedStats(cached.items))
+                if (config.isComplete) launch { loadThumbs(application, client, config, cached.items, diskOnly = true) }
             }
-            insights = insights.copy(games = games)
         }
 
+        // The feed goes FIRST and runs alongside everything below. It used to
+        // wait behind calendar → weather → usage → interests → games, five
+        // network round trips in a row before the news request even started.
+        launch { loadFeed(application, client, config, force) }
+
+        // Each of these degrades to a missing line rather than failing the
+        // card, and none depends on another, so they run concurrently. All
+        // writes to `insights` happen back on the calling (main) thread, so
+        // the copy-then-assign pattern cannot lose an update.
+        val glance = listOf(
+            launch { calendar = withContext(Dispatchers.Default) { readCalendar(application) } },
+            launch {
+                val weather = withContext(Dispatchers.Default) { readWeather(application) }
+                insights = insights.copy(
+                    weather = weather?.now,
+                    outlook = weather?.outlook,
+                    air = weather?.air,
+                )
+            },
+            launch {
+                insights = insights.copy(
+                    device = withContext(Dispatchers.Default) { readDevice(application) },
+                    alarm = readAlarm(application),
+                )
+            },
+            // Measured neurons only. The edge reads analytics with the user's
+            // own token and caches it for two minutes, so opening the panel
+            // often is cheap. No token, signed out, or a failed read → no line.
+            launch {
+                insights = insights.copy(
+                    neurons = runCatching { application.providers.usage() }.getOrNull()
+                        ?.takeIf { it.neuronsMeasured }
+                        ?.let { u ->
+                            val pct = if (u.neuronLimit > 0) u.neurons * 100 / u.neuronLimit else 0
+                            "%,d neurons today · %d%% of the free %,d".format(u.neurons, pct, u.neuronLimit)
+                        },
+                )
+            },
+            // Games depend on the user's news interests; a user without a
+            // feed simply gets no game lines.
+            launch {
+                if (!config.isComplete) return@launch
+                val games = withContext(Dispatchers.Default) {
+                    val interests = runCatching { client.interests(config) }.getOrDefault(emptyList())
+                    readGames(application, interests)
+                }
+                insights = insights.copy(games = games)
+            },
+        )
+
+        // Last, and rate-limited: it is the only part of the panel that costs
+        // a model call, and it is the least important thing on screen. It
+        // needs the glance facts, not the feed, so it does not wait on news.
+        glance.joinAll()
+        writeSummary(application)
+    }
+
+    private suspend fun loadFeed(
+        application: TomsenseApp,
+        client: NewsClient,
+        config: NewsClient.Config,
+        force: Boolean,
+    ) {
         // The worker's own snapshot lasts ten minutes; refetching faster than
-        // that returns the same order and only costs an impression.
+        // that returns the same order and only costs an impression. lastLoad
+        // is zero after a cold start, so a disk-painted feed still refreshes.
         val now = System.currentTimeMillis()
         if (!force && news.isNotEmpty() && now - lastLoad < 5 * 60_000) return
         lastLoad = now
 
         loading = true
         error = null
-        val config = NewsClient.config(application)
         if (!config.isComplete) {
             loading = false
             error = "No news source configured."
             return
         }
 
-        val client = NewsClient(application.httpClient)
         // Never .getOrNull() here. A swallowed exception is the difference
         // between "the key was rotated" and "there is no network", and both
         // render as the same grey line of text.
@@ -856,14 +899,14 @@ class FeedPanelState(
         }
         news = result.items
         insights = insights.copy(feed = feedStats(result.items))
+        withContext(Dispatchers.IO) {
+            FeedCache.saveFeed(application, result)
+            FeedCache.pruneThumbs(application)
+        }
 
         // Images after the text is already on screen: a card with a title is
         // useful, a card waiting for a thumbnail is not.
         loadThumbs(application, client, config, result.items)
-
-        // Last, and rate-limited: it is the only part of the panel that costs
-        // a model call, and it is the least important thing on screen.
-        writeSummary(application)
     }
 
     private suspend fun loadThumbs(
@@ -871,28 +914,38 @@ class FeedPanelState(
         client: NewsClient,
         config: NewsClient.Config,
         items: List<NewsClient.Item>,
+        /** Painting a cached feed: the live fetch will do the network part. */
+        diskOnly: Boolean = false,
     ) = withContext(Dispatchers.IO) {
-        // Every story with an image, not the first twelve. The cap was there
-        // to limit edge transformations, but the worker's /img proxy caches
-        // each transform, so the twelfth-onwards were simply missing forever —
-        // which on a thirty-story feed is most of it.
+        // Every story with an image, not the first twelve.
         val wanted = items.filter { it.imageUrl != null && !thumbs.containsKey(it.id) }
 
-        // Six at a time, and PUBLISHED as they land. This used to be a plain
-        // sequential loop that assigned `thumbs` once at the very end, so
-        // nothing appeared until all of them had finished one after another —
-        // a handful of seconds of blank cards, then everything at once. Six
-        // because the images come from one origin and hammering it is how the
-        // og:image backfill got itself throttled.
-        for (batch in wanted.chunked(6)) {
+        // Disk first: a thumbnail seen on any earlier open costs no request.
+        val onDisk = wanted.mapNotNull { item ->
+            FeedCache.loadThumb(application, item.imageUrl!!, THUMB_WIDTH)
+                ?.let { decodeImageBytes(it) }
+                ?.let { item.id to it }
+        }
+        if (onDisk.isNotEmpty()) thumbs = thumbs + onDisk
+        if (diskOnly) return@withContext
+        val missing = wanted.filter { item -> onDisk.none { it.first == item.id } }
+
+        // Six at a time, and PUBLISHED as they land. Six because the images
+        // come from one origin and hammering it is how the og:image backfill
+        // got itself throttled.
+        for (batch in missing.chunked(6)) {
             val fetched = batch.map { item ->
                 async {
                     val bytes = runCatching {
-                        application.httpClient.get(client.thumbUrl(config, item.imageUrl!!, 480)) {
+                        application.httpClient.get(client.thumbUrl(config, item.imageUrl!!, THUMB_WIDTH)) {
                             header("Authorization", "Bearer ${config.apiKey}")
                         }.body<ByteArray>()
                     }.getOrNull()
-                    item.id to bytes?.let { decodeImageBytes(it) }
+                    val bmp = bytes?.let { decodeImageBytes(it) }
+                    // Only bytes that decoded: an error body saved here would
+                    // be a broken thumbnail forever.
+                    if (bmp != null) FeedCache.saveThumb(application, item.imageUrl!!, THUMB_WIDTH, bytes)
+                    item.id to bmp
                 }
             }.awaitAll()
 
@@ -1252,5 +1305,8 @@ class FeedPanelState(
          * never appears in the user's chat list.
          */
         const val SUMMARY_CONV = "feed-glance"
+
+        /** One size for fetch and disk cache alike, so the cache key matches. */
+        const val THUMB_WIDTH = 480
     }
 }
