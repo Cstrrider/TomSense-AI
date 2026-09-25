@@ -71,6 +71,9 @@ class FeedOverlayService : Service() {
     private var callback: ILauncherOverlayCallback? = null
     private var window: Window? = null
     private var windowView: View? = null
+    /** The panel content inside the drag layer — what actually slides. */
+    private var slider: View? = null
+    private var settle: android.animation.ValueAnimator? = null
     private var windowManager: WindowManager? = null
     private var layoutParams: WindowManager.LayoutParams? = null
     private var host: SessionHost? = null
@@ -107,31 +110,22 @@ class FeedOverlayService : Service() {
 
         override fun windowDetached(isChangingConfigurations: Boolean) = onMain { detachWindow() }
 
-        override fun startScroll() = onMain { setVisible(true) }
+        override fun startScroll() = onMain {
+            settle?.cancel()
+            setVisible(true)
+        }
 
         override fun onScroll(p: Float) = onMain {
-            progress = p.coerceIn(0f, 1f)
-            state.progress = progress
-            setWindowAlpha(progress)
+            settle?.cancel()
+            applyProgress(p)
             runCatching { callback?.overlayScrollChanged(progress) }
         }
 
         override fun endScroll() = onMain {
-            if (progress <= 0.01f) {
-                setVisible(false)
-            } else {
-                // Settled OPEN, and the alpha has to be forced back to 1 here.
-                // onScroll drives it down to track the finger, and the
-                // launcher does not reliably send a final onScroll(1f) — while
-                // setVisible(true) is a no-op because the panel already became
-                // visible on startScroll. Without this the window is stranded
-                // at whatever progress arrived last and the home screen shows
-                // straight through the panel.
-                progress = 1f
-                state.progress = 1f
-                setVisible(true)
-                setWindowAlpha(1f)
-            }
+            // Settle explicitly either way. The launcher does not reliably
+            // send a final onScroll(1f), so a panel left to the last progress
+            // it heard would sit half-slid (formerly: half-faded) forever.
+            if (progress <= 0.01f) closePanel() else openFully()
         }
 
         override fun openOverlay(flags: Int) = onMain {
@@ -206,7 +200,7 @@ class FeedOverlayService : Service() {
             val sessionHost = SessionHost().also { host = it }
             sessionHost.create()
 
-            val content = ComposeView(this).apply {
+            val content = ComposeView(this).also { slider = it }.apply {
                 // opaque = false: the panel paints its own surface and the
                 // service animates the WINDOW alpha, so a second full-screen
                 // Surface here would fight both.
@@ -220,9 +214,8 @@ class FeedOverlayService : Service() {
             val root = DismissFrameLayout(this).apply {
                 addView(content)
                 onDragTo = { p ->
-                    progress = p
-                    state.progress = p
-                    setWindowAlpha(p)
+                    settle?.cancel()
+                    applyProgress(p)
                     runCatching { callback?.overlayScrollChanged(p) }
                 }
                 onDragSettled = { p, velocityX ->
@@ -262,7 +255,16 @@ class FeedOverlayService : Service() {
             lp.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_STATE_UNSPECIFIED
 
             win.attributes = lp
+            // Transparent, or the slide shows nothing: the theme's solid
+            // window background would cover the home screen the moment the
+            // window turns visible, and the panel would appear to pop in
+            // behind a wall. The alpha fade used to hide this. FeedPanel paints
+            // its own opaque Surface, so the open panel looks the same.
+            win.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT))
             win.setContentView(root)
+            // Parked off the left edge until the first scroll, so the window
+            // turning visible on startScroll cannot flash a full panel.
+            content.translationX = -panelWidth()
 
             // setAttributes COPIES into the window's own params, so hold on to
             // the object that actually gets added — that is the one every
@@ -314,10 +316,64 @@ class FeedOverlayService : Service() {
         Log.d(TAG, "panel ${if (show) "open" else "closed"} (pushed=$pushed)")
     }
 
-    private fun setWindowAlpha(alpha: Float) {
-        val target = alpha.coerceIn(0f, 1f)
-        if (layoutParams?.alpha == target) return
-        updateParams { it.alpha = target }
+    /**
+     * Place the panel for a progress of 0 (closed) … 1 (open).
+     *
+     * A SLIDE: the content moves in from the left edge, tracking the finger,
+     * with the home screen visible beside it. It used to be a fade of the
+     * window alpha. Translation is a RenderThread property, so this costs no
+     * window relayout per frame the way moving the window itself would.
+     *
+     * The window alpha stays 1 while visible (setVisible owns it). The
+     * content is moved, not the DismissFrameLayout around it: that layer
+     * reads touch positions in its own coordinates, and translating it would
+     * shift the finger's position under itself as it dragged.
+     */
+    private fun applyProgress(p: Float) {
+        progress = p.coerceIn(0f, 1f)
+        state.progress = progress
+        slider?.translationX = -(1f - progress) * panelWidth()
+    }
+
+    /** Width before first layout too — a 0 width would park the panel ON screen. */
+    private fun panelWidth(): Float =
+        (windowView?.width?.takeIf { it > 0 } ?: resources.displayMetrics.widthPixels).toFloat()
+
+    /**
+     * Animate to fully open or fully closed from wherever the finger left it.
+     *
+     * Jumping straight to the end state was invisible under a fade and looks
+     * broken under a slide. Duration scales with the distance left, so a
+     * nearly-complete swipe finishes quickly instead of taking the full time.
+     * Echoes every frame to the launcher so its workspace moves in step.
+     */
+    private fun settleTo(target: Float, onEnd: () -> Unit = {}) {
+        settle?.cancel()
+        val from = progress
+        if (from == target) {
+            onEnd()
+            return
+        }
+        settle = android.animation.ValueAnimator.ofFloat(from, target).apply {
+            duration = (SETTLE_MS * kotlin.math.abs(target - from)).toLong().coerceAtLeast(90L)
+            interpolator = android.view.animation.DecelerateInterpolator(1.6f)
+            addUpdateListener {
+                applyProgress(it.animatedValue as Float)
+                runCatching { callback?.overlayScrollChanged(progress) }
+            }
+            addListener(object : android.animation.AnimatorListenerAdapter() {
+                private var cancelled = false
+                override fun onAnimationCancel(animation: android.animation.Animator) {
+                    cancelled = true
+                }
+                // Only a COMPLETED settle finishes the job: a cancelled one
+                // was interrupted by a new drag, which now owns the panel.
+                override fun onAnimationEnd(animation: android.animation.Animator) {
+                    if (!cancelled) onEnd()
+                }
+            })
+            start()
+        }
     }
 
     /**
@@ -345,24 +401,21 @@ class FeedOverlayService : Service() {
     }
 
     private fun openFully() {
-        progress = 1f
-        state.progress = 1f
         setVisible(true)
-        // Explicit because setVisible only acts on a CHANGE: a panel that is
-        // already visible would keep whatever partial alpha the drag left.
-        setWindowAlpha(1f)
-        runCatching { callback?.overlayScrollChanged(1f) }
+        settleTo(1f)
     }
 
+    /** Slides out, THEN hides — hiding first would cut the animation off. */
     private fun closePanel() {
-        progress = 0f
-        state.progress = 0f
-        setVisible(false)
-        setWindowAlpha(0f)
-        runCatching { callback?.overlayScrollChanged(0f) }
+        settleTo(0f) { setVisible(false) }
     }
 
     private fun detachWindow() {
+        // Before the views go: a settle still running would keep writing
+        // translation into a detached view and echoing to a dead callback.
+        settle?.cancel()
+        settle = null
+        slider = null
         windowView?.let { view ->
             runCatching { windowManager?.removeViewImmediate(view) }
                 .onFailure { Log.w(TAG, "removing the panel window failed", it) }
@@ -418,6 +471,9 @@ class FeedOverlayService : Service() {
          * sixth of the width, and a flick closes at any distance.
          */
         const val SETTLE_CLOSED = 0.85f
+
+        /** Full-width slide duration; shorter settles take a share of it. */
+        const val SETTLE_MS = 260f
 
         /**
          * Leftward px/s that dismisses regardless of how far the finger got.
