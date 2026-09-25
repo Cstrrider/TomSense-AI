@@ -263,6 +263,12 @@ async function chat(req: Request, env: Env, who: Principal): Promise<Response> {
     tools?: unknown[];
     /** Route to the reasoning model and raise the effort — see routing.ts. */
     think?: boolean;
+    /**
+     * Skip the edge context (persona, profile, memories, documents). For
+     * utility calls like the feed's glance line: memories are matched to the
+     * prompt, and unrelated ones got woven in as if they were today's plans.
+     */
+    bare?: boolean;
   };
 
   // A missing conversationId used to surface as an opaque D1_TYPE_ERROR from
@@ -281,7 +287,9 @@ async function chat(req: Request, env: Env, who: Principal): Promise<Response> {
   // system message, so both sit ahead of the conversation.
   const lastUser = [...body.messages].reverse().find((m) => m.role === "user");
   const lastUserText = typeof lastUser?.content === "string" ? lastUser.content : "";
-  const context = await buildContext(env, who.userId, body.conversationId, lastUserText).catch(() => "");
+  const context = body.bare
+    ? ""
+    : await buildContext(env, who.userId, body.conversationId, lastUserText).catch(() => "");
   const firstNonSystem = expanded.findIndex((m) => m.role !== "system");
   const messages = context
     ? [

@@ -917,29 +917,40 @@ class FeedPanelState(
         val now = System.currentTimeMillis()
         if (now - lastSummary < SUMMARY_INTERVAL_MS) return
 
+        // Only facts about the day itself. Battery/network and headlines used
+        // to be in here too, and the model turned them into guesses about what
+        // the person would be doing ("indoors on wifi researching ...").
         val facts = buildList {
             calendar.take(3).forEach { add("Calendar: ${it.title} at ${it.start}") }
-            insights.device?.let { add("Device: $it") }
-            insights.weather?.let { add("Weather: $it") }
-            insights.outlook?.let { add("Forecast: $it") }
+            insights.weather?.let { add("Weather now: $it") }
+            insights.outlook?.let { add("Today: $it") }
             insights.air?.let { add("Air: $it") }
             insights.alarm?.let { add("Next alarm: $it") }
             insights.games.forEach { add("${it.team}: ${it.text}") }
-            insights.feed?.let { add("News: $it") }
-            news.take(3).forEach { add("Headline: ${it.title}") }
         }
         if (facts.isEmpty()) return
         lastSummary = now
 
-        val prompt = "Write ONE short sentence summarising this person's next few " +
-            "hours. No greeting, no preamble, no list. Facts:\n" + facts.joinToString("\n")
+        val clock = java.text.SimpleDateFormat("EEEE h:mm a", java.util.Locale.getDefault())
+            .format(java.util.Date(now))
+        val rules = "You write a one-line glance for a phone home screen. It is $clock. " +
+            "Restate the most useful of the given facts in ONE short sentence, addressed " +
+            "to the reader as \"you\" or with no subject at all. Use ONLY the facts given. " +
+            "Never guess what the reader is doing or will do, never mention the phone, " +
+            "battery or network, and never use he/she/they. No greeting, no preamble, no list."
 
         runCatching {
             val text = StringBuilder()
             application.chat.stream(
                 ChatRequest(
                     conversationId = SUMMARY_CONV,
-                    messages = listOf(WireMessage("user", prompt)),
+                    messages = listOf(
+                        WireMessage("system", rules),
+                        WireMessage("user", "Facts:\n" + facts.joinToString("\n")),
+                    ),
+                    // No persona/profile/memories: memories are matched to the
+                    // prompt, and unrelated ones got woven in as today's plans.
+                    bare = true,
                 ),
             ).collect { event ->
                 event.text?.let { text.append(it) }

@@ -131,6 +131,8 @@ data class ChatRequest(
     val tools: List<JsonElement>? = null,
     /** Route to the reasoning model and raise its effort. */
     val think: Boolean? = null,
+    /** Skip the edge's persona/profile/memory context — utility calls only. */
+    val bare: Boolean? = null,
 )
 
 @Serializable
