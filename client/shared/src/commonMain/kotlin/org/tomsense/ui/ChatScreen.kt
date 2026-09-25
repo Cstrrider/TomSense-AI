@@ -64,6 +64,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.layout.ContentScale
@@ -745,16 +747,11 @@ private fun MessageBubble(
                     horizontalArrangement = Arrangement.End,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    // When it was said. Leftmost on replies (ahead of the
-                    // model/usage line), beside the icons on your own.
-                    Text(
-                        remember(message.created_at) { org.tomsense.data.messageTime(message.created_at) },
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(end = 8.dp),
-                    )
-                    if (!isUser) {
-                        UsageFooter(message.model, message.usage)
+                    val time = remember(message.created_at) { org.tomsense.data.messageTime(message.created_at) }
+                    if (isUser) {
+                        FooterText(time, Modifier.padding(end = 4.dp))
+                    } else {
+                        UsageFooter(time, message.model, message.usage)
                         Spacer(Modifier.weight(1f))
                     }
                     if (isUser && onRewind != null) {
@@ -902,10 +899,9 @@ private fun AttachmentImage(key: String, load: (suspend (String) -> ByteArray?)?
  * number. Shown with a tilde so it never reads as measured.
  */
 @Composable
-private fun UsageFooter(model: String?, usageJson: String?) {
-    if (model.isNullOrBlank() && usageJson.isNullOrBlank()) return
-
+private fun RowScope.UsageFooter(time: String, model: String?, usageJson: String?) {
     val parts = buildList {
+        add(time)
         model?.takeIf { it.isNotBlank() }?.let { add(shortModel(it)) }
         usageJson?.let { raw ->
             val u = runCatching { Json.parseToJsonElement(raw).jsonObject }.getOrNull()
@@ -925,13 +921,19 @@ private fun UsageFooter(model: String?, usageJson: String?) {
             }
         }
     }
-    if (parts.isEmpty()) return
+    // weight(fill = false): it takes only the room it needs, but when the
+    // line is long it wraps instead of shoving the copy button off the card.
+    FooterText(parts.joinToString(" · "), Modifier.weight(1f, fill = false))
+}
 
+/** The footer's type: a notch under labelSmall so time + model + usage fit one line. */
+@Composable
+private fun FooterText(text: String, modifier: Modifier = Modifier) {
     Text(
-        parts.joinToString(" · "),
-        style = MaterialTheme.typography.labelSmall,
+        text,
+        style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, lineHeight = 13.sp),
         color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(top = 6.dp),
+        modifier = modifier,
     )
 }
 
