@@ -43,9 +43,16 @@ data class Insights(
     /** Games for teams named in the user's news interests — see Sports.kt. */
     val games: List<Game> = emptyList(),
     val feed: String? = null,
+    /**
+     * Today's Cloudflare neurons — ONLY when measured (an analytics token is
+     * set and the read worked). The cost-derived estimate is left out: a
+     * glance card has no room for the caveat, and an unlabelled estimate
+     * would be read as the real figure.
+     */
+    val neurons: String? = null,
     val summary: String = "",
 ) {
-    val lines: List<String> get() = listOfNotNull(device, weather, outlook, air, alarm, feed) + games.map { it.text }
+    val lines: List<String> get() = listOfNotNull(device, weather, outlook, air, alarm, feed, neurons) + games.map { it.text }
     val isEmpty: Boolean get() = lines.isEmpty() && summary.isBlank()
 }
 

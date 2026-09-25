@@ -81,6 +81,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Air
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Alarm
 import androidx.compose.material.icons.filled.SportsScore
 import androidx.compose.material.icons.filled.WbTwilight
@@ -484,6 +485,7 @@ private fun InsightsCard(state: FeedPanelState) {
             i.device?.let { InsightRow(Icons.Filled.BatteryFull, it) { state.openBattery() } }
             // Feed balance has no app to open — it describes the list below.
             i.feed?.let { InsightRow(Icons.Filled.Newspaper, it, onClick = null) }
+            i.neurons?.let { InsightRow(Icons.Filled.Bolt, it) { state.openUsage() } }
         }
     }
 }
@@ -795,6 +797,18 @@ class FeedPanelState(
             air = weather?.air,
             alarm = readAlarm(application),
         )
+        // Measured neurons only. The edge reads analytics with the user's own
+        // token and caches it for two minutes, so opening the panel often is
+        // cheap. No token, signed out, or a failed read → no line at all.
+        insights = insights.copy(
+            neurons = runCatching { application.providers.usage() }.getOrNull()
+                ?.takeIf { it.neuronsMeasured }
+                ?.let { u ->
+                    val pct = if (u.neuronLimit > 0) u.neurons * 100 / u.neuronLimit else 0
+                    "%,d neurons today · %d%% of the free %,d".format(u.neurons, pct, u.neuronLimit)
+                },
+        )
+
         // Games depend on the user's news interests, so they wait for the
         // news config; a user without a feed simply gets no game lines.
         NewsClient.config(application).takeIf { it.isComplete }?.let { cfg ->
@@ -1121,6 +1135,16 @@ class FeedPanelState(
                 java.time.LocalDate.parse(iso.take(10)).atStartOfDay(java.time.ZoneId.systemDefault())
                     .toInstant().toEpochMilli()
             }.getOrNull()
+
+    /** Settings → AI & models, where the full usage card lives. */
+    fun openUsage() {
+        app?.let {
+            onOpenApp(
+                Intent(it, org.tomsense.android.SettingsActivity::class.java)
+                    .putExtra(org.tomsense.android.EXTRA_PAGE, "models"),
+            )
+        }
+    }
 
     fun openSettings() {
         app?.let {
