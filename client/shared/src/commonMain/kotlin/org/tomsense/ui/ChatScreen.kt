@@ -749,7 +749,6 @@ private fun MessageBubble(
                 ) {
                     if (!isUser) {
                         UsageFooter(message.model, message.usage)
-                        Spacer(Modifier.weight(1f))
                     }
                     if (isUser && onRewind != null) {
                         IconButton(onClick = { confirmRewind = true }, modifier = Modifier.size(32.dp)) {
@@ -914,7 +913,7 @@ private fun RowScope.UsageFooter(model: String?, usageJson: String?) {
             if (tin > 0 || tout > 0) {
                 // Cached input is called out because it is billed at a lower
                 // rate — on a long conversation it is most of the input.
-                add(if (cached > 0) "${tin} in (${cached} cached) · ${tout} out" else "${tin} in · ${tout} out")
+                add(if (cached > 0) "${compact(tin)} in (${compact(cached)} cached) · ${compact(tout)} out" else "${compact(tin)} in · ${compact(tout)} out")
             }
             cost?.takeIf { it > 0 }?.let {
                 add(formatUsd(it))
@@ -924,18 +923,31 @@ private fun RowScope.UsageFooter(model: String?, usageJson: String?) {
     }
     if (parts.isEmpty()) return
 
-    // weight(fill = false): it takes only the room it needs, but when the
-    // line is long it wraps instead of shoving the copy button off the card.
-    FooterText(parts.joinToString(" · "), Modifier.weight(1f, fill = false))
+    // weight(1f): all the room left of the buttons (no spacer — two weighted
+    // children would split it and cut the text at half width). When the
+    // line is too long it is cut with an ellipsis rather than pushing the
+    // copy button off the card. Least important last (neurons), so that is
+    // what gets cut.
+    FooterText(parts.joinToString(" · "), Modifier.weight(1f))
 }
 
-/** The footer's type: a notch under labelSmall so time + model + usage fit one line. */
+/** 12,480 → "12.5k": keeps the usage line short enough for one line. */
+private fun compact(n: Int): String = when {
+    n < 1_000 -> n.toString()
+    n < 100_000 -> "${n / 1000}.${(n % 1000) / 100}k"
+    else -> "${n / 1000}k"
+}
+
+/** The footer's type: a notch under labelSmall, and always a single line. */
 @Composable
 private fun FooterText(text: String, modifier: Modifier = Modifier) {
     Text(
         text,
         style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, lineHeight = 13.sp),
         color = MaterialTheme.colorScheme.onSurfaceVariant,
+        maxLines = 1,
+        softWrap = false,
+        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
         modifier = modifier,
     )
 }
