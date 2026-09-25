@@ -92,6 +92,7 @@ export async function neuronsToday(
     if (!res.ok) return null;
 
     const data = (await res.json()) as {
+      errors?: unknown[] | null;
       data?: {
         viewer?: {
           accounts?: { aiInferenceAdaptiveGroups?: { sum?: { totalNeurons?: number } }[] }[];
@@ -99,7 +100,15 @@ export async function neuronsToday(
       };
     };
 
-    const groups = data.data?.viewer?.accounts?.[0]?.aiInferenceAdaptiveGroups ?? [];
+    // GraphQL reports failure INSIDE a 200: `errors` set, `data` null or
+    // partial. Summing that as an empty list produced a confident "0 neurons ·
+    // Measured" — cached for two minutes — right after a working token was
+    // saved. A failed read is "unknown" (null → the estimate), never a zero.
+    if (data.errors?.length) return null;
+    const account = data.data?.viewer?.accounts?.[0];
+    if (!account) return null;
+
+    const groups = account.aiInferenceAdaptiveGroups ?? [];
     const used = groups.reduce((acc, g) => acc + (g.sum?.totalNeurons ?? 0), 0);
 
     CACHE.set(userId, { at: Date.now(), used: Math.round(used) });
