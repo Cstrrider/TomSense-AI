@@ -44,6 +44,9 @@ object Launch {
      */
     const val EXTRA_CONVERSATION = "conversation_id"
 
+    /** Which home tab to show, by [HomeTab] name. */
+    const val EXTRA_TAB = "home_tab"
+
     fun openWith(
         context: Context,
         prefill: String? = null,
@@ -60,8 +63,10 @@ object Launch {
         imageUri: Uri? = null,
         screenContext: String? = null,
         conversationId: String? = null,
+        tab: HomeTab? = null,
     ): Intent = Intent(context, MainActivity::class.java).apply {
         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        tab?.let { putExtra(EXTRA_TAB, it.name) }
         prefill?.takeIf { it.isNotBlank() }?.let { putExtra(EXTRA_PREFILL, it) }
         conversationId?.takeIf { it.isNotBlank() }?.let { putExtra(EXTRA_CONVERSATION, it) }
         imageUri?.let {
@@ -99,6 +104,9 @@ object Launch {
             imageUri = intent.getParcelableExtra<Uri>(EXTRA_IMAGE) ?: sharedImage,
             screenContext = intent.getStringExtra(EXTRA_SCREEN_CONTEXT),
             conversationId = intent.getStringExtra(EXTRA_CONVERSATION),
+            tab = intent.getStringExtra(EXTRA_TAB)?.let { name ->
+                HomeTab.entries.firstOrNull { it.name == name }
+            },
         )
     }
 
@@ -108,9 +116,11 @@ object Launch {
         val screenContext: String? = null,
         /** Open THIS conversation rather than whichever was open last. */
         val conversationId: String? = null,
+        /** Switch to this home tab, e.g. the panel's title opens News. */
+        val tab: HomeTab? = null,
     ) {
         val isEmpty: Boolean
             get() = prefill.isNullOrBlank() && imageUri == null &&
-                screenContext.isNullOrBlank() && conversationId.isNullOrBlank()
+                screenContext.isNullOrBlank() && conversationId.isNullOrBlank() && tab == null
     }
 }

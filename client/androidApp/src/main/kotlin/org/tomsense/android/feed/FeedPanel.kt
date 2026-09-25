@@ -1085,9 +1085,9 @@ class FeedPanelState(
         app?.let { onOpenApp(Launch.intent(it, conversationId = id)) }
     }
 
-    /** The title: straight into the full app. */
+    /** The title: straight into the full app, on its News tab. */
     fun openMain() {
-        app?.let { onOpenApp(Launch.intent(it)) }
+        app?.let { onOpenApp(Launch.intent(it, tab = org.tomsense.android.HomeTab.News)) }
     }
 
     /**

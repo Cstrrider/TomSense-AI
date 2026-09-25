@@ -85,6 +85,12 @@ class MainActivity : ComponentActivity() {
      */
     private var convId by mutableStateOf<String?>(null)
 
+    /**
+     * A tab an intent asked for, consumed by the UI once applied. State rather
+     * than a direct write because the tab itself lives inside composition.
+     */
+    private var requestedTab by mutableStateOf<HomeTab?>(null)
+
     /** Drives the send/stop button. Compose observes it; no event bus needed. */
     private var generating by mutableStateOf(false)
 
@@ -258,6 +264,9 @@ class MainActivity : ComponentActivity() {
                     var results by remember { mutableStateOf<SearchResults?>(null) }
 
                     var tab by remember { mutableStateOf(HomeTab.Chat) }
+                    androidx.compose.runtime.LaunchedEffect(requestedTab) {
+                        requestedTab?.let { tab = it; requestedTab = null }
+                    }
 
                     // The SAME state class the home-screen panel uses, so the
                     // taste vector, the refetch cooldown and the feedback calls
@@ -468,6 +477,7 @@ class MainActivity : ComponentActivity() {
             prefs().edit().putString(LAST_CONV, id).apply()
         }
 
+        incoming.tab?.let { requestedTab = it }
         incoming.prefill?.let { prefill = it }
         incoming.screenContext?.let { screenContext = it }
         incoming.imageUri?.let { attach(it) }
