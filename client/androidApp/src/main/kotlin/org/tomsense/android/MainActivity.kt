@@ -212,7 +212,11 @@ class MainActivity : ComponentActivity() {
                     // with no way back to a real conversation.
                     val existing = app.db.schemaQueries.conversationList().executeAsList()
                     val remembered = prefs().getString(LAST_CONV, null)
-                    convId = existing.firstOrNull { it.id == remembered }?.id
+                    // An id handed in by an intent (overlay "open in app",
+                    // a notification) wins — this used to overwrite it with
+                    // the last-open chat on a cold start.
+                    convId = convId?.takeIf { id -> existing.any { it.id == id } }
+                        ?: existing.firstOrNull { it.id == remembered }?.id
                         ?: existing.firstOrNull()?.id
                         ?: app.repo.createConversation()
                     ready = true
@@ -477,7 +481,11 @@ class MainActivity : ComponentActivity() {
             prefs().edit().putString(LAST_CONV, id).apply()
         }
 
-        incoming.tab?.let { requestedTab = it }
+        // A conversation handed in means "show me that chat": without this
+        // the id was applied behind whatever tab was up (News), so "open in
+        // app" from the overlay seemed to land on the previous page.
+        (incoming.tab ?: incoming.conversationId?.takeIf { it.isNotBlank() }?.let { HomeTab.Chat })
+            ?.let { requestedTab = it }
         incoming.prefill?.let { prefill = it }
         incoming.screenContext?.let { screenContext = it }
         incoming.imageUri?.let { attach(it) }
