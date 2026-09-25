@@ -678,12 +678,12 @@ private fun MessageBubble(
             dismissButton = { TextButton(onClick = { confirmRewind = false }) { Text("Cancel") } },
         )
     }
-    Row(
+    Column(
         // Your messages sit to the right with a gutter on the left, like any
         // chat app — so whose turn it is reads from position, not by
         // comparing two shades of card.
         Modifier.fillMaxWidth().padding(start = if (isUser) 56.dp else 0.dp),
-        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
+        horizontalAlignment = if (isUser) Alignment.End else Alignment.Start,
     ) {
         Card(
             modifier = Modifier.widthIn(max = 520.dp),
@@ -747,11 +747,8 @@ private fun MessageBubble(
                     horizontalArrangement = Arrangement.End,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    val time = remember(message.created_at) { org.tomsense.data.messageTime(message.created_at) }
-                    if (isUser) {
-                        FooterText(time, Modifier.padding(end = 4.dp))
-                    } else {
-                        UsageFooter(time, message.model, message.usage)
+                    if (!isUser) {
+                        UsageFooter(message.model, message.usage)
                         Spacer(Modifier.weight(1f))
                     }
                     if (isUser && onRewind != null) {
@@ -784,6 +781,11 @@ private fun MessageBubble(
                 }
             }
         }
+        // Under the bubble rather than in it, on the speaker's side.
+        FooterText(
+            remember(message.created_at) { org.tomsense.data.messageTime(message.created_at) },
+            Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+        )
     }
 }
 
@@ -899,9 +901,8 @@ private fun AttachmentImage(key: String, load: (suspend (String) -> ByteArray?)?
  * number. Shown with a tilde so it never reads as measured.
  */
 @Composable
-private fun RowScope.UsageFooter(time: String, model: String?, usageJson: String?) {
+private fun RowScope.UsageFooter(model: String?, usageJson: String?) {
     val parts = buildList {
-        add(time)
         model?.takeIf { it.isNotBlank() }?.let { add(shortModel(it)) }
         usageJson?.let { raw ->
             val u = runCatching { Json.parseToJsonElement(raw).jsonObject }.getOrNull()
@@ -921,6 +922,8 @@ private fun RowScope.UsageFooter(time: String, model: String?, usageJson: String
             }
         }
     }
+    if (parts.isEmpty()) return
+
     // weight(fill = false): it takes only the room it needs, but when the
     // line is long it wraps instead of shoving the copy button off the card.
     FooterText(parts.joinToString(" · "), Modifier.weight(1f, fill = false))
