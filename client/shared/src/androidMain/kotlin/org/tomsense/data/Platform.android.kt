@@ -17,3 +17,22 @@ actual fun deviceClock(): String {
     )
     return "$formatted (${now.zone.id})"
 }
+
+actual fun messageTime(millis: Long): String {
+    val zone = java.time.ZoneId.systemDefault()
+    val at = java.time.Instant.ofEpochMilli(millis).atZone(zone)
+    val today = java.time.LocalDate.now(zone)
+    val date = at.toLocalDate()
+    // Locale-driven, never a fixed pattern: 12/24-hour and day/month order
+    // come from the device, not from whoever wrote this.
+    val time = at.format(
+        java.time.format.DateTimeFormatter.ofLocalizedTime(java.time.format.FormatStyle.SHORT),
+    )
+    return when {
+        date == today -> time
+        date == today.minusDays(1) -> "Yesterday $time"
+        date.isAfter(today.minusDays(7)) ->
+            "${at.format(java.time.format.DateTimeFormatter.ofPattern("EEE"))} $time"
+        else -> "${at.format(java.time.format.DateTimeFormatter.ofLocalizedDate(java.time.format.FormatStyle.MEDIUM))}, $time"
+    }
+}

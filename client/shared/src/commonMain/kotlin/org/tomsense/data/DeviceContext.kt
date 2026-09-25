@@ -9,6 +9,9 @@ package org.tomsense.data
  */
 expect fun deviceClock(): String
 
+/** A message's time for the chat footer: just the time today, more context the older it gets. */
+expect fun messageTime(millis: Long): String
+
 /**
  * The system turn prepended to every generation.
  *

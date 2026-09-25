@@ -745,6 +745,14 @@ private fun MessageBubble(
                     horizontalArrangement = Arrangement.End,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    // When it was said. Leftmost on replies (ahead of the
+                    // model/usage line), beside the icons on your own.
+                    Text(
+                        remember(message.created_at) { org.tomsense.data.messageTime(message.created_at) },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(end = 8.dp),
+                    )
                     if (!isUser) {
                         UsageFooter(message.model, message.usage)
                         Spacer(Modifier.weight(1f))
