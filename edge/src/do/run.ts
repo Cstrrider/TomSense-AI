@@ -114,7 +114,7 @@ interface RunRecord {
    */
   sourceImageKeys: string[];
   /** "high" when think mode routed this turn. */
-  reasoningEffort: "high" | null;
+  reasoningEffort: "low" | "medium" | "high" | null;
   error?: string;
 }
 
@@ -183,7 +183,7 @@ export class DetachedRun implements DurableObject {
       lastUserText?: string;
       sourceImageKeys?: string[];
       notices?: string[];
-      reasoningEffort?: "high" | null;
+      reasoningEffort?: "low" | "medium" | "high" | null;
     };
 
     this.record = {

@@ -63,7 +63,7 @@ export interface RoundOptions {
    * token budget on invisible reasoning, so the default is set rather than
    * omitted.
    */
-  reasoningEffort?: "low" | "high";
+  reasoningEffort?: "low" | "medium" | "high";
 }
 
 /**
@@ -188,7 +188,9 @@ async function buildRequest(
   if (tools?.length) body["tools"] = tools;
   if (modelId.includes("gpt-oss")) {
     body["reasoning_effort"] = opts.reasoningEffort ?? "low";
-  } else if (opts.reasoningEffort) {
+  } else if (opts.reasoningEffort && caps.reasoning) {
+    // Reasoning models only: the level is now set on every turn, and some
+    // OpenAI-compatible endpoints reject the field on models that don't think.
     body["reasoning_effort"] = opts.reasoningEffort;
   }
   if (temperature !== undefined) body["temperature"] = temperature;
@@ -388,7 +390,7 @@ async function* streamWorkersAi(opts: RoundOptions): AsyncGenerator<StreamEvent>
     // spends the whole budget reasoning invisibly.
     if (modelId.includes("gpt-oss")) {
       input["reasoning_effort"] = opts.reasoningEffort ?? "low";
-    } else if (opts.reasoningEffort) {
+    } else if (opts.reasoningEffort && caps.reasoning) {
       input["reasoning_effort"] = opts.reasoningEffort;
     }
 

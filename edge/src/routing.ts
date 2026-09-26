@@ -24,7 +24,7 @@
 import type { Env, Principal, ChatMessage } from "./types";
 import { CF_BUILTIN_ID } from "./providers";
 import { listModels, getDefaultModel, resolveChatModel } from "./providers_api";
-import { getPrefs, type ToolModels } from "./prefs";
+import { getPrefs, type ToolModels, type ReasoningEffort } from "./prefs";
 import { neuronsToday } from "./cf_analytics";
 import { runTaskModel } from "./task_model";
 
@@ -48,7 +48,7 @@ export interface RoutingDecision {
   /** Used on stall, and as the budget-downshift target. */
   fallbackModel: string | null;
   /** `high` when think mode is on; the provider layer decides what to do. */
-  reasoningEffort: "high" | null;
+  reasoningEffort: ReasoningEffort | null;
   /**
    * User-visible explanations of any override, rendered in the transcript.
    * Stable streams these as the first chunk so a surprising model choice is
@@ -115,7 +115,7 @@ export async function routeChat(
 
   let model: string | null = opts.requested?.trim() || null;
   const explicit = Boolean(model);
-  let reasoningEffort: "high" | null = null;
+  let reasoningEffort: ReasoningEffort | null = null;
 
   // ── 2. Think mode ──────────────────────────────────────────────────────
   // Only when the user did not pick a model for this turn: an explicit pick
@@ -190,6 +190,13 @@ export async function routeChat(
   if (downshifted) {
     model = downshifted.model;
     notices.push(downshifted.notice);
+  }
+
+  // ── 7. Everyday reasoning level ────────────────────────────────────────
+  // Think mode already asked for "high". Otherwise the user's setting; the
+  // stream layer only sends it to models that actually reason.
+  if (!opts.think && prefs.reasoning_effort !== "default") {
+    reasoningEffort = prefs.reasoning_effort;
   }
 
   return {

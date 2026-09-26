@@ -53,7 +53,20 @@ export interface UserPrefs {
    * by default; inert without a token, since usage cannot be read.
    */
   budget_mode: boolean;
+  /**
+   * How hard reasoning models think on an ordinary turn. "default" sends
+   * nothing and leaves it to the model — which for GLM meant 3-4× more
+   * reasoning than answer and 80-100 s replies. Think mode still asks for
+   * "high" regardless. Only sent to models that actually reason.
+   */
+  reasoning_effort: ReasoningLevel;
 }
+
+export type ReasoningEffort = "low" | "medium" | "high";
+export type ReasoningLevel = "default" | ReasoningEffort;
+const LEVELS: ReasoningLevel[] = ["default", "low", "medium", "high"];
+const asLevel = (v: unknown): ReasoningLevel | undefined =>
+  LEVELS.includes(v as ReasoningLevel) ? (v as ReasoningLevel) : undefined;
 
 // Empty tts_voice on purpose: speech defaults to the DEVICE engine, which
 // costs nothing and works offline. aura-2 is opt-in.
@@ -65,6 +78,7 @@ const DEFAULTS: UserPrefs = {
   starters: [],
   auto_memory: true,
   budget_mode: false,
+  reasoning_effort: "low",
 };
 
 /**
@@ -105,6 +119,7 @@ export async function getPrefs(env: Env, userId: string): Promise<UserPrefs> {
       : [],
     auto_memory: parsed.auto_memory ?? DEFAULTS.auto_memory,
     budget_mode: parsed.budget_mode ?? DEFAULTS.budget_mode,
+    reasoning_effort: asLevel(parsed.reasoning_effort) ?? DEFAULTS.reasoning_effort,
   };
 }
 
@@ -127,6 +142,7 @@ export async function setPrefs(
     starters?: string[];
     auto_memory?: boolean;
     budget_mode?: boolean;
+    reasoning_effort?: string;
   },
 ): Promise<UserPrefs> {
   const current = await getPrefs(env, who.userId);
@@ -149,6 +165,7 @@ export async function setPrefs(
       : current.starters,
     auto_memory: patch.auto_memory ?? current.auto_memory,
     budget_mode: patch.budget_mode ?? current.budget_mode,
+    reasoning_effort: asLevel(patch.reasoning_effort) ?? current.reasoning_effort,
   };
 
   await env.DB.prepare(`UPDATE users SET prefs = ? WHERE id = ?`)

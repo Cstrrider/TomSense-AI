@@ -203,6 +203,8 @@ data class UserPrefs(
     @SerialName("budget_mode") val budgetMode: Boolean = false,
     /** aura-2 speaker, or empty for the device's own speech engine. */
     @SerialName("tts_voice") val ttsVoice: String = "",
+    /** "default" | "low" | "medium" | "high" — how hard reasoning models think. */
+    @SerialName("reasoning_effort") val reasoningEffort: String = "low",
 )
 
 @Serializable
@@ -239,4 +241,5 @@ data class PrefsPatch(
     val cfAnalyticsKey: String? = null,
     val cfAccountId: String? = null,
     @SerialName("tts_voice") val ttsVoice: String? = null,
+    @SerialName("reasoning_effort") val reasoningEffort: String? = null,
 )

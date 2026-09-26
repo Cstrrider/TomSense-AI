@@ -273,6 +273,44 @@ class SettingsActivity : ComponentActivity() {
                             }
 
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                            // How hard reasoning models think on an ordinary
+                            // message. Think mode still asks for the maximum.
+                            Column(Modifier.fillMaxWidth()) {
+                                Text("Reasoning level", style = MaterialTheme.typography.bodyLarge)
+                                Hint(
+                                    "How much reasoning models think before answering (Default = " +
+                                        "the model's own choice). Higher is " +
+                                        "slower and uses more tokens; Low is usually plenty. Think " +
+                                        "mode always uses High. Ignored by models that don't reason.",
+                                )
+                                Row(
+                                    Modifier.fillMaxWidth().padding(top = 8.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    listOf(
+                                        "default" to "Default",
+                                        "low" to "Low",
+                                        "medium" to "Medium",
+                                        "high" to "High",
+                                    ).forEach { (value, label) ->
+                                        androidx.compose.material3.FilterChip(
+                                            selected = prefs.reasoningEffort == value,
+                                            onClick = {
+                                                lifecycleScope.launch {
+                                                    runCatching {
+                                                        prefs = app.providers.setPrefs(
+                                                            UpdatePrefs(reasoningEffort = value),
+                                                        )
+                                                    }.onFailure { error = it.message }
+                                                }
+                                            },
+                                            label = { Text(label) },
+                                        )
+                                    }
+                                }
+                            }
+
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                             // Separate from the token below: the token also
                             // gives the Today card a MEASURED neuron count,
                             // and wanting that is not wanting models swapped.

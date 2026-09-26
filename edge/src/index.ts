@@ -174,6 +174,7 @@ export default {
             auto_route?: boolean;
             auto_memory?: boolean;
             budget_mode?: boolean;
+            reasoning_effort?: string;
             cfAnalyticsKey?: string;
             cfAccountId?: string;
           };
