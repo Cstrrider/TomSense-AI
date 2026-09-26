@@ -1,5 +1,7 @@
 package org.tomsense.android
 
+import androidx.compose.material3.FilterChip
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material.icons.filled.Newspaper
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -115,6 +117,14 @@ class SettingsActivity : ComponentActivity() {
                 var adding by remember { mutableStateOf(false) }
                 var query by remember { mutableStateOf("") }
                 var prefs by remember { mutableStateOf(UserPrefs()) }
+                // One model's own thinking level; "" returns it to the everyday level.
+                val setModelThinking: (String, String) -> Unit = { spec, level ->
+                    lifecycleScope.launch {
+                        runCatching {
+                            prefs = app.providers.setPrefs(UpdatePrefs(modelReasoning = mapOf(spec to level)))
+                        }.onFailure { error = it.message }
+                    }
+                }
                 var imageModels by remember { mutableStateOf<List<ModelOption>>(emptyList()) }
                 var usage by remember { mutableStateOf<UsageToday?>(null) }
                 var ttsVoices by remember { mutableStateOf<List<String>>(emptyList()) }
@@ -211,6 +221,9 @@ class SettingsActivity : ComponentActivity() {
                                 current = defaultModel.ifBlank { null },
                                 allowClear = false,
                                 emptyLabel = "First available",
+                                thinking = prefs.modelReasoning,
+                                everyday = prefs.reasoningEffort,
+                                onThinking = setModelThinking,
                                 onPick = { value ->
                                     defaultModel = value
                                     lifecycleScope.launch {
@@ -231,6 +244,9 @@ class SettingsActivity : ComponentActivity() {
                                 // models; every other slot from chat models.
                                 models = if (slot.key == "image") imageModels else models,
                                 current = prefs.toolModels.slot(slot.key),
+                                thinking = prefs.modelReasoning,
+                                everyday = prefs.reasoningEffort,
+                                onThinking = setModelThinking,
                                 onPick = { value ->
                                     lifecycleScope.launch {
                                         runCatching {
@@ -276,12 +292,12 @@ class SettingsActivity : ComponentActivity() {
                             // How hard reasoning models think on an ordinary
                             // message. Think mode still asks for the maximum.
                             Column(Modifier.fillMaxWidth()) {
-                                Text("Reasoning level", style = MaterialTheme.typography.bodyLarge)
+                                Text("Everyday thinking level", style = MaterialTheme.typography.bodyLarge)
                                 Hint(
-                                    "How much reasoning models think before answering (Default = " +
-                                        "the model's own choice). Higher is " +
-                                        "slower and uses more tokens; Low is usually plenty. Think " +
-                                        "mode always uses High. Ignored by models that don't reason.",
+                                    "How much reasoning models think before answering, for any model " +
+                                        "without its own Thinking setting above (Default = the model's " +
+                                        "own choice). Higher is slower and uses more tokens. Think mode " +
+                                        "always uses High.",
                                 )
                                 Row(
                                     Modifier.fillMaxWidth().padding(top = 8.dp),
@@ -976,6 +992,11 @@ private fun SlotRow(
     allowClear: Boolean = true,
     /** Shown when nothing is set. "Default" reads as nonsense on the default row. */
     emptyLabel: String = "Default",
+    /** Per-model thinking levels (spec -> level), and the everyday fallback. */
+    thinking: Map<String, String> = emptyMap(),
+    everyday: String = "low",
+    /** (spec, level) — "" puts the model back on the everyday level. */
+    onThinking: ((String, String) -> Unit)? = null,
 ) {
     var open by remember { mutableStateOf(false) }
 
@@ -1010,6 +1031,48 @@ private fun SlotRow(
                             },
                         )
                     }
+                }
+            }
+        }
+
+        // Thinking, for the model in this slot — only the controls it
+        // actually accepts. Stored per MODEL, so it follows the model into
+        // every slot it fills.
+        val spec = current
+        val ctl = spec?.let { s -> models.firstOrNull { it.value == s }?.thinking }
+        if (spec != null && onThinking != null && ctl != null && (ctl.effort || ctl.off)) {
+            val own = thinking[spec] ?: ""
+            val choices = buildList {
+                add("" to "Everyday (${everyday.replaceFirstChar { it.uppercase() }})")
+                if (ctl.off) add("off" to "Off")
+                if (ctl.effort) {
+                    add("low" to "Low")
+                    add("medium" to "Medium")
+                    add("high" to "High")
+                } else {
+                    // On/off-only models (Nemotron): "on" is the model's own default.
+                    add("default" to "On")
+                }
+            }
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(top = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Thinking",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                choices.forEach { (value, label) ->
+                    FilterChip(
+                        selected = own == value,
+                        onClick = { onThinking(spec, value) },
+                        label = { Text(label, style = MaterialTheme.typography.labelSmall) },
+                    )
                 }
             }
         }

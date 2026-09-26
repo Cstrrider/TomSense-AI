@@ -60,9 +60,31 @@ export interface UserPrefs {
    * "high" regardless. Only sent to models that actually reason.
    */
   reasoning_effort: ReasoningLevel;
+  /**
+   * Per-model thinking, keyed by model spec ("cf::@cf/google/..."). Wins over
+   * reasoning_effort for that model wherever it is used. "default" means
+   * send nothing (the model's own behaviour); "off" disables thinking on
+   * models that support it.
+   */
+  model_reasoning: Record<string, ModelThinking>;
 }
 
 export type ReasoningEffort = "low" | "medium" | "high";
+export type Thinking = "off" | ReasoningEffort;
+export type ModelThinking = "default" | Thinking;
+const MODEL_LEVELS: ModelThinking[] = ["default", "off", "low", "medium", "high"];
+const asModelLevel = (v: unknown): ModelThinking | undefined =>
+  MODEL_LEVELS.includes(v as ModelThinking) ? (v as ModelThinking) : undefined;
+const cleanModelMap = (raw: unknown): Record<string, ModelThinking> => {
+  const out: Record<string, ModelThinking> = {};
+  if (raw && typeof raw === "object") {
+    for (const [k, v] of Object.entries(raw)) {
+      const lv = asModelLevel(v);
+      if (k.trim() && lv) out[k.trim()] = lv;
+    }
+  }
+  return out;
+};
 export type ReasoningLevel = "default" | ReasoningEffort;
 const LEVELS: ReasoningLevel[] = ["default", "low", "medium", "high"];
 const asLevel = (v: unknown): ReasoningLevel | undefined =>
@@ -79,6 +101,7 @@ const DEFAULTS: UserPrefs = {
   auto_memory: true,
   budget_mode: false,
   reasoning_effort: "low",
+  model_reasoning: {},
 };
 
 /**
@@ -120,6 +143,7 @@ export async function getPrefs(env: Env, userId: string): Promise<UserPrefs> {
     auto_memory: parsed.auto_memory ?? DEFAULTS.auto_memory,
     budget_mode: parsed.budget_mode ?? DEFAULTS.budget_mode,
     reasoning_effort: asLevel(parsed.reasoning_effort) ?? DEFAULTS.reasoning_effort,
+    model_reasoning: cleanModelMap(parsed.model_reasoning),
   };
 }
 
@@ -143,6 +167,8 @@ export async function setPrefs(
     auto_memory?: boolean;
     budget_mode?: boolean;
     reasoning_effort?: string;
+    /** Merged per key; an empty string removes that model's own level. */
+    model_reasoning?: Record<string, string>;
   },
 ): Promise<UserPrefs> {
   const current = await getPrefs(env, who.userId);
@@ -166,6 +192,17 @@ export async function setPrefs(
     auto_memory: patch.auto_memory ?? current.auto_memory,
     budget_mode: patch.budget_mode ?? current.budget_mode,
     reasoning_effort: asLevel(patch.reasoning_effort) ?? current.reasoning_effort,
+    model_reasoning: (() => {
+      const next = { ...current.model_reasoning };
+      for (const [k, v] of Object.entries(patch.model_reasoning ?? {})) {
+        if (v === "") delete next[k];
+        else {
+          const lv = asModelLevel(v);
+          if (lv && k.trim()) next[k.trim()] = lv;
+        }
+      }
+      return next;
+    })(),
   };
 
   await env.DB.prepare(`UPDATE users SET prefs = ? WHERE id = ?`)

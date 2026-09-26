@@ -175,6 +175,7 @@ export default {
             auto_memory?: boolean;
             budget_mode?: boolean;
             reasoning_effort?: string;
+            model_reasoning?: Record<string, string>;
             cfAnalyticsKey?: string;
             cfAccountId?: string;
           };
@@ -367,6 +368,7 @@ async function chat(req: Request, env: Env, who: Principal): Promise<Response> {
         // key, not a data URL.
         sourceImageKeys: body.messages.flatMap((m) => m.attachments ?? []),
         reasoningEffort: routed.reasoningEffort,
+        fallbackReasoning: routed.fallbackReasoning,
         // Rendered as the first chunks, so a surprising model choice is
         // never silent. That visibility is the point of the override.
         notices: routed.notices,

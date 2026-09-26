@@ -19,7 +19,7 @@
  */
 
 import type { StreamEvent, ToolCall, Usage, Provider, ChatMessage, Env } from "./types";
-import { modelCapabilities } from "./capabilities";
+import { modelCapabilities, thinkingControls } from "./capabilities";
 import { flattenForTextModel, chatCompletionsUrl } from "./providers";
 
 /** No token at all for this long → treat the stream as stalled. */
@@ -37,7 +37,7 @@ export interface RoundOptions {
   temperature?: number;
   maxTokens?: number;
   /** Model string to retry with if the primary stalls. */
-  fallback?: { provider: Provider; modelId: string };
+  fallback?: { provider: Provider; modelId: string; reasoningEffort?: "off" | "low" | "medium" | "high" };
   signal?: AbortSignal;
   /**
    * Workers AI binding, required for `cf`-kind providers.
@@ -63,7 +63,30 @@ export interface RoundOptions {
    * token budget on invisible reasoning, so the default is set rather than
    * omitted.
    */
-  reasoningEffort?: "low" | "medium" | "high";
+  reasoningEffort?: "off" | "low" | "medium" | "high";
+}
+
+/**
+ * Put the thinking level on a request body, in the form this model accepts.
+ * "off" → chat_template_kwargs.enable_thinking=false; a level → reasoning_effort.
+ * Anything the model does not accept is left out rather than sent and ignored
+ * (or rejected). gpt-oss keeps its explicit "low" default: without one it
+ * spends the whole budget reasoning invisibly.
+ */
+function applyThinking(
+  target: Record<string, unknown>,
+  provider: Provider,
+  modelId: string,
+  level: RoundOptions["reasoningEffort"],
+): void {
+  const ctl = thinkingControls(provider, modelId);
+  if (level === "off") {
+    if (ctl.off) target["chat_template_kwargs"] = { enable_thinking: false };
+    else if (modelId.includes("gpt-oss")) target["reasoning_effort"] = "low";
+    return;
+  }
+  if (level && ctl.effort) target["reasoning_effort"] = level;
+  else if (modelId.includes("gpt-oss")) target["reasoning_effort"] = "low";
 }
 
 /**
@@ -186,13 +209,7 @@ async function buildRequest(
     ...provider.extraBody, // per-provider passthrough (OpenRouter routing, etc.)
   };
   if (tools?.length) body["tools"] = tools;
-  if (modelId.includes("gpt-oss")) {
-    body["reasoning_effort"] = opts.reasoningEffort ?? "low";
-  } else if (opts.reasoningEffort && caps.reasoning) {
-    // Reasoning models only: the level is now set on every turn, and some
-    // OpenAI-compatible endpoints reject the field on models that don't think.
-    body["reasoning_effort"] = opts.reasoningEffort;
-  }
+  applyThinking(body, provider, modelId, opts.reasoningEffort);
   if (temperature !== undefined) body["temperature"] = temperature;
   if (maxTokens !== undefined) body["max_tokens"] = maxTokens;
 
@@ -388,11 +405,7 @@ async function* streamWorkersAi(opts: RoundOptions): AsyncGenerator<StreamEvent>
     }
     // Same rule as the fetch path: gpt-oss needs an explicit effort or it
     // spends the whole budget reasoning invisibly.
-    if (modelId.includes("gpt-oss")) {
-      input["reasoning_effort"] = opts.reasoningEffort ?? "low";
-    } else if (opts.reasoningEffort && caps.reasoning) {
-      input["reasoning_effort"] = opts.reasoningEffort;
-    }
+    applyThinking(input, opts.provider, modelId, opts.reasoningEffort);
 
     // Cache affinity travels in the binding options, not a header.
     const runOpts = opts.session ? { sessionId: opts.session } : undefined;
@@ -522,7 +535,14 @@ export async function* streamWithFallback(
 
   let fbTerminal: Extract<StreamEvent, { type: "done" }> | null = null;
   for await (const ev of streamRound(
-    { ...opts, provider: fb.provider, modelId: fb.modelId, fallback: undefined },
+    {
+      ...opts,
+      provider: fb.provider,
+      modelId: fb.modelId,
+      fallback: undefined,
+      // The fallback's own level, not the primary's.
+      reasoningEffort: fb.reasoningEffort,
+    },
     urlFor(fb.provider),
   )) {
     if (ev.type === "done") {

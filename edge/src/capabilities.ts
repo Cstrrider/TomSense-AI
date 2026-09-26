@@ -207,6 +207,30 @@ function declared(provider: Provider | null, modelId: string): Capabilities | nu
   return null;
 }
 
+/**
+ * Which thinking controls a model accepts: an effort level and/or an off
+ * switch. Swept from the Workers AI input schemas on 2026-09-26 — they differ
+ * per family: Nemotron takes only the on/off toggle (reasoning_effort is
+ * silently ignored), gpt-oss only effort, older reasoning models neither.
+ * Other providers get the OpenAI-standard reasoning_effort and no off switch.
+ */
+export function thinkingControls(
+  provider: Provider | null,
+  modelId: string,
+): { effort: boolean; off: boolean } {
+  if (!modelCapabilities(provider, modelId).reasoning) return { effort: false, off: false };
+  const id = modelId.toLowerCase();
+  if (provider?.kind === "cf" || id.startsWith("@cf/")) {
+    if (id.includes("gpt-oss")) return { effort: true, off: false };
+    if (id.includes("nemotron-3")) return { effort: false, off: true };
+    if (["gemma-4", "glm-", "kimi", "deepseek-v4", "qwen3.8"].some((h) => id.includes(h))) {
+      return { effort: true, off: true };
+    }
+    return { effort: false, off: false };
+  }
+  return { effort: true, off: false };
+}
+
 export function modelCapabilities(
   provider: Provider | null,
   modelId: string,

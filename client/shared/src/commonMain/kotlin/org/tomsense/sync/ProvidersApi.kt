@@ -108,6 +108,9 @@ data class WireModel(
 )
 
 @Serializable
+data class ThinkingControls(val effort: Boolean = false, val off: Boolean = false)
+
+@Serializable
 data class ModelOption(
     val value: String,
     val label: String,
@@ -115,6 +118,8 @@ data class ModelOption(
     val vision: Boolean = false,
     val reasoning: Boolean = false,
     val context: Int? = null,
+    /** Which thinking controls this model accepts; null or both false = none. */
+    val thinking: ThinkingControls? = null,
 )
 
 @Serializable
@@ -205,6 +210,8 @@ data class UserPrefs(
     @SerialName("tts_voice") val ttsVoice: String = "",
     /** "default" | "low" | "medium" | "high" — how hard reasoning models think. */
     @SerialName("reasoning_effort") val reasoningEffort: String = "low",
+    /** Per-model thinking level by model spec; absent = the everyday level. */
+    @SerialName("model_reasoning") val modelReasoning: Map<String, String> = emptyMap(),
 )
 
 @Serializable
@@ -242,4 +249,6 @@ data class PrefsPatch(
     val cfAccountId: String? = null,
     @SerialName("tts_voice") val ttsVoice: String? = null,
     @SerialName("reasoning_effort") val reasoningEffort: String? = null,
+    /** Merged per key on the server; "" clears a model back to the everyday level. */
+    @SerialName("model_reasoning") val modelReasoning: Map<String, String>? = null,
 )

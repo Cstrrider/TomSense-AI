@@ -114,7 +114,8 @@ interface RunRecord {
    */
   sourceImageKeys: string[];
   /** "high" when think mode routed this turn. */
-  reasoningEffort: "low" | "medium" | "high" | null;
+  reasoningEffort: "off" | "low" | "medium" | "high" | null;
+  fallbackReasoning?: "off" | "low" | "medium" | "high" | null;
   error?: string;
 }
 
@@ -183,7 +184,8 @@ export class DetachedRun implements DurableObject {
       lastUserText?: string;
       sourceImageKeys?: string[];
       notices?: string[];
-      reasoningEffort?: "low" | "medium" | "high" | null;
+      reasoningEffort?: "off" | "low" | "medium" | "high" | null;
+      fallbackReasoning?: "off" | "low" | "medium" | "high" | null;
     };
 
     this.record = {
@@ -207,6 +209,7 @@ export class DetachedRun implements DurableObject {
       attachments: [],
       sourceImageKeys: body.sourceImageKeys ?? [],
       reasoningEffort: body.reasoningEffort ?? null,
+      fallbackReasoning: body.fallbackReasoning ?? null,
     };
     await this.persist(true);
 
@@ -576,11 +579,19 @@ export class DetachedRun implements DurableObject {
     const provider = await resolveProvider(this.env, rec.userId, providerId);
     if (!provider) throw new Error(`unknown provider ${providerId}`);
 
-    let fallback: { provider: NonNullable<typeof provider>; modelId: string } | undefined;
+    let fallback:
+      | { provider: NonNullable<typeof provider>; modelId: string; reasoningEffort?: "off" | "low" | "medium" | "high" }
+      | undefined;
     if (rec.fallbackModel) {
       const fb = parseModelStr(rec.fallbackModel, rec.fallbackModel);
       const fbProvider = await resolveProvider(this.env, rec.userId, fb.providerId);
-      if (fbProvider) fallback = { provider: fbProvider, modelId: fb.modelId };
+      if (fbProvider) {
+        fallback = {
+          provider: fbProvider,
+          modelId: fb.modelId,
+          reasoningEffort: rec.fallbackReasoning ?? undefined,
+        };
+      }
     }
 
     this.abort = new AbortController();

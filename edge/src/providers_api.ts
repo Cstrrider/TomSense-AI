@@ -19,7 +19,7 @@ import type { Env, Principal, ModelEntry } from "./types";
 import { encryptKey, decryptKey } from "./crypto";
 import { CF_MODELS } from "./cf_catalog";
 import { CF_BUILTIN_ID } from "./providers";
-import { isReasoningModel, isVisionModel, modelCapabilities, warmCfCapabilities } from "./capabilities";
+import { isReasoningModel, isVisionModel, modelCapabilities, warmCfCapabilities, thinkingControls } from "./capabilities";
 
 export interface ProviderView {
   id: string;
@@ -334,6 +334,8 @@ export interface ModelOption {
   vision: boolean;
   reasoning: boolean;
   context: number | null;
+  /** Thinking controls this model accepts — drives the picker chips. */
+  thinking?: { effort: boolean; off: boolean };
 }
 
 /** Every selectable model across enabled providers, for the client picker. */
@@ -367,6 +369,11 @@ export async function listModels(env: Env, who: Principal): Promise<ModelOption[
         // must agree, or the tags promise something the request then strips.
         vision: m.vision ?? caps(p, m.id).vision,
         reasoning: m.reasoning ?? caps(p, m.id).reasoning,
+        // Which thinking chips the picker offers for this model.
+        thinking: thinkingControls(
+          { id: p.id, name: p.name, kind: p.kind, baseUrl: p.baseUrl, apiKey: "", models: p.models, extraBody: {} } as never,
+          m.id,
+        ),
         context: m.context ?? caps(p, m.id).context,
       });
     }

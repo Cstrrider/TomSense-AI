@@ -24,7 +24,7 @@
 import type { Env, Principal, ChatMessage } from "./types";
 import { CF_BUILTIN_ID } from "./providers";
 import { listModels, getDefaultModel, resolveChatModel } from "./providers_api";
-import { getPrefs, type ToolModels, type ReasoningEffort } from "./prefs";
+import { getPrefs, type ToolModels, type Thinking } from "./prefs";
 import { neuronsToday } from "./cf_analytics";
 import { runTaskModel } from "./task_model";
 
@@ -48,7 +48,9 @@ export interface RoutingDecision {
   /** Used on stall, and as the budget-downshift target. */
   fallbackModel: string | null;
   /** `high` when think mode is on; the provider layer decides what to do. */
-  reasoningEffort: ReasoningEffort | null;
+  reasoningEffort: Thinking | null;
+  /** The fallback model's OWN level — it must not inherit the primary's. */
+  fallbackReasoning: Thinking | null;
   /**
    * User-visible explanations of any override, rendered in the transcript.
    * Stable streams these as the first chunk so a surprising model choice is
@@ -115,7 +117,7 @@ export async function routeChat(
 
   let model: string | null = opts.requested?.trim() || null;
   const explicit = Boolean(model);
-  let reasoningEffort: ReasoningEffort | null = null;
+  let reasoningEffort: Thinking | null = null;
 
   // ── 2. Think mode ──────────────────────────────────────────────────────
   // Only when the user did not pick a model for this turn: an explicit pick
@@ -192,16 +194,23 @@ export async function routeChat(
     notices.push(downshifted.notice);
   }
 
-  // ── 7. Everyday reasoning level ────────────────────────────────────────
-  // Think mode already asked for "high". Otherwise the user's setting; the
-  // stream layer only sends it to models that actually reason.
-  if (!opts.think && prefs.reasoning_effort !== "default") {
-    reasoningEffort = prefs.reasoning_effort;
-  }
+  // ── 7. Thinking level ──────────────────────────────────────────────────
+  // Think mode keeps its "high". Otherwise the model's own level from the
+  // picker, else the everyday level. The stream layer only sends what the
+  // model accepts (see thinkingControls).
+  const levelFor = (spec: string | null): Thinking | null => {
+    if (!spec) return null;
+    const own = prefs.model_reasoning[spec];
+    if (own) return own === "default" ? null : own;
+    return prefs.reasoning_effort === "default" ? null : prefs.reasoning_effort;
+  };
+  if (!(opts.think && reasoningEffort === "high")) reasoningEffort = levelFor(model);
 
+  const fallbackModel = slotFallback ?? (await defaultFallback(env, who, model));
   return {
     model,
-    fallbackModel: slotFallback ?? (await defaultFallback(env, who, model)),
+    fallbackModel,
+    fallbackReasoning: levelFor(fallbackModel),
     reasoningEffort,
     notices,
   };
